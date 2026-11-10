@@ -4,30 +4,79 @@
  */
 import {
   createResourceMonitor,
+  detectMachine,
+  fetchCatalog,
   fetchGmailInbox,
   fetchMarkets,
   fetchSeries,
   friendlyGmailError,
+  MODEL_TASKS,
   normalizeWatchlist,
   parseBundle,
+  scoreModels,
   serializeBundle,
+  sortForDisplay,
   validateGmailSetup,
+  type CatalogModel,
   type CryptoCoin,
   type CryptoRange,
   type CryptoSeries,
+  type ExecFileLike,
   type FetchLike,
+  type FitScenario,
   type GmailCheckResult,
+  type MachineProfile,
+  type ModelTask,
   type ResourceStats,
+  type ScoredModel,
   type TopProcess,
   type WidgetBundleEntry
 } from '@toolbox/widgets'
-import { loadSettings, saveSettings, type StoredSettings } from './config.js'
+import { loadCatalogCache, loadSettings, saveCatalogCache, saveSettings, type StoredSettings } from './config.js'
 
-export const USER_AGENT = 'toolbox-mcp/0.1.0 (+https://github.com/28121978444/toolbox-mcp)'
+function isCatalogModel(value: unknown): value is CatalogModel {
+  const candidate = value as Partial<CatalogModel> | null
+  return (
+    typeof candidate?.id === 'string' &&
+    typeof candidate.task === 'string' &&
+    typeof candidate.runtimeRamBytes === 'number' &&
+    Array.isArray(candidate.formats)
+  )
+}
+
+export const USER_AGENT = 'toolbox-mcp/0.2.0 (+https://github.com/28121978444/toolbox-mcp)'
 const SERIES_TTL_MS = 30 * 60 * 1000
+const CATALOG_TTL_MS = 6 * 60 * 60 * 1000
+const CATALOG_PER_TASK = 24
 
 interface ServicesOptions {
   fetchImpl?: FetchLike
+  execFileImpl?: ExecFileLike
+}
+
+export interface LlamafarmScoreInput {
+  scenario: FitScenario
+  search?: string
+  minParams?: number | null
+  maxParams?: number | null
+  /** Wave 3: suppress reds that carry no offload hints. */
+  onlyReachable?: boolean
+}
+
+export interface LlamafarmGroup {
+  task: ModelTask
+  label: string
+  icon: string
+  models: ScoredModel[]
+}
+
+export interface LlamafarmScoreResult {
+  machine: MachineProfile
+  scenario: FitScenario
+  fetchedAt: number | null
+  groups: LlamafarmGroup[]
+  total: number
+  error: string | null
 }
 
 export interface CryptoState {
@@ -75,6 +124,10 @@ export function createServices(options: ServicesOptions = {}) {
     error: null
   }
   let monitor = createResourceMonitor({})
+  let machine: MachineProfile | null = null
+  let catalog: { models: CatalogModel[]; fetchedAt: number | null } | null = null
+  let catalogError: string | null = null
+  const detectOptions = { fetchImpl: options.fetchImpl, execFileImpl: options.execFileImpl }
 
   async function init(): Promise<void> {
     settings.current = await loadSettings()
@@ -87,6 +140,10 @@ export function createServices(options: ServicesOptions = {}) {
       unread: 0,
       messages: [],
       error: null
+    }
+    const cached = await loadCatalogCache()
+    if (cached) {
+      catalog = { models: cached.models.filter(isCatalogModel), fetchedAt: cached.fetchedAt }
     }
   }
 
@@ -242,6 +299,89 @@ export function createServices(options: ServicesOptions = {}) {
     return { applied, missingCredentials }
   }
 
+  // --- llamafarm: model catalog + fit scoring --------------------------------
+
+  async function llamafarmStatus(forceDetect = false): Promise<MachineProfile> {
+    if (!machine || forceDetect) {
+      machine = await detectMachine(detectOptions)
+    }
+    return machine
+  }
+
+  /**
+   * The model catalog, cached on disk for CATALOG_TTL_MS. Wave 1: when
+   * Ollama is installed only GGUF repos are requested, since those are the
+   * ones the machine can actually run.
+   */
+  async function llamafarmCatalog(forceRefresh = false): Promise<{
+    models: CatalogModel[]
+    fetchedAt: number | null
+    error: string | null
+  }> {
+    const fresh = catalog !== null && catalog.fetchedAt !== null && Date.now() - catalog.fetchedAt < CATALOG_TTL_MS
+    if (!forceRefresh && (fresh || (catalog !== null && catalogError !== null))) {
+      return { models: catalog?.models ?? [], fetchedAt: catalog?.fetchedAt ?? null, error: catalogError }
+    }
+    const profile = await llamafarmStatus(forceRefresh)
+    let models: CatalogModel[]
+    let fetchedAt: number | null
+    try {
+      models = await fetchCatalog({
+        formats: profile.ollama.installed ? ['gguf'] : ['gguf', 'safetensors'],
+        perTask: CATALOG_PER_TASK,
+        fetchImpl: options.fetchImpl
+      })
+      fetchedAt = Date.now()
+      catalogError = null
+      await saveCatalogCache({ models, fetchedAt }).catch(() => {})
+    } catch (cause) {
+      catalogError = cause instanceof Error ? cause.message : String(cause)
+      models = catalog?.models ?? []
+      fetchedAt = catalog?.fetchedAt ?? null
+    }
+    catalog = { models, fetchedAt }
+    return { models, fetchedAt, error: catalogError }
+  }
+
+  /**
+   * Score the catalog against the machine. This powers both wave 2 (live
+   * color marks as filters change) and wave 3 (submitted, ordered verdicts).
+   */
+  async function llamafarmScore(input: LlamafarmScoreInput): Promise<LlamafarmScoreResult> {
+    const [profile, { models, fetchedAt, error }] = await Promise.all([llamafarmStatus(), llamafarmCatalog()])
+    const search = input.search?.trim().toLowerCase() ?? ''
+    const filtered = models.filter((model) => {
+      if (search && !model.id.toLowerCase().includes(search) && !model.label.toLowerCase().includes(search)) {
+        return false
+      }
+      if (input.minParams != null && (model.paramsBillions ?? 0) < input.minParams) return false
+      if (input.maxParams != null && (model.paramsBillions ?? Infinity) > input.maxParams) return false
+      return true
+    })
+    const scored = scoreModels({ models: filtered, machine: profile, scenario: input.scenario })
+    const visible = input.onlyReachable ? scored.filter((m) => m.verdict !== 'red' || m.hints.length > 0) : scored
+    const byTask = new Map<ModelTask, ScoredModel[]>()
+    for (const entry of visible) {
+      const list = byTask.get(entry.task) ?? []
+      list.push(entry)
+      byTask.set(entry.task, list)
+    }
+    const groups: LlamafarmGroup[] = MODEL_TASKS.filter((info) => byTask.has(info.task)).map((info) => ({
+      task: info.task,
+      label: info.label,
+      icon: info.icon,
+      models: sortForDisplay(byTask.get(info.task) ?? [])
+    }))
+    return { machine: profile, scenario: input.scenario, fetchedAt, groups, total: visible.length, error }
+  }
+
+  /** Re-detect the machine and force a catalog refetch. */
+  async function llamafarmRefresh(): Promise<{ machine: MachineProfile; catalog: number }> {
+    machine = await detectMachine(detectOptions)
+    await llamafarmCatalog(true)
+    return { machine: await llamafarmStatus(), catalog: catalog?.models.length ?? 0 }
+  }
+
   return {
     init,
     get crypto() {
@@ -258,6 +398,10 @@ export function createServices(options: ServicesOptions = {}) {
     gmailCheck,
     resourceStats,
     resourceProcesses,
+    llamafarmStatus,
+    llamafarmCatalog,
+    llamafarmScore,
+    llamafarmRefresh,
     exportWidgets,
     importWidgets
   }

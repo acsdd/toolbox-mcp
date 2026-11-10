@@ -64,3 +64,29 @@ export async function saveSettings(settings: StoredSettings): Promise<void> {
     mode: 0o600
   })
 }
+
+/** On-disk cache for the llamafarm model catalog (HuggingFace data). */
+export interface CatalogCache {
+  models: unknown[]
+  fetchedAt: number
+}
+
+export function catalogCachePath(): string {
+  return join(configDir(), 'llamafarm-cache.json')
+}
+
+export async function loadCatalogCache(): Promise<CatalogCache | null> {
+  try {
+    const raw = JSON.parse(await readFile(catalogCachePath(), 'utf8')) as Partial<CatalogCache>
+    if (!Array.isArray(raw.models) || typeof raw.fetchedAt !== 'number') return null
+    return { models: raw.models, fetchedAt: raw.fetchedAt }
+  } catch {
+    return null
+  }
+}
+
+export async function saveCatalogCache(cache: CatalogCache): Promise<void> {
+  const target = catalogCachePath()
+  await mkdir(dirname(target), { recursive: true })
+  await writeFile(target, JSON.stringify(cache), { encoding: 'utf8', mode: 0o600 })
+}

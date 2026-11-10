@@ -12,7 +12,7 @@ import { startPanel } from './panel.js'
 const services = createServices()
 await services.init()
 
-const server = new McpServer({ name: 'toolbox-mcp', version: '0.1.0' })
+const server = new McpServer({ name: 'toolbox-mcp', version: '0.2.0' })
 
 const json = (value: unknown) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }]
@@ -100,6 +100,45 @@ server.tool(
   async () => json(await services.resourceProcesses())
 )
 
+// --- llamafarm: local model catalog -----------------------------------------
+
+server.tool(
+  'llamafarm_status',
+  'Machine profile for running local models: RAM, cores, GPUs, Ollama install.',
+  { redetect: z.boolean().optional().describe('Force a fresh detection pass') },
+  async ({ redetect }) => json(await services.llamafarmStatus(redetect ?? false))
+)
+
+server.tool(
+  'llamafarm_catalog',
+  'HuggingFace model catalog (top per task) with real file sizes; cached 6h. Wave 1 requests only formats the machine can run.',
+  { refresh: z.boolean().optional().describe('Ignore the cache and refetch') },
+  async ({ refresh }) => json(await services.llamafarmCatalog(refresh ?? false))
+)
+
+server.tool(
+  'llamafarm_score',
+  'Score catalog models green/yellow/red against this machine for a scenario.',
+  {
+    scenario: z.enum(['now', 'total']).describe("'now' = resources free right now, 'total' = full machine"),
+    search: z.string().optional().describe('Filter by repo id or name (substring)'),
+    minParams: z.number().optional().describe('Minimum parameter count in billions'),
+    maxParams: z.number().optional().describe('Maximum parameter count in billions'),
+    onlyReachable: z
+      .boolean()
+      .optional()
+      .describe('Suppress red models that have no offload path (wave 3 default)')
+  },
+  async (input) => json(await services.llamafarmScore(input))
+)
+
+server.tool(
+  'llamafarm_refresh',
+  'Re-detect the machine and force a full catalog refetch from HuggingFace.',
+  {},
+  async () => json(await services.llamafarmRefresh())
+)
+
 // --- portable widgets -------------------------------------------------------
 
 server.tool(
@@ -124,5 +163,5 @@ server.tool(
 
 await server.connect(new StdioServerTransport())
 
-const panelPort = await startPanel(services)
-console.error(`toolbox-mcp ready. Ops panel: http://127.0.0.1:${panelPort}/`)
+const panel = await startPanel(services)
+console.error(`toolbox-mcp ready. Ops panel: http://127.0.0.1:${panel.port}/`)

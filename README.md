@@ -17,7 +17,26 @@ Part of the Toolbox family:
 | `crypto_status` / `crypto_refresh` / `crypto_set_watchlist` / `crypto_series` | CoinGecko watchlist and price history |
 | `gmail_status` / `gmail_check` / `gmail_connect` / `gmail_disconnect` | Read-only Gmail IMAP checks (App Password, 16 chars) |
 | `system_stats` / `system_processes` | CPU / memory / disk and top processes |
+| `llamafarm_status` / `llamafarm_catalog` / `llamafarm_score` / `llamafarm_refresh` | Model Farm: HuggingFace catalog fit-scored against this machine |
 | `widgets_export` / `widgets_import` | Portable widget bundles (same format as Toolbox and the NAS app) |
+
+## Ops panel
+
+`http://127.0.0.1:3851` (override with `TOOLBOX_MCP_PORT`), localhost only.
+
+- **Overview** — the shared widgets, live.
+- **Model Farm** — top HuggingFace models per skill (Text Generation, Text to Image,
+  Text to Speech, …) as columns, color-marked against this machine:
+  green = runs now, yellow = runs if you free resources, red = doesn't fit.
+  Wave 1 detects the machine (RAM, cores, GPU VRAM, Ollama) and only requests
+  compatible formats (GGUF when Ollama is present). Wave 2 marks models live as
+  you filter; wave 3 (Submit) returns the ordered verdict and keeps only reds
+  that have an offload path — click a model for hints like `--n-gpu-layers`.
+  The catalog is cached in `~/.toolbox-mcp/llamafarm-cache.json` for 6 hours.
+- **Terminal** — a local PowerShell session streamed to the browser. It runs
+  with your user rights; the panel never binds beyond 127.0.0.1.
+
+![Model Farm](docs/panel-model-farm.png)
 
 ## Run
 
