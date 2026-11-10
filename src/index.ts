@@ -3,16 +3,39 @@
  * toolbox-mcp: private local MCP server (stdio) exposing the shared Toolbox
  * widgets, plus a localhost ops panel on port 3851 (configurable).
  */
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { createServices } from './services.js'
 import { startPanel } from './panel.js'
+import { jsonSchemaToZodShape } from './remote.js'
 
-const services = createServices()
+const server = new McpServer({ name: 'toolbox-mcp', version: '0.4.0' })
+
+// Remote-server marketplace modules register their tools here at runtime.
+const remoteRegistrations = new Map<string, RegisteredTool[]>()
+const services = createServices({
+  onRemoteTools: (moduleId, tools) => {
+    remoteRegistrations.get(moduleId)?.forEach((tool) => tool.remove())
+    remoteRegistrations.set(
+      moduleId,
+      tools.map((tool) =>
+        server.tool(
+          tool.name,
+          tool.description,
+          jsonSchemaToZodShape(tool.inputSchema),
+          async (args) => (await tool.call(args as Record<string, unknown>)) as CallToolResult
+        )
+      )
+    )
+  },
+  onRemoteRemoved: (moduleId) => {
+    remoteRegistrations.get(moduleId)?.forEach((tool) => tool.remove())
+    remoteRegistrations.delete(moduleId)
+  }
+})
 await services.init()
-
-const server = new McpServer({ name: 'toolbox-mcp', version: '0.3.0' })
 
 const json = (value: unknown) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }]
@@ -166,6 +189,13 @@ server.tool(
   async ({ id }) => json(await services.marketplaceUninstall(id))
 )
 
+server.tool(
+  'remote_status',
+  'Connected remote MCP servers and how many tools each provides.',
+  {},
+  async () => json(services.remoteStatus())
+)
+
 // --- portable widgets -------------------------------------------------------
 
 server.tool(
@@ -192,3 +222,11 @@ await server.connect(new StdioServerTransport())
 
 const panel = await startPanel(services)
 console.error(`toolbox-mcp ready. Ops panel: http://127.0.0.1:${panel.port}/`)
+
+const restored = await services.remoteRestore()
+for (const entry of restored.connected) {
+  console.error(`remote ${entry.id}: ${entry.tools} tools connected`)
+}
+for (const entry of restored.failed) {
+  console.error(`remote ${entry.id}: reconnect failed — ${entry.error}`)
+}

@@ -480,6 +480,7 @@ function mpRenderDetail() {
     '<div class="mp-tags">' + tags + '</div>' +
     '<div class="mp-actions">' + action + (m.installed && !m.builtIn ? '<span class="mp-state installed">INSTALLED</span>' : '') + '</div>' +
     (mp.note ? '<p class="mp-note">' + esc(mp.note) + '</p>' : '') +
+    (m.endpoint ? '<p class="mp-note">remote endpoint: ' + esc(m.endpoint) + '<br />tool arguments leave this machine</p>' : '') +
     (m.credentialsRequired ? '<p class="mp-note">requires credentials after install</p>' : '') +
     (m.homepage ? '<a href="' + esc(m.homepage) + '" target="_blank" rel="noopener">homepage ↗</a>' : '')
 }

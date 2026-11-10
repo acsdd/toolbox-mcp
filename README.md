@@ -19,6 +19,7 @@ Part of the Toolbox family:
 | `system_stats` / `system_processes` | CPU / memory / disk and top processes |
 | `llamafarm_status` / `llamafarm_catalog` / `llamafarm_score` / `llamafarm_refresh` | Model Farm: HuggingFace catalog fit-scored against this machine |
 | `marketplace_list` / `marketplace_install` / `marketplace_uninstall` | Live module marketplace (public registry, installs via the bundle validator) |
+| `remote_status` | Connected remote MCP servers and their tool counts |
 | `widgets_export` / `widgets_import` | Portable widget bundles (same format as Toolbox and the NAS app) |
 
 ## Ops panel
@@ -43,6 +44,12 @@ Part of the Toolbox family:
   applies its default settings through the portable bundle validator;
   uninstalling keeps your settings. The registry carries data only — never
   executable code. Overview shows cards for installed widgets only.
+  **Remote-server modules** (e.g. LiquidVision crypto derivatives, cve.now
+  vulnerability feed) connect over streamable HTTP and their tools appear
+  here namespaced (`cve_now_list_feed`, `liquidvision_get_funding_rates`).
+  Endpoints must be public HTTPS — loopback/private hosts are rejected.
+  Remote modules are opt-in and badged: their tool arguments leave this
+  machine. Installed remotes reconnect automatically on startup.
 
 ![Model Farm](docs/panel-model-farm.png)
 

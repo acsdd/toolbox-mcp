@@ -36,6 +36,7 @@ import {
   type WidgetBundleEntry
 } from '@toolbox/widgets'
 import { loadCatalogCache, loadSettings, saveCatalogCache, saveSettings, type StoredSettings } from './config.js'
+import { connectRemote, proxiedToolName, type ProxiedTool, type RemoteConnect, type RemoteConnection, type RemoteToolDef } from './remote.js'
 
 function isCatalogModel(value: unknown): value is CatalogModel {
   const candidate = value as Partial<CatalogModel> | null
@@ -47,7 +48,7 @@ function isCatalogModel(value: unknown): value is CatalogModel {
   )
 }
 
-export const USER_AGENT = 'toolbox-mcp/0.3.0 (+https://github.com/28121978444/toolbox-mcp)'
+export const USER_AGENT = 'toolbox-mcp/0.4.0 (+https://github.com/28121978444/toolbox-mcp)'
 const SERIES_TTL_MS = 30 * 60 * 1000
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000
 const CATALOG_PER_TASK = 24
@@ -56,6 +57,12 @@ const REGISTRY_TTL_MS = 5 * 60 * 1000
 interface ServicesOptions {
   fetchImpl?: FetchLike
   execFileImpl?: ExecFileLike
+  /** Remote MCP connection factory (injectable for tests). */
+  remoteConnect?: RemoteConnect
+  /** Called when a remote server connects and its tools are ready to register. */
+  onRemoteTools?: (moduleId: string, tools: ProxiedTool[]) => void
+  /** Called when a remote server is uninstalled and its tools must go. */
+  onRemoteRemoved?: (moduleId: string) => void
 }
 
 export interface LlamafarmScoreInput {
@@ -99,6 +106,7 @@ export interface MarketplaceInstallResult {
   applied: string[]
   missingCredentials: string[]
   note: string | null
+  remoteTools: string[]
 }
 
 export interface CryptoState {
@@ -152,6 +160,8 @@ export function createServices(options: ServicesOptions = {}) {
   let catalogError: string | null = null
   let registry: { modules: MarketplaceModule[]; updated: string; fetchedAt: number } | null = null
   let registryError: string | null = null
+  const remotes = new Map<string, { connection: RemoteConnection; tools: RemoteToolDef[] }>()
+  const remoteConnect = options.remoteConnect ?? connectRemote
   const detectOptions = { fetchImpl: options.fetchImpl, execFileImpl: options.execFileImpl }
 
   async function init(): Promise<void> {
@@ -441,10 +451,65 @@ export function createServices(options: ServicesOptions = {}) {
     }
   }
 
+  /** Connect a remote-server module and surface its tools for registration. */
+  async function remoteConnectModule(module: MarketplaceModule): Promise<ProxiedTool[]> {
+    if (!module.endpoint) throw new Error(`"${module.name}" has no endpoint.`)
+    const existing = remotes.get(module.id)
+    if (existing) await existing.connection.close().catch(() => {})
+    const connection = await remoteConnect(module.endpoint)
+    let tools: RemoteToolDef[]
+    try {
+      tools = await connection.listTools()
+    } catch (cause) {
+      await connection.close().catch(() => {})
+      throw cause
+    }
+    remotes.set(module.id, { connection, tools })
+    const proxied: ProxiedTool[] = tools.map((tool) => ({
+      name: proxiedToolName(module.id, tool.name),
+      description: `[${module.name}] ${tool.description ?? tool.name}`,
+      inputSchema: tool.inputSchema,
+      call: (args) => connection.callTool(tool.name, args)
+    }))
+    options.onRemoteTools?.(module.id, proxied)
+    return proxied
+  }
+
+  async function remoteDisconnectModule(moduleId: string): Promise<void> {
+    const existing = remotes.get(moduleId)
+    if (!existing) return
+    remotes.delete(moduleId)
+    options.onRemoteRemoved?.(moduleId)
+    await existing.connection.close().catch(() => {})
+  }
+
+  /** Reconnect installed remote servers after a restart. Failures are reported, not fatal. */
+  async function remoteRestore(): Promise<{ connected: Array<{ id: string; tools: number }>; failed: Array<{ id: string; error: string }> }> {
+    await marketplaceRegistry()
+    const connected: Array<{ id: string; tools: number }> = []
+    const failed: Array<{ id: string; error: string }> = []
+    for (const id of settings.current.marketplace.installed) {
+      const module = registry?.modules.find((m) => m.id === id && m.type === 'remote-server')
+      if (!module) continue
+      try {
+        const tools = await remoteConnectModule(module)
+        connected.push({ id, tools: tools.length })
+      } catch (cause) {
+        failed.push({ id, error: cause instanceof Error ? cause.message : String(cause) })
+      }
+    }
+    return { connected, failed }
+  }
+
+  function remoteStatus(): Array<{ id: string; tools: number }> {
+    return [...remotes.entries()].map(([id, entry]) => ({ id, tools: entry.tools.length }))
+  }
+
   /**
    * Install a module: widget bundles are applied through the portable bundle
-   * validator; credential-gated modules install enabled and report what still
-   * needs wiring. Built-ins cannot be installed (they already are).
+   * validator; remote servers connect and register proxied tools; credential-
+   * gated modules install enabled and report what still needs wiring.
+   * Built-ins cannot be installed (they already are).
    */
   async function marketplaceInstall(id: unknown): Promise<MarketplaceInstallResult> {
     if (typeof id !== 'string' || id.trim() === '') throw new Error('A module id is required.')
@@ -456,7 +521,12 @@ export function createServices(options: ServicesOptions = {}) {
     let applied: string[] = []
     let missingCredentials: string[] = []
     let note: string | null = null
-    if (module.bundle) {
+    let remoteTools: string[] = []
+    if (module.type === 'remote-server') {
+      const tools = await remoteConnectModule(module)
+      remoteTools = tools.map((tool) => tool.name)
+      note = `Connected ${tools.length} remote tools from ${module.endpoint}. Tool arguments leave this machine.`
+    } else if (module.bundle) {
       const result = await importWidgets({
         format: 'toolbox-widgets',
         formatVersion: 1,
@@ -472,7 +542,7 @@ export function createServices(options: ServicesOptions = {}) {
       settings.current.marketplace.installed.push(module.id)
       await saveSettings(settings.current)
     }
-    return { installed: [...settings.current.marketplace.installed], applied, missingCredentials, note }
+    return { installed: [...settings.current.marketplace.installed], applied, missingCredentials, note, remoteTools }
   }
 
   /** Uninstall marks the module removed; widget settings are left intact. */
@@ -481,6 +551,7 @@ export function createServices(options: ServicesOptions = {}) {
     await marketplaceRegistry()
     const module = registry?.modules.find((m) => m.id === id.trim())
     if (module?.builtIn) throw new Error(`"${module.name}" is built in — it cannot be uninstalled.`)
+    await remoteDisconnectModule(id.trim())
     settings.current.marketplace.installed = settings.current.marketplace.installed.filter((entry) => entry !== id.trim())
     await saveSettings(settings.current)
     return { installed: [...settings.current.marketplace.installed] }
@@ -519,6 +590,8 @@ export function createServices(options: ServicesOptions = {}) {
     marketplaceInstall,
     marketplaceUninstall,
     marketplaceRefresh,
+    remoteRestore,
+    remoteStatus,
     installedWidgets,
     exportWidgets,
     importWidgets
