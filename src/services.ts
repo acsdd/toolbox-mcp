@@ -8,12 +8,18 @@ import {
   fetchCatalog,
   fetchGmailInbox,
   fetchMarkets,
+  fetchModelById,
   fetchRegistry,
   fetchSeries,
   friendlyGmailError,
+  buildModelfile,
   MODEL_TASKS,
   normalizeWatchlist,
   parseBundle,
+  planOllamaInstall,
+  probeOllamaCli,
+  pullIntoOllama,
+  runOllamaCommand,
   scoreModels,
   searchModules,
   serializeBundle,
@@ -30,11 +36,16 @@ import {
   type MachineProfile,
   type MarketplaceModule,
   type ModelTask,
+  type PullResult,
   type ResourceStats,
   type ScoredModel,
   type TopProcess,
   type WidgetBundleEntry
 } from '@toolbox/widgets'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { execFile } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { loadCatalogCache, loadSettings, saveCatalogCache, saveSettings, type StoredSettings } from './config.js'
 import { connectRemote, proxiedToolName, type ProxiedTool, type RemoteConnect, type RemoteConnection, type RemoteToolDef } from './remote.js'
 
@@ -48,7 +59,7 @@ function isCatalogModel(value: unknown): value is CatalogModel {
   )
 }
 
-export const USER_AGENT = 'toolbox-mcp/0.4.0 (+https://github.com/28121978444/toolbox-mcp)'
+export const USER_AGENT = 'toolbox-mcp/0.5.0 (+https://github.com/28121978444/toolbox-mcp)'
 const SERIES_TTL_MS = 30 * 60 * 1000
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000
 const CATALOG_PER_TASK = 24
@@ -57,6 +68,10 @@ const REGISTRY_TTL_MS = 5 * 60 * 1000
 interface ServicesOptions {
   fetchImpl?: FetchLike
   execFileImpl?: ExecFileLike
+  /** Pulls a model into the local Ollama runtime (injectable for tests). */
+  pullModel?: (reference: string) => Promise<PullResult>
+  /** Runs an arbitrary Ollama subcommand (injectable for tests). */
+  runOllama?: (args: string[]) => Promise<PullResult>
   /** Remote MCP connection factory (injectable for tests). */
   remoteConnect?: RemoteConnect
   /** Called when a remote server connects and its tools are ready to register. */
@@ -90,10 +105,33 @@ export interface LlamafarmScoreResult {
   error: string | null
 }
 
+export interface LlamafarmInstallInput {
+  /** HuggingFace repo id, e.g. 'bartowski/Llama-3.2-3B-Instruct-GGUF'. */
+  repo: string
+  /** Quantization tag, e.g. 'Q4_K_M'. Defaults to the catalog entry's quant. */
+  quant?: string
+  /** Layers to keep on the GPU; writes a Modelfile instead of a plain pull. */
+  offload?: number
+}
+
+export type LlamafarmInstallReason = 'installed' | 'ollama-missing' | 'not-found' | 'failed'
+
+export interface LlamafarmInstallResult {
+  ok: boolean
+  repo: string
+  reference: string | null
+  modelName: string | null
+  reason: LlamafarmInstallReason
+  message: string
+  /** Runtime output of the install command. */
+  output: string
+  /** What to run next. */
+  steps: string[]
+}
+
 export interface MarketplaceListedModule extends MarketplaceModule {
   installed: boolean
 }
-
 export interface MarketplaceListResult {
   modules: MarketplaceListedModule[]
   categories: string[]
@@ -163,6 +201,7 @@ export function createServices(options: ServicesOptions = {}) {
   const remotes = new Map<string, { connection: RemoteConnection; tools: RemoteToolDef[] }>()
   const remoteConnect = options.remoteConnect ?? connectRemote
   const detectOptions = { fetchImpl: options.fetchImpl, execFileImpl: options.execFileImpl }
+  const execFileImpl = options.execFileImpl ?? (execFile as unknown as ExecFileLike)
 
   async function init(): Promise<void> {
     settings.current = await loadSettings()
@@ -417,6 +456,90 @@ export function createServices(options: ServicesOptions = {}) {
     return { machine: await llamafarmStatus(), catalog: catalog?.models.length ?? 0 }
   }
 
+  /**
+   * Install a catalog model into the local Ollama runtime. Ollama serves any
+   * GGUF from the Hub directly, so this is a single `ollama pull` — unless a
+   * GPU split is requested, which writes a Modelfile instead.
+   */
+  async function llamafarmInstall(input: LlamafarmInstallInput): Promise<LlamafarmInstallResult> {
+    const repo = input.repo?.trim() ?? ''
+    const failure = (reason: LlamafarmInstallReason, message: string, extra: Partial<LlamafarmInstallResult> = {}): LlamafarmInstallResult => ({
+      ok: false,
+      repo,
+      reference: null,
+      modelName: null,
+      reason,
+      message,
+      output: '',
+      steps: [],
+      ...extra
+    })
+    if (!repo) {
+      throw new Error('A repo id is required, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF".')
+    }
+
+    const cached = catalog?.models.find((entry) => entry.id.toLowerCase() === repo.toLowerCase())
+    let model: CatalogModel | null = cached ?? null
+    if (!model) {
+      try {
+        model = await fetchModelById(repo, { fetchImpl: options.fetchImpl })
+      } catch (cause) {
+        return failure('not-found', cause instanceof Error ? cause.message : String(cause))
+      }
+    }
+    if (!model) {
+      return failure('not-found', `No GGUF weights found for ${repo}.`)
+    }
+
+    let plan: ReturnType<typeof planOllamaInstall>
+    try {
+      plan = planOllamaInstall(model, input.quant ?? model.quantLabel)
+    } catch (cause) {
+      return failure('failed', cause instanceof Error ? cause.message : String(cause))
+    }
+
+    const cli = await probeOllamaCli(execFileImpl)
+    if (!cli.installed) {
+      return failure('ollama-missing', 'Ollama is not installed on this machine.', {
+        reference: plan.reference,
+        modelName: plan.modelName,
+        steps: plan.steps
+      })
+    }
+
+    let result
+    if (typeof input.offload === 'number' && Number.isFinite(input.offload)) {
+      const directory = mkdtempSync(join(tmpdir(), 'toolbox-mcp-'))
+      const modelfilePath = join(directory, 'Modelfile')
+      writeFileSync(modelfilePath, buildModelfile(plan.reference, { numGpu: input.offload }), 'utf8')
+      const runner = options.runOllama ?? ((args: string[]) => runOllamaCommand(args))
+      result = await runner(['create', plan.modelName, '--file', modelfilePath])
+    } else {
+      const pull = options.pullModel ?? ((reference: string) => pullIntoOllama(reference))
+      result = await pull(plan.reference)
+    }
+
+    if (!result.ok) {
+      return failure('failed', result.error ?? 'The Ollama runtime refused the install.', {
+        reference: plan.reference,
+        modelName: plan.modelName,
+        output: result.output,
+        steps: plan.steps
+      })
+    }
+
+    return {
+      ok: true,
+      repo: model.id,
+      reference: plan.reference,
+      modelName: plan.modelName,
+      reason: 'installed',
+      message: `${plan.reference} is ready to run.`,
+      output: result.output,
+      steps: plan.steps
+    }
+  }
+
   // --- marketplace: live registry + installs --------------------------------
 
   async function marketplaceRegistry(forceRefresh = false): Promise<void> {
@@ -586,6 +709,7 @@ export function createServices(options: ServicesOptions = {}) {
     llamafarmCatalog,
     llamafarmScore,
     llamafarmRefresh,
+    llamafarmInstall,
     marketplaceList,
     marketplaceInstall,
     marketplaceUninstall,

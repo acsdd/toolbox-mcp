@@ -37,7 +37,7 @@ export function proxiedToolName(moduleId: string, toolName: string): string {
 
 /** Default factory: a real MCP client over streamable HTTP. */
 export const connectRemote: RemoteConnect = async (endpoint) => {
-  const client = new Client({ name: 'toolbox-mcp', version: '0.4.0' })
+  const client = new Client({ name: 'toolbox-mcp', version: '0.5.0' })
   await client.connect(new StreamableHTTPClientTransport(new URL(endpoint)))
   return {
     listTools: async () => {

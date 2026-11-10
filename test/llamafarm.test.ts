@@ -146,11 +146,111 @@ describe('llamafarm service', () => {
   })
 })
 
+describe('llamafarm install', () => {
+  const ollamaExec: ExecFileLike = (_file, _args, _opts, cb) =>
+    cb(null, 'ollama version is 0.5.4')
+
+  it('pulls a GGUF model into Ollama', async () => {
+    const pulled: string[] = []
+    const services = createServices({
+      fetchImpl: farmFetch(),
+      execFileImpl: ollamaExec,
+      pullModel: async (reference) => {
+        pulled.push(reference)
+        return { ok: true, code: 0, output: 'success', error: null }
+      }
+    })
+    await services.init()
+    const result = await services.llamafarmInstall({ repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF' })
+    assert.equal(result.ok, true)
+    assert.equal(result.reason, 'installed')
+    assert.equal(result.reference, 'hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M')
+    assert.ok(result.modelName)
+    assert.deepEqual(pulled, ['hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M'])
+    assert.ok(result.steps.some((step) => step.includes('ollama pull')))
+  })
+
+  it('reports a missing Ollama runtime instead of failing hard', async () => {
+    const missing: ExecFileLike = (_file, _args, _opts, cb) =>
+      cb(new Error('spawn ollama ENOENT'), '')
+    const services = createServices({
+      fetchImpl: farmFetch(),
+      execFileImpl: missing,
+      pullModel: async () => {
+        throw new Error('should not pull when Ollama is missing')
+      }
+    })
+    await services.init()
+    const result = await services.llamafarmInstall({ repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF' })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'ollama-missing')
+    assert.match(result.message, /Ollama is not installed/)
+    assert.equal(result.reference, 'hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M')
+  })
+
+  it('reports an unknown repo as not-found', async () => {
+    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: ollamaExec })
+    await services.init()
+    const result = await services.llamafarmInstall({ repo: 'acme/no-such-model' })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'not-found')
+    assert.match(result.message, /404/)
+  })
+
+  it('rejects checkpoints that are not published as GGUF', async () => {
+    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: ollamaExec })
+    await services.init()
+    const result = await services.llamafarmInstall({ repo: 'openai-community/gpt2' })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'failed')
+    assert.match(result.message, /GGUF/)
+  })
+
+  it('surfaces a failing pull', async () => {
+    const services = createServices({
+      fetchImpl: farmFetch(),
+      execFileImpl: ollamaExec,
+      pullModel: async () => ({ ok: false, code: 1, output: 'pull failed', error: 'ollama exited with code 1' })
+    })
+    await services.init()
+    const result = await services.llamafarmInstall({ repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF' })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'failed')
+    assert.equal(result.output, 'pull failed')
+  })
+
+  it('creates a Modelfile when a GPU split is requested', async () => {
+    const created: string[][] = []
+    const services = createServices({
+      fetchImpl: farmFetch(),
+      execFileImpl: ollamaExec,
+      runOllama: async (args) => {
+        created.push(args)
+        return { ok: true, code: 0, output: 'created', error: null }
+      }
+    })
+    await services.init()
+    const result = await services.llamafarmInstall({
+      repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF',
+      offload: 20
+    })
+    assert.equal(result.ok, true)
+    assert.equal(created.length, 1)
+    assert.equal(created[0]?.[0], 'create')
+    assert.equal(created[0]?.[1], result.modelName)
+    assert.equal(created[0]?.[2], '--file')
+  })
+})
+
 describe('panel', () => {
   it('serves the SPA, scores models and runs a terminal session', async () => {
     process.env.TOOLBOX_MCP_PORT = '38991'
     const { startPanel } = await import('../dist/panel.js')
-    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
+    const services = createServices({
+      fetchImpl: farmFetch(),
+      execFileImpl: gpuExec,
+      pullModel: async () => ({ ok: true, code: 0, output: 'success', error: null })
+    })
     await services.init()
     const panel = await startPanel(services)
     const base = `http://127.0.0.1:${panel.port}`
@@ -168,6 +268,17 @@ describe('panel', () => {
         })
       ).json() as { groups: Array<{ task: string; models: unknown[] }> }
       assert.equal(score.groups[0]?.task, 'text-generation')
+
+      const install = await (
+        await fetch(`${base}/api/llamafarm/install`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF' })
+        })
+      ).json() as { ok: boolean; reference: string; reason: string }
+      assert.equal(install.ok, true)
+      assert.equal(install.reason, 'installed')
+      assert.equal(install.reference, 'hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M')
 
       const started = await (await fetch(`${base}/api/terminal/start`, { method: 'POST' })).json() as { running: boolean }
       assert.equal(started.running, true)

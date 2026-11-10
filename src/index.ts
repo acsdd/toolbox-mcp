@@ -11,7 +11,7 @@ import { createServices } from './services.js'
 import { startPanel } from './panel.js'
 import { jsonSchemaToZodShape } from './remote.js'
 
-const server = new McpServer({ name: 'toolbox-mcp', version: '0.4.0' })
+const server = new McpServer({ name: 'toolbox-mcp', version: '0.5.0' })
 
 // Remote-server marketplace modules register their tools here at runtime.
 const remoteRegistrations = new Map<string, RegisteredTool[]>()
@@ -160,6 +160,17 @@ server.tool(
   'Re-detect the machine and force a full catalog refetch from HuggingFace.',
   {},
   async () => json(await services.llamafarmRefresh())
+)
+
+server.tool(
+  'llamafarm_install',
+  'Install a catalog model into the local Ollama runtime (GGUF from HuggingFace).',
+  {
+    repo: z.string().describe('HuggingFace repo id, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF"'),
+    quant: z.string().optional().describe('Quantization tag, e.g. "Q4_K_M" (defaults to the catalog entry)'),
+    offload: z.number().optional().describe('Layers to keep on the GPU; writes a Modelfile instead of a plain pull')
+  },
+  async (input) => json(await services.llamafarmInstall(input))
 )
 
 // --- marketplace -------------------------------------------------------------

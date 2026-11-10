@@ -1,6 +1,6 @@
 {
   "name": "toolbox-mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Private local MCP server exposing Toolbox widgets (crypto watch, Gmail announcer, resource monitor) plus a localhost ops panel.",
   "license": "MIT",
   "private": true,

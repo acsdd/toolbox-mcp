@@ -97,6 +97,12 @@ const PAGE = `<!doctype html>
   .mdetail ul { margin: 0 0 8px; padding-left: 16px; }
   .mdetail li { margin: 3px 0; color: #9fb3a4; }
   .mdetail a { color: var(--accent); }
+  .minstall { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 8px; }
+  .minstall button { font: inherit; color: #0b1510; background: var(--accent); border: 0; border-radius: 3px; padding: 7px 12px; cursor: pointer; }
+  .minstall button:disabled { opacity: 0.55; cursor: progress; }
+  .minstall button:hover:not(:disabled) { filter: brightness(1.08); }
+  .minstall .ok { color: var(--accent); }
+  .minstall .err { color: #e08b7a; }
   .mf-note { padding: 10px 14px; color: var(--dim); font-size: 10px; }
   .mf-note button { border: 0; background: none; color: var(--accent); font-size: 10px; padding: 4px 0; }
 
@@ -240,7 +246,7 @@ const PAGE = `<!doctype html>
 </div>
 
 <script>
-var mf = { scenario: 'now', search: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {} }
+var mf = { scenario: 'now', search: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {} }
 var lastResult = null
 
 function show(name) {
@@ -373,8 +379,14 @@ function renderGroups(result) {
         '<span class="dot"></span><span class="nm"><b>' + esc(m.label) + '</b><small>' + meta + '</small></span></button>'
       if (mf.expanded[m.id]) {
         var hints = m.hints.map(function (h) { return '<li>' + esc(h) + '</li>' }).join('')
+        var inst = mf.install[m.id]
+        var installBlock = '<div class="minstall">' +
+          '<button onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install in Ollama</button>' +
+          (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '">' + esc(inst.message) + '</span>' : '') +
+          '</div>'
         row += '<div class="mdetail"><p>' + esc(m.reason) + '</p>' +
           (hints ? '<ul>' + hints + '</ul>' : '') +
+          installBlock +
           '<a href="' + esc(m.hfUrl) + '" target="_blank" rel="noopener">huggingface.co ↗</a>' +
           '<div>' + esc(m.id) + ' · ' + m.downloads.toLocaleString() + ' downloads' + (m.license ? ' · ' + esc(m.license) : '') + '</div></div>'
       }
@@ -395,6 +407,23 @@ function renderGroups(result) {
 }
 function mfToggle(id) {
   mf.expanded[id] = !mf.expanded[id]
+  if (lastResult) renderGroups(lastResult)
+}
+async function mfInstall(id) {
+  mf.install[id] = { state: 'busy', message: 'downloading…' }
+  if (lastResult) renderGroups(lastResult)
+  try {
+    var res = await fetch('/api/llamafarm/install', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: id })
+    })
+    var body = await res.json()
+    var steps = body.steps || []
+    var message = body.message || (body.ok ? 'Installed' : 'Install failed')
+    if (body.ok && steps.length) message = steps[steps.length - 1]
+    mf.install[id] = { state: body.ok ? 'ok' : 'err', message: message }
+  } catch (cause) {
+    mf.install[id] = { state: 'err', message: String(cause && cause.message ? cause.message : cause) }
+  }
   if (lastResult) renderGroups(lastResult)
 }
 
@@ -647,6 +676,15 @@ export function startPanel(services: Services): Promise<PanelHandle> {
         }
         if (req.method === 'POST' && url.pathname === '/api/llamafarm/refresh') {
           send(res, 200, JSON.stringify(await services.llamafarmRefresh()))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/llamafarm/install') {
+          const raw = JSON.parse(await readBody(req)) as { repo?: string; quant?: string; offload?: number }
+          send(res, 200, JSON.stringify(await services.llamafarmInstall({
+            repo: raw.repo ?? '',
+            ...(raw.quant ? { quant: raw.quant } : {}),
+            ...(typeof raw.offload === 'number' ? { offload: raw.offload } : {})
+          })))
           return
         }
 

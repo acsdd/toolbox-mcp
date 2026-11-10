@@ -18,6 +18,7 @@ Part of the Toolbox family:
 | `gmail_status` / `gmail_check` / `gmail_connect` / `gmail_disconnect` | Read-only Gmail IMAP checks (App Password, 16 chars) |
 | `system_stats` / `system_processes` | CPU / memory / disk and top processes |
 | `llamafarm_status` / `llamafarm_catalog` / `llamafarm_score` / `llamafarm_refresh` | Model Farm: HuggingFace catalog fit-scored against this machine |
+| `llamafarm_install` | Pull a catalog model into the local Ollama runtime (optional GPU split) |
 | `marketplace_list` / `marketplace_install` / `marketplace_uninstall` | Live module marketplace (public registry, installs via the bundle validator) |
 | `remote_status` | Connected remote MCP servers and their tool counts |
 | `widgets_export` / `widgets_import` | Portable widget bundles (same format as Toolbox and the NAS app) |
@@ -35,6 +36,10 @@ Part of the Toolbox family:
   you filter; wave 3 (Submit) returns the ordered verdict and keeps only reds
   that have an offload path — click a model for hints like `--n-gpu-layers`.
   The catalog is cached in `~/.toolbox-mcp/llamafarm-cache.json` for 6 hours.
+  Expanding a model shows an **Install in Ollama** action: Ollama serves any
+  GGUF straight from the Hub, so the install is a single `ollama pull
+  hf.co/owner/repo:Q4_K_M` — with a GPU split it writes a Modelfile instead.
+  If Ollama is missing, the action says so and prints the exact command to run.
 - **Terminal** — a local PowerShell session streamed to the browser. It runs
   with your user rights; the panel never binds beyond 127.0.0.1.
 - **Marketplace** — VS Code-style storefront for shared Toolbox modules.
