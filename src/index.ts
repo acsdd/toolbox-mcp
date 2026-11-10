@@ -12,7 +12,7 @@ import { startPanel } from './panel.js'
 const services = createServices()
 await services.init()
 
-const server = new McpServer({ name: 'toolbox-mcp', version: '0.2.0' })
+const server = new McpServer({ name: 'toolbox-mcp', version: '0.3.0' })
 
 const json = (value: unknown) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }]
@@ -137,6 +137,33 @@ server.tool(
   'Re-detect the machine and force a full catalog refetch from HuggingFace.',
   {},
   async () => json(await services.llamafarmRefresh())
+)
+
+// --- marketplace -------------------------------------------------------------
+
+server.tool(
+  'marketplace_list',
+  'Live marketplace listing of installable Toolbox modules (fetches the public registry, cached 5 min).',
+  {
+    query: z.string().optional().describe('Live search across name, description, tags'),
+    category: z.string().optional().describe('Exact category filter, e.g. "monitoring"'),
+    refresh: z.boolean().optional().describe('Ignore the cache and refetch the registry')
+  },
+  async ({ query, category, refresh }) => json(await services.marketplaceList({ query, category }, refresh ?? false))
+)
+
+server.tool(
+  'marketplace_install',
+  'Install a marketplace module by id. Widget bundles are applied through the portable bundle validator.',
+  { id: z.string().describe('Module id from marketplace_list') },
+  async ({ id }) => json(await services.marketplaceInstall(id))
+)
+
+server.tool(
+  'marketplace_uninstall',
+  'Uninstall a marketplace module (settings are kept; built-ins cannot be removed).',
+  { id: z.string().describe('Module id from marketplace_list') },
+  async ({ id }) => json(await services.marketplaceUninstall(id))
 )
 
 // --- portable widgets -------------------------------------------------------

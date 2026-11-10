@@ -15,13 +15,15 @@ export interface StoredSettings {
   cryptoWatchlist: string[]
   gmail: { email: string; password: string; notifications: boolean } | null
   resource: { diskPath?: string; showProcesses: boolean }
+  marketplace: { installed: string[] }
 }
 
 const DEFAULTS: StoredSettings = {
   version: 1,
   cryptoWatchlist: ['bitcoin', 'ethereum', 'solana'],
   gmail: null,
-  resource: { showProcesses: true }
+  resource: { showProcesses: true },
+  marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] }
 }
 
 export function configDir(): string {
@@ -49,6 +51,11 @@ export async function loadSettings(): Promise<StoredSettings> {
       resource: {
         diskPath: typeof raw.resource?.diskPath === 'string' ? raw.resource.diskPath : undefined,
         showProcesses: raw.resource?.showProcesses !== false
+      },
+      marketplace: {
+        installed: Array.isArray(raw.marketplace?.installed)
+          ? raw.marketplace.installed.filter((id): id is string => typeof id === 'string')
+          : [...DEFAULTS.marketplace.installed]
       }
     }
   } catch {

@@ -8,12 +8,14 @@ import {
   fetchCatalog,
   fetchGmailInbox,
   fetchMarkets,
+  fetchRegistry,
   fetchSeries,
   friendlyGmailError,
   MODEL_TASKS,
   normalizeWatchlist,
   parseBundle,
   scoreModels,
+  searchModules,
   serializeBundle,
   sortForDisplay,
   validateGmailSetup,
@@ -26,6 +28,7 @@ import {
   type FitScenario,
   type GmailCheckResult,
   type MachineProfile,
+  type MarketplaceModule,
   type ModelTask,
   type ResourceStats,
   type ScoredModel,
@@ -44,10 +47,11 @@ function isCatalogModel(value: unknown): value is CatalogModel {
   )
 }
 
-export const USER_AGENT = 'toolbox-mcp/0.2.0 (+https://github.com/28121978444/toolbox-mcp)'
+export const USER_AGENT = 'toolbox-mcp/0.3.0 (+https://github.com/28121978444/toolbox-mcp)'
 const SERIES_TTL_MS = 30 * 60 * 1000
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000
 const CATALOG_PER_TASK = 24
+const REGISTRY_TTL_MS = 5 * 60 * 1000
 
 interface ServicesOptions {
   fetchImpl?: FetchLike
@@ -79,6 +83,24 @@ export interface LlamafarmScoreResult {
   error: string | null
 }
 
+export interface MarketplaceListedModule extends MarketplaceModule {
+  installed: boolean
+}
+
+export interface MarketplaceListResult {
+  modules: MarketplaceListedModule[]
+  categories: string[]
+  fetchedAt: number | null
+  error: string | null
+}
+
+export interface MarketplaceInstallResult {
+  installed: string[]
+  applied: string[]
+  missingCredentials: string[]
+  note: string | null
+}
+
 export interface CryptoState {
   watchlist: string[]
   coins: CryptoCoin[]
@@ -104,7 +126,8 @@ export function createServices(options: ServicesOptions = {}) {
       version: 1,
       cryptoWatchlist: ['bitcoin', 'ethereum', 'solana'],
       gmail: null,
-      resource: { showProcesses: true }
+      resource: { showProcesses: true },
+      marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] }
     }
   }
   const crypto: CryptoState = {
@@ -127,6 +150,8 @@ export function createServices(options: ServicesOptions = {}) {
   let machine: MachineProfile | null = null
   let catalog: { models: CatalogModel[]; fetchedAt: number | null } | null = null
   let catalogError: string | null = null
+  let registry: { modules: MarketplaceModule[]; updated: string; fetchedAt: number } | null = null
+  let registryError: string | null = null
   const detectOptions = { fetchImpl: options.fetchImpl, execFileImpl: options.execFileImpl }
 
   async function init(): Promise<void> {
@@ -382,6 +407,94 @@ export function createServices(options: ServicesOptions = {}) {
     return { machine: await llamafarmStatus(), catalog: catalog?.models.length ?? 0 }
   }
 
+  // --- marketplace: live registry + installs --------------------------------
+
+  async function marketplaceRegistry(forceRefresh = false): Promise<void> {
+    const fresh = registry !== null && Date.now() - registry.fetchedAt < REGISTRY_TTL_MS
+    if (!forceRefresh && (fresh || (registry !== null && registryError !== null))) return
+    try {
+      const fetched = await fetchRegistry({ fetchImpl: options.fetchImpl })
+      registry = { modules: fetched.modules, updated: fetched.updated, fetchedAt: Date.now() }
+      registryError = null
+    } catch (cause) {
+      registryError = cause instanceof Error ? cause.message : String(cause)
+    }
+  }
+
+  function isInstalled(module: MarketplaceModule): boolean {
+    return module.builtIn === true || settings.current.marketplace.installed.includes(module.id)
+  }
+
+  /** Live listing: fetches the registry when stale, then filters in memory. */
+  async function marketplaceList(
+    filter: { query?: string; category?: string } = {},
+    forceRefresh = false
+  ): Promise<MarketplaceListResult> {
+    await marketplaceRegistry(forceRefresh)
+    const modules = registry?.modules ?? []
+    const categories = [...new Set(modules.flatMap((m) => m.categories))].sort()
+    return {
+      modules: searchModules(modules, filter).map((module) => ({ ...module, installed: isInstalled(module) })),
+      categories,
+      fetchedAt: registry?.fetchedAt ?? null,
+      error: registryError
+    }
+  }
+
+  /**
+   * Install a module: widget bundles are applied through the portable bundle
+   * validator; credential-gated modules install enabled and report what still
+   * needs wiring. Built-ins cannot be installed (they already are).
+   */
+  async function marketplaceInstall(id: unknown): Promise<MarketplaceInstallResult> {
+    if (typeof id !== 'string' || id.trim() === '') throw new Error('A module id is required.')
+    await marketplaceRegistry()
+    const module = registry?.modules.find((m) => m.id === id.trim())
+    if (!module) throw new Error(`Unknown module "${id}". Refresh the marketplace and try again.`)
+    if (module.builtIn) throw new Error(`"${module.name}" is built in — nothing to install.`)
+
+    let applied: string[] = []
+    let missingCredentials: string[] = []
+    let note: string | null = null
+    if (module.bundle) {
+      const result = await importWidgets({
+        format: 'toolbox-widgets',
+        formatVersion: 1,
+        widgets: [module.bundle]
+      })
+      applied = result.applied
+      missingCredentials = result.missingCredentials
+    }
+    if (module.credentialsRequired) {
+      note = `"${module.name}" needs credentials wired up locally before it can run.`
+    }
+    if (!settings.current.marketplace.installed.includes(module.id)) {
+      settings.current.marketplace.installed.push(module.id)
+      await saveSettings(settings.current)
+    }
+    return { installed: [...settings.current.marketplace.installed], applied, missingCredentials, note }
+  }
+
+  /** Uninstall marks the module removed; widget settings are left intact. */
+  async function marketplaceUninstall(id: unknown): Promise<{ installed: string[] }> {
+    if (typeof id !== 'string' || id.trim() === '') throw new Error('A module id is required.')
+    await marketplaceRegistry()
+    const module = registry?.modules.find((m) => m.id === id.trim())
+    if (module?.builtIn) throw new Error(`"${module.name}" is built in — it cannot be uninstalled.`)
+    settings.current.marketplace.installed = settings.current.marketplace.installed.filter((entry) => entry !== id.trim())
+    await saveSettings(settings.current)
+    return { installed: [...settings.current.marketplace.installed] }
+  }
+
+  async function marketplaceRefresh(): Promise<MarketplaceListResult> {
+    return marketplaceList({}, true)
+  }
+
+  /** Installed widget ids — the overview renders only these cards. */
+  function installedWidgets(): string[] {
+    return [...settings.current.marketplace.installed]
+  }
+
   return {
     init,
     get crypto() {
@@ -402,6 +515,11 @@ export function createServices(options: ServicesOptions = {}) {
     llamafarmCatalog,
     llamafarmScore,
     llamafarmRefresh,
+    marketplaceList,
+    marketplaceInstall,
+    marketplaceUninstall,
+    marketplaceRefresh,
+    installedWidgets,
     exportWidgets,
     importWidgets
   }

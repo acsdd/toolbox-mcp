@@ -100,6 +100,40 @@ const PAGE = `<!doctype html>
   .mf-note { padding: 10px 14px; color: var(--dim); font-size: 10px; }
   .mf-note button { border: 0; background: none; color: var(--accent); font-size: 10px; padding: 4px 0; }
 
+  /* marketplace */
+  .mp-layout { display: grid; grid-template-columns: minmax(320px, 430px) minmax(0, 1fr); gap: 14px; align-items: start; }
+  .mp-list { border: 1px solid var(--border); border-radius: 7px; background: var(--panel); overflow: hidden; }
+  .mp-item { width: 100%; display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; min-height: 66px; border: 0; border-bottom: 1px solid #132219; background: transparent; text-align: left; }
+  .mp-item:hover { background: #102017; }
+  .mp-item.sel { background: #183024; box-shadow: inset 2px 0 0 var(--accent); }
+  .mp-icon { flex: 0 0 42px; height: 42px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 6px; background: #0d1a13; color: var(--accent); font-size: 21px; }
+  .mp-item .mp-meta { flex: 1; min-width: 0; }
+  .mp-item .mp-meta b { display: block; color: #c3cec5; font-weight: 500; font-size: 12px; }
+  .mp-item .mp-meta small { display: block; color: var(--dim); font-size: 9px; margin-top: 2px; }
+  .mp-item .mp-meta p { margin: 4px 0 0; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mp-state { flex: 0 0 auto; margin-top: 4px; padding: 4px 10px; border-radius: 3px; font-size: 9px; border: 1px solid var(--border); color: var(--muted); }
+  .mp-state.installed { color: var(--green); border-color: #2a4935; }
+  .mp-detail { border: 1px solid var(--border); border-radius: 7px; background: var(--panel); padding: 22px; min-height: 320px; }
+  .mp-detail .mp-head { display: flex; gap: 16px; align-items: center; margin-bottom: 14px; }
+  .mp-detail .mp-icon { flex-basis: 56px; height: 56px; font-size: 28px; }
+  .mp-detail h2 { margin: 0; font-size: 18px; font-weight: 500; }
+  .mp-detail .mp-by { color: var(--dim); font-size: 10px; margin-top: 3px; }
+  .mp-detail .mp-desc { color: #a6b4aa; font-size: 12px; line-height: 1.7; margin: 0 0 14px; }
+  .mp-detail .mp-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .mp-detail .mp-tags span { padding: 4px 10px; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); font-size: 9px; }
+  .mp-detail .mp-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .mp-detail .mp-note { color: var(--yellow); font-size: 10px; margin: 0 0 10px; }
+  .mp-detail a { color: var(--accent); font-size: 10px; }
+  .mp-detail .mp-empty { color: var(--dim); font-size: 11px; padding: 40px 0; text-align: center; }
+  .mp-skel { display: flex; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #132219; }
+  .mp-skel i { display: block; width: 42px; height: 42px; border-radius: 6px; background: #102017; animation: mp-pulse 1.2s ease-in-out infinite; }
+  .mp-skel div { flex: 1; }
+  .mp-skel div b, .mp-skel div s { display: block; height: 10px; border-radius: 3px; background: #102017; animation: mp-pulse 1.2s ease-in-out infinite; }
+  .mp-skel div b { width: 55%; margin-bottom: 8px; }
+  .mp-skel div s { width: 85%; text-decoration: none; }
+  @keyframes mp-pulse { 50% { opacity: .4; } }
+  @media (max-width: 1100px) { .mp-layout { grid-template-columns: 1fr; } }
+
   /* terminal */
   .term { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 7px; background: #050a07; overflow: hidden; }
   .term-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 10px; }
@@ -130,6 +164,7 @@ const PAGE = `<!doctype html>
     <button class="navbtn active" data-nav="overview"><i>▣</i><span>Overview</span><small>01</small></button>
     <button class="navbtn" data-nav="models"><i>⌁</i><span>Model Farm</span><small>02</small></button>
     <button class="navbtn" data-nav="terminal"><i>❯</i><span>Terminal</span><small>03</small></button>
+    <button class="navbtn" data-nav="marketplace"><i>▦</i><span>Marketplace</span><small>04</small></button>
     <div class="foot"><b>SESSION</b><br />operator@vrm<br />Local access · stdio + panel</div>
   </aside>
 
@@ -138,9 +173,9 @@ const PAGE = `<!doctype html>
       <h1>System overview</h1>
       <p class="sub">Shared Toolbox widgets, live from this machine.</p>
       <div class="card-grid">
-        <div class="card"><h2>Crypto watch</h2><pre id="crypto">…</pre><div class="actions"><button class="btn" onclick="act('crypto_refresh','crypto')">Refresh prices</button></div></div>
-        <div class="card"><h2>Gmail announcer</h2><pre id="gmail">…</pre><div class="actions"><button class="btn" onclick="act('gmail_check','gmail')">Check inbox</button></div></div>
-        <div class="card"><h2>Resource monitor</h2><pre id="resource">…</pre><div class="actions"><button class="btn" onclick="act('system_stats','resource')">Refresh stats</button></div></div>
+        <div class="card" data-widget="crypto-watch"><h2>Crypto watch</h2><pre id="crypto">…</pre><div class="actions"><button class="btn" onclick="act('crypto_refresh','crypto')">Refresh prices</button></div></div>
+        <div class="card" data-widget="gmail-announcer"><h2>Gmail announcer</h2><pre id="gmail">…</pre><div class="actions"><button class="btn" onclick="act('gmail_check','gmail')">Check inbox</button></div></div>
+        <div class="card" data-widget="resource-monitor"><h2>Resource monitor</h2><pre id="resource">…</pre><div class="actions"><button class="btn" onclick="act('system_stats','resource')">Refresh stats</button></div></div>
         <div class="card"><h2>Widget bundle</h2><pre id="bundle">…</pre><div class="actions"><button class="btn" onclick="loadBundle()">Export widgets</button></div></div>
       </div>
     </section>
@@ -187,6 +222,20 @@ const PAGE = `<!doctype html>
         </div>
       </div>
     </section>
+    <section id="sec-marketplace" class="hidden">
+      <h1>Marketplace</h1>
+      <p class="sub">Shared Toolbox modules, live from the family registry. Search filters as you type.</p>
+      <div class="mf-bar">
+        <input type="search" id="mp-search" placeholder="search modules…" oninput="mpSetSearch()" />
+        <label>category <select id="mp-category" onchange="mpSetCategory()"><option value="">all</option></select></label>
+        <button class="btn" onclick="mpRefresh()">Refresh registry</button>
+        <div class="mf-status" id="mp-status">loading registry…</div>
+      </div>
+      <div class="mp-layout">
+        <div class="mp-list" id="mp-list"></div>
+        <div class="mp-detail" id="mp-detail"><div class="mp-empty">select a module to see details</div></div>
+      </div>
+    </section>
   </main>
 </div>
 
@@ -196,11 +245,12 @@ var lastResult = null
 
 function show(name) {
   document.querySelectorAll('.navbtn').forEach(function (b) { b.classList.toggle('active', b.dataset.nav === name) })
-  ;['overview', 'models', 'terminal'].forEach(function (s) {
+  ;['overview', 'models', 'terminal', 'marketplace'].forEach(function (s) {
     document.getElementById('sec-' + s).classList.toggle('hidden', s !== name)
   })
   if (name === 'models' && !lastResult) mfLoad()
   if (name === 'terminal') termAutoStart()
+  if (name === 'marketplace' && !mp.data) mpLoad()
 }
 document.querySelectorAll('.navbtn').forEach(function (b) { b.onclick = function () { show(b.dataset.nav) } })
 
@@ -219,6 +269,10 @@ async function bootOverview() {
   document.getElementById('crypto').textContent = JSON.stringify(data.crypto, null, 2)
   document.getElementById('gmail').textContent = JSON.stringify(data.gmail, null, 2)
   document.getElementById('resource').textContent = JSON.stringify(data.resource, null, 2)
+  var installed = data.installed || []
+  document.querySelectorAll('[data-widget]').forEach(function (card) {
+    card.classList.toggle('hidden', installed.indexOf(card.dataset.widget) === -1)
+  })
   loadBundle()
 }
 bootOverview()
@@ -344,6 +398,117 @@ function mfToggle(id) {
   if (lastResult) renderGroups(lastResult)
 }
 
+/* ---- marketplace ---- */
+var mp = { query: '', category: '', selected: null, timer: null, data: null, busy: false, note: null }
+
+function mpSetSearch() {
+  mp.query = document.getElementById('mp-search').value
+  clearTimeout(mp.timer)
+  mp.timer = setTimeout(mpLoad, 150)
+}
+function mpSetCategory() {
+  mp.category = document.getElementById('mp-category').value
+  mpLoad()
+}
+async function mpRefresh() {
+  document.getElementById('mp-status').textContent = 'refreshing registry…'
+  await fetch('/api/marketplace/refresh', { method: 'POST' })
+  await mpLoad()
+}
+function mpSkeleton() {
+  var row = '<div class="mp-skel"><i></i><div><b></b><s></s></div></div>'
+  document.getElementById('mp-list').innerHTML = row + row + row
+}
+async function mpLoad() {
+  var status = document.getElementById('mp-status')
+  if (!mp.data) mpSkeleton()
+  var res = await fetch('/api/marketplace/list?q=' + encodeURIComponent(mp.query) + '&category=' + encodeURIComponent(mp.category))
+  mp.data = await res.json()
+  if (mp.data.error) {
+    status.innerHTML = '<span class="err">registry: ' + esc(mp.data.error) + '</span>'
+  } else {
+    status.textContent = mp.data.modules.length + ' modules · live registry · fetched ' +
+      (mp.data.fetchedAt ? new Date(mp.data.fetchedAt).toLocaleTimeString() : '—')
+  }
+  var catSel = document.getElementById('mp-category')
+  var current = mp.category
+  catSel.innerHTML = '<option value="">all</option>' + mp.data.categories.map(function (c) {
+    return '<option value="' + esc(c) + '"' + (c === current ? ' selected' : '') + '>' + esc(c) + '</option>'
+  }).join('')
+  mpRenderList()
+  mpRenderDetail()
+}
+function mpRenderList() {
+  var list = document.getElementById('mp-list')
+  if (!mp.data.modules.length) {
+    list.innerHTML = '<div class="mf-note">no modules match.</div>'
+    return
+  }
+  list.innerHTML = mp.data.modules.map(function (m) {
+    var state = m.builtIn ? '<span class="mp-state installed">BUILT-IN</span>'
+      : m.installed ? '<span class="mp-state installed">INSTALLED</span>'
+      : '<span class="mp-state">INSTALL</span>'
+    return '<button class="mp-item' + (mp.selected === m.id ? ' sel' : '') + '" onclick="mpSelect(\\'' + esc(m.id) + '\\')">' +
+      '<span class="mp-icon">' + esc(m.icon) + '</span>' +
+      '<span class="mp-meta"><b>' + esc(m.name) + '</b><small>' + esc(m.author) + ' · v' + esc(m.version) + '</small>' +
+      '<p>' + esc(m.description) + '</p></span>' + state + '</button>'
+  }).join('')
+}
+function mpSelect(id) {
+  mp.selected = id
+  mp.note = null
+  mpRenderList()
+  mpRenderDetail()
+}
+function mpRenderDetail() {
+  var pane = document.getElementById('mp-detail')
+  var m = mp.data && mp.data.modules.find(function (x) { return x.id === mp.selected })
+  if (!m) {
+    pane.innerHTML = '<div class="mp-empty">select a module to see details</div>'
+    return
+  }
+  var action = m.builtIn
+    ? '<button class="btn" disabled>Built-in</button>'
+    : m.installed
+      ? '<button class="btn" onclick="mpUninstall(\\'' + esc(m.id) + '\\')"' + (mp.busy ? ' disabled' : '') + '>Uninstall</button>'
+      : '<button class="btn primary" onclick="mpInstall(\\'' + esc(m.id) + '\\')"' + (mp.busy ? ' disabled' : '') + '>Install</button>'
+  var tags = m.categories.concat(m.tags).map(function (t) { return '<span>' + esc(t) + '</span>' }).join('')
+  pane.innerHTML =
+    '<div class="mp-head"><span class="mp-icon">' + esc(m.icon) + '</span><div><h2>' + esc(m.name) + '</h2>' +
+    '<div class="mp-by">' + esc(m.author) + ' · v' + esc(m.version) + ' · ' + esc(m.type) + '</div></div></div>' +
+    '<p class="mp-desc">' + esc(m.description) + '</p>' +
+    '<div class="mp-tags">' + tags + '</div>' +
+    '<div class="mp-actions">' + action + (m.installed && !m.builtIn ? '<span class="mp-state installed">INSTALLED</span>' : '') + '</div>' +
+    (mp.note ? '<p class="mp-note">' + esc(mp.note) + '</p>' : '') +
+    (m.credentialsRequired ? '<p class="mp-note">requires credentials after install</p>' : '') +
+    (m.homepage ? '<a href="' + esc(m.homepage) + '" target="_blank" rel="noopener">homepage ↗</a>' : '')
+}
+async function mpInstall(id) {
+  mp.busy = true
+  mpRenderDetail()
+  var res = await fetch('/api/marketplace/install', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id })
+  })
+  var result = await res.json()
+  mp.busy = false
+  mp.note = result.error ? result.error
+    : [result.note].concat(result.missingCredentials && result.missingCredentials.length ? ['missing credentials: ' + result.missingCredentials.join(', ')] : []).filter(Boolean).join(' · ') || 'Installed.'
+  await mpLoad()
+  bootOverview()
+}
+async function mpUninstall(id) {
+  mp.busy = true
+  mpRenderDetail()
+  var res = await fetch('/api/marketplace/uninstall', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id })
+  })
+  var result = await res.json()
+  mp.busy = false
+  mp.note = result.error || 'Uninstalled. Settings were kept.'
+  await mpLoad()
+  bootOverview()
+}
+
 /* ---- terminal ---- */
 var es = null, termStarted = false
 var cmdHistory = [], hIdx = -1
@@ -435,7 +600,8 @@ export function startPanel(services: Services): Promise<PanelHandle> {
           send(res, 200, JSON.stringify({
             crypto: services.crypto,
             gmail: services.gmail,
-            resource: await services.resourceStats()
+            resource: await services.resourceStats(),
+            installed: services.installedWidgets()
           }))
           return
         }
@@ -480,6 +646,29 @@ export function startPanel(services: Services): Promise<PanelHandle> {
         }
         if (req.method === 'POST' && url.pathname === '/api/llamafarm/refresh') {
           send(res, 200, JSON.stringify(await services.llamafarmRefresh()))
+          return
+        }
+
+        // --- marketplace ---------------------------------------------------
+        if (req.method === 'GET' && url.pathname === '/api/marketplace/list') {
+          send(res, 200, JSON.stringify(await services.marketplaceList({
+            query: url.searchParams.get('q') ?? undefined,
+            category: url.searchParams.get('category') ?? undefined
+          })))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/marketplace/refresh') {
+          send(res, 200, JSON.stringify(await services.marketplaceRefresh()))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/marketplace/install') {
+          const raw = JSON.parse(await readBody(req)) as { id?: unknown }
+          send(res, 200, JSON.stringify(await services.marketplaceInstall(raw.id)))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/marketplace/uninstall') {
+          const raw = JSON.parse(await readBody(req)) as { id?: unknown }
+          send(res, 200, JSON.stringify(await services.marketplaceUninstall(raw.id)))
           return
         }
 

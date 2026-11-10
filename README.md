@@ -18,6 +18,7 @@ Part of the Toolbox family:
 | `gmail_status` / `gmail_check` / `gmail_connect` / `gmail_disconnect` | Read-only Gmail IMAP checks (App Password, 16 chars) |
 | `system_stats` / `system_processes` | CPU / memory / disk and top processes |
 | `llamafarm_status` / `llamafarm_catalog` / `llamafarm_score` / `llamafarm_refresh` | Model Farm: HuggingFace catalog fit-scored against this machine |
+| `marketplace_list` / `marketplace_install` / `marketplace_uninstall` | Live module marketplace (public registry, installs via the bundle validator) |
 | `widgets_export` / `widgets_import` | Portable widget bundles (same format as Toolbox and the NAS app) |
 
 ## Ops panel
@@ -35,6 +36,13 @@ Part of the Toolbox family:
   The catalog is cached in `~/.toolbox-mcp/llamafarm-cache.json` for 6 hours.
 - **Terminal** — a local PowerShell session streamed to the browser. It runs
   with your user rights; the panel never binds beyond 127.0.0.1.
+- **Marketplace** — VS Code-style storefront for shared Toolbox modules.
+  The listing populates live from the public
+  [`registry.json`](https://github.com/28121978444/toolbox-widgets/blob/main/registry.json)
+  (cached 5 min) and search filters as you type. Installing a widget module
+  applies its default settings through the portable bundle validator;
+  uninstalling keeps your settings. The registry carries data only — never
+  executable code. Overview shows cards for installed widgets only.
 
 ![Model Farm](docs/panel-model-farm.png)
 
