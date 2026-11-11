@@ -243,8 +243,29 @@ describe('llamafarm install', () => {
 })
 
 describe('panel', () => {
+  it('allocates independent ports for portable windows', async () => {
+    const { startPanel } = await import('../dist/panel.js')
+    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
+    await services.init()
+    const first = await startPanel(services, { port: 0 })
+    try {
+      const second = await startPanel(services, { port: 0 })
+      try {
+        assert.ok(first.port > 0)
+        assert.ok(second.port > 0)
+        assert.notEqual(first.port, second.port)
+        const page = await fetch(`http://127.0.0.1:${second.port}/`)
+        assert.equal(page.status, 200)
+        assert.match(await page.text(), /MODEL WANTS/)
+      } finally {
+        second.close()
+      }
+    } finally {
+      first.close()
+    }
+  })
+
   it('serves the SPA, scores models and runs a terminal session', async () => {
-    process.env.TOOLBOX_MCP_PORT = '38991'
     const { startPanel } = await import('../dist/panel.js')
     const services = createServices({
       fetchImpl: farmFetch(),
@@ -252,7 +273,7 @@ describe('panel', () => {
       pullModel: async () => ({ ok: true, code: 0, output: 'success', error: null })
     })
     await services.init()
-    const panel = await startPanel(services)
+    const panel = await startPanel(services, { port: 0 })
     const base = `http://127.0.0.1:${panel.port}`
 
     try {
@@ -266,8 +287,17 @@ describe('panel', () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ scenario: 'now' })
         })
-      ).json() as { groups: Array<{ task: string; models: unknown[] }> }
+      ).json() as { groups: Array<{ task: string; models: Array<{ grade: { letter: string; score: number; axes: unknown[]; bottleneck: { kind: string } } }> }>; machineGrade: { score: number; axes: unknown[] } }
       assert.equal(score.groups[0]?.task, 'text-generation')
+      assert.equal(score.machineGrade.axes.length, 4)
+      assert.ok(score.machineGrade.score >= 0 && score.machineGrade.score <= 100)
+      const graded = score.groups[0]?.models[0]?.grade
+      assert.ok(graded)
+      assert.equal(graded.axes.length, 4)
+      assert.match(graded.letter, /^(A\+|A|B|C|D|F)$/)
+      assert.ok(['machine', 'model'].includes(graded.bottleneck.kind))
+      assert.ok(page.includes('MODEL WANTS'), 'the panel renders the numeric scorecard')
+      assert.ok(page.includes('HEADROOM'))
 
       const install = await (
         await fetch(`${base}/api/llamafarm/install`, {
@@ -299,7 +329,54 @@ describe('panel', () => {
       assert.equal(stopped.running, false)
     } finally {
       panel.close()
-      delete process.env.TOOLBOX_MCP_PORT
     }
+  })
+})
+
+describe('llamafarm grade exposure', () => {
+  it('exposes the machine grade through the status report', async () => {
+    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
+    await services.init()
+    const report = await services.llamafarmStatusReport()
+    assert.ok(report.totalRamBytes > 0)
+    assert.ok(report.cores > 0)
+    assert.equal(report.grade.axes.length, 4)
+    assert.ok(report.grade.score >= 0 && report.grade.score <= 100)
+    assert.equal(typeof report.grade.label, 'string')
+  })
+
+  it('grades the machine alone when no repo is given', async () => {
+    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
+    await services.init()
+    const result = await services.llamafarmGrade({})
+    assert.equal(result.model, null)
+    assert.equal(result.grade, null)
+    assert.equal(result.error, null)
+    assert.equal(result.machineGrade.axes.length, 4)
+    assert.equal(result.scenario, 'now')
+  })
+
+  it('grades a specific repo against the machine', async () => {
+    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
+    await services.init()
+    const result = await services.llamafarmGrade({
+      repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF',
+      scenario: 'total'
+    })
+    assert.ok(result.model && result.model.id.includes('Qwen'))
+    assert.ok(result.grade)
+    assert.equal(result.grade.axes.length, 4)
+    assert.equal(result.grade.scenario, 'total')
+    assert.ok(['machine', 'model'].includes(result.grade.bottleneck.kind))
+    assert.equal(result.error, null)
+  })
+
+  it('reports a clean error for an unknown repo', async () => {
+    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
+    await services.init()
+    const result = await services.llamafarmGrade({ repo: 'owner/does-not-exist' })
+    assert.equal(result.grade, null)
+    assert.equal(result.model, null)
+    assert.ok(result.error && result.error.length > 0)
   })
 })

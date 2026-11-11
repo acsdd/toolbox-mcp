@@ -13,6 +13,8 @@ import {
   fetchSeries,
   friendlyGmailError,
   buildModelfile,
+  gradeMachine,
+  gradeSetup,
   MODEL_TASKS,
   normalizeWatchlist,
   parseBundle,
@@ -33,12 +35,14 @@ import {
   type FetchLike,
   type FitScenario,
   type GmailCheckResult,
+  type MachineGrade,
   type MachineProfile,
   type MarketplaceModule,
   type ModelTask,
   type PullResult,
   type ResourceStats,
   type ScoredModel,
+  type SetupGrade,
   type TopProcess,
   type WidgetBundleEntry
 } from '@toolbox/widgets'
@@ -98,10 +102,29 @@ export interface LlamafarmGroup {
 
 export interface LlamafarmScoreResult {
   machine: MachineProfile
+  /** The machine rated 0-100 on the axes the models are graded against. */
+  machineGrade: MachineGrade
   scenario: FitScenario
   fetchedAt: number | null
   groups: LlamafarmGroup[]
   total: number
+  error: string | null
+}
+
+export interface LlamafarmGradeInput {
+  /** HuggingFace repo id to grade against this machine; omit to grade the PC alone. */
+  repo?: string
+  scenario?: FitScenario
+}
+
+export interface LlamafarmGradeResult {
+  machine: MachineProfile
+  machineGrade: MachineGrade
+  scenario: FitScenario
+  /** The resolved catalog model, or null when no repo was given / it has no weights. */
+  model: CatalogModel | null
+  /** The paired setup grade, or null when there is no model to grade. */
+  grade: SetupGrade | null
   error: string | null
 }
 
@@ -382,6 +405,12 @@ export function createServices(options: ServicesOptions = {}) {
     return machine
   }
 
+  /** The status tool payload: the machine profile plus its 0-100 scorecard. */
+  async function llamafarmStatusReport(forceDetect = false): Promise<MachineProfile & { grade: MachineGrade }> {
+    const profile = await llamafarmStatus(forceDetect)
+    return { ...profile, grade: gradeMachine(profile, 'now') }
+  }
+
   /**
    * The model catalog, cached on disk for CATALOG_TTL_MS. Wave 1: when
    * Ollama is installed only GGUF repos are requested, since those are the
@@ -446,7 +475,15 @@ export function createServices(options: ServicesOptions = {}) {
       icon: info.icon,
       models: sortForDisplay(byTask.get(info.task) ?? [])
     }))
-    return { machine: profile, scenario: input.scenario, fetchedAt, groups, total: visible.length, error }
+    return {
+      machine: profile,
+      machineGrade: gradeMachine(profile, input.scenario),
+      scenario: input.scenario,
+      fetchedAt,
+      groups,
+      total: visible.length,
+      error
+    }
   }
 
   /** Re-detect the machine and force a catalog refetch. */
@@ -454,6 +491,29 @@ export function createServices(options: ServicesOptions = {}) {
     machine = await detectMachine(detectOptions)
     await llamafarmCatalog(true)
     return { machine: await llamafarmStatus(), catalog: catalog?.models.length ?? 0 }
+  }
+
+  /**
+   * Dedicated grade tool: rate the PC alone, or grade one catalog model against
+   * it. Returns the machine scorecard plus the paired setup grade when a repo
+   * resolves to a model with weights.
+   */
+  async function llamafarmGrade(input: LlamafarmGradeInput): Promise<LlamafarmGradeResult> {
+    const scenario = input.scenario ?? 'now'
+    const profile = await llamafarmStatus()
+    const machineGrade = gradeMachine(profile, scenario)
+    const base = { machine: profile, machineGrade, scenario, model: null, grade: null, error: null }
+    if (!input.repo) return base
+    let model: CatalogModel | null
+    try {
+      model = await fetchModelById(input.repo, { fetchImpl: options.fetchImpl })
+    } catch (cause) {
+      return { ...base, error: cause instanceof Error ? cause.message : String(cause) }
+    }
+    if (!model) {
+      return { ...base, error: `No GGUF or safetensors weights found for ${input.repo}.` }
+    }
+    return { ...base, model, grade: gradeSetup(profile, model, scenario) }
   }
 
   /**
@@ -706,9 +766,11 @@ export function createServices(options: ServicesOptions = {}) {
     resourceStats,
     resourceProcesses,
     llamafarmStatus,
+    llamafarmStatusReport,
     llamafarmCatalog,
     llamafarmScore,
     llamafarmRefresh,
+    llamafarmGrade,
     llamafarmInstall,
     marketplaceList,
     marketplaceInstall,

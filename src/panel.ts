@@ -6,7 +6,8 @@
  * Binds to 127.0.0.1 only. MCP clients talk stdio; humans use the panel.
  */
 import { createServer, type Server, type ServerResponse } from 'node:http'
-import type { Services } from './services.js'
+import { pathToFileURL } from 'node:url'
+import { createServices, type Services } from './services.js'
 import { createTerminal } from './terminal.js'
 
 const PANEL_PORT = Number(process.env.TOOLBOX_MCP_PORT ?? 3851)
@@ -103,6 +104,29 @@ const PAGE = `<!doctype html>
   .minstall button:hover:not(:disabled) { filter: brightness(1.08); }
   .minstall .ok { color: var(--accent); }
   .minstall .err { color: #e08b7a; }
+  .grade { flex: 0 0 auto; min-width: 40px; text-align: right; font-size: 11px; letter-spacing: 0.5px; }
+  .grade b { font-weight: 600; }
+  .grade small { display: block; color: var(--dim); font-size: 9px; }
+  .g-A, .g-Ap { color: var(--accent); }
+  .g-B { color: #9ec96a; }
+  .g-C { color: #d8b45c; }
+  .g-D { color: #d9925a; }
+  .g-F { color: #e08b7a; }
+  .scorecard { width: 100%; border-collapse: collapse; margin: 0 0 8px; font-size: 10px; }
+  .scorecard th { text-align: right; color: var(--dim); font-weight: 400; font-size: 9px; padding: 0 0 4px 8px; letter-spacing: 0.5px; }
+  .scorecard th:first-child { text-align: left; padding-left: 0; }
+  .scorecard td { text-align: right; padding: 4px 0 4px 8px; border-top: 1px solid #132219; color: #c3cec5; font-variant-numeric: tabular-nums; }
+  .scorecard td:first-child { text-align: left; padding-left: 0; color: var(--muted); }
+  .scorecard td small { display: block; color: var(--dim); font-size: 9px; }
+  .scorecard tr.weak td:first-child { color: #e0b07a; }
+  .scorecard tr.weak td:first-child::after { content: ' ◂ weak link'; font-size: 9px; color: #e0b07a; }
+  .scorecard .pos { color: var(--accent); }
+  .scorecard .neg { color: #e08b7a; }
+  .scorecard .na { color: var(--dim); }
+  .verdict { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; }
+  .verdict .mark { font-size: 20px; font-weight: 600; line-height: 1; }
+  .verdict .outof { color: var(--dim); font-size: 10px; }
+  .verdict .says { flex: 1; min-width: 0; color: #9fb3a4; font-size: 10px; }
   .mf-note { padding: 10px 14px; color: var(--dim); font-size: 10px; }
   .mf-note button { border: 0; background: none; color: var(--accent); font-size: 10px; padding: 4px 0; }
 
@@ -324,7 +348,7 @@ async function mfLoad() {
     status.innerHTML = '<span class="err">' + esc(lastResult.error || 'request failed') + '</span>'
     return
   }
-  renderMachine(lastResult.machine)
+  renderMachine(lastResult.machine, lastResult.machineGrade)
   renderGroups(lastResult)
 }
 async function mfSubmit() {
@@ -343,18 +367,64 @@ function toggleReds() {
   mf.showReds = !mf.showReds
   mfLoad()
 }
-function renderMachine(m) {
-  var ramAvail = '<em>' + gb(m.availableRamBytes) + '</em> free'
-  var html = '<div class="chip"><span>MEMORY</span><b>' + gb(m.totalRamBytes) + ' · ' + ramAvail + '</b></div>'
-  html += '<div class="chip"><span>CPU</span><b>' + m.cores + ' cores</b></div>'
+function gradeClass(letter) {
+  return 'g-' + letter.replace('+', 'p')
+}
+function renderMachine(m, grade) {
+  var scores = {}
+  if (grade && grade.axes) {
+    grade.axes.forEach(function (a) { scores[a.axis] = a })
+  }
+  function rated(axis, value) {
+    var a = scores[axis]
+    if (!a || a.score === null) return value
+    return value + ' · <em>' + a.score + '</em>/100'
+  }
+  var ramLabel = mf.scenario === 'now'
+    ? gb(m.availableRamBytes) + ' free of ' + gb(m.totalRamBytes)
+    : gb(m.totalRamBytes) + ' total'
+  var html = '<div class="chip"><span>MEMORY</span><b>' + rated('memory', ramLabel) + '</b></div>'
+  html += '<div class="chip"><span>COMPUTE</span><b>' + rated('compute', m.cores + ' cores') + '</b></div>'
   if (m.gpus.length) {
-    html += '<div class="chip"><span>GPU</span><b>' + esc(m.gpus.map(function (g) { return g.name + ' ' + gb(g.vramBytes) }).join(' · ')) + '</b></div>'
+    var gpuText = esc(m.gpus.map(function (g) { return g.name + ' ' + gb(g.vramBytes) }).join(' · '))
+    html += '<div class="chip"><span>GPU</span><b>' + rated('gpu', gpuText) + '</b></div>'
+  }
+  if (typeof m.freeDiskBytes === 'number') {
+    html += '<div class="chip"><span>STORAGE</span><b>' + rated('storage', gb(m.freeDiskBytes) + ' free') + '</b></div>'
   }
   var oll = m.ollama.installed
     ? 'installed · ' + m.ollama.models.length + ' models'
     : 'not found' + (m.ollama.error ? ' (' + esc(m.ollama.error) + ')' : '')
   html += '<div class="chip"><span>OLLAMA</span><b>' + oll + '</b></div>'
+  if (grade) {
+    html += '<div class="chip"><span>THIS PC · ' + (mf.scenario === 'now' ? 'AVAILABLE NOW' : 'TOTAL') + '</span><b>' +
+      grade.score + '/100 · ' + esc(grade.label) + '</b></div>'
+  }
   document.getElementById('mf-machine').innerHTML = html
+}
+/** The Warp-style spec block, with digits instead of bars. */
+function renderScorecard(grade) {
+  if (!grade) return ''
+  var head = '<div class="verdict">' +
+    '<span class="mark ' + gradeClass(grade.letter) + '">' + esc(grade.letter) + '</span>' +
+    '<span class="outof">' + grade.score + '/100 · ' + esc(grade.label) + '</span>' +
+    '<span class="says">' + esc(grade.bottleneck.message) + '</span></div>'
+  var rows = grade.axes.map(function (a) {
+    var weak = a.axis === grade.bottleneck.axis && grade.bottleneck.kind === 'machine'
+    var pc = a.score === null ? '<span class="na">—</span>' : a.score
+    var room
+    if (a.headroom === null) room = '<span class="na">—</span>'
+    else room = '<span class="' + (a.headroom < 0 ? 'neg' : 'pos') + '">' + (a.headroom > 0 ? '+' : '') + a.headroom + '</span>'
+    return '<tr' + (weak ? ' class="weak"' : '') + '>' +
+      '<td>' + esc(a.label) + '</td>' +
+      '<td>' + pc + '<small>' + esc(a.detail) + '</small></td>' +
+      '<td>' + a.model + '<small>' + esc(a.modelDetail) + '</small></td>' +
+      '<td>' + room + '</td></tr>'
+  }).join('')
+  return head +
+    '<table class="scorecard"><thead><tr><th>AXIS</th>' +
+    '<th>THIS PC</th><th>MODEL WANTS</th><th>HEADROOM</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<p>' + esc(grade.bottleneck.advice) + '</p>'
 }
 function renderGroups(result) {
   var status = document.getElementById('mf-status')
@@ -376,7 +446,9 @@ function renderGroups(result) {
         (m.quantLabel ? ' · ' + esc(m.quantLabel) : '') +
         ' · ' + gb(m.runtimeRamBytes) + ' runtime'
       var row = '<button class="mrow v-' + m.verdict + '" onclick="mfToggle(\\'' + esc(m.id) + '\\')">' +
-        '<span class="dot"></span><span class="nm"><b>' + esc(m.label) + '</b><small>' + meta + '</small></span></button>'
+        '<span class="dot"></span><span class="nm"><b>' + esc(m.label) + '</b><small>' + meta + '</small></span>' +
+        (m.grade ? '<span class="grade ' + gradeClass(m.grade.letter) + '"><b>' + esc(m.grade.letter) + '</b><small>' + m.grade.score + '</small></span>' : '') +
+        '</button>'
       if (mf.expanded[m.id]) {
         var hints = m.hints.map(function (h) { return '<li>' + esc(h) + '</li>' }).join('')
         var inst = mf.install[m.id]
@@ -385,6 +457,7 @@ function renderGroups(result) {
           (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '">' + esc(inst.message) + '</span>' : '') +
           '</div>'
         row += '<div class="mdetail"><p>' + esc(m.reason) + '</p>' +
+          renderScorecard(m.grade) +
           (hints ? '<ul>' + hints + '</ul>' : '') +
           installBlock +
           '<a href="' + esc(m.hfUrl) + '" target="_blank" rel="noopener">huggingface.co ↗</a>' +
@@ -616,7 +689,7 @@ export interface PanelHandle {
   close: () => void
 }
 
-export function startPanel(services: Services): Promise<PanelHandle> {
+export function startPanel(services: Services, options: { port?: number } = {}): Promise<PanelHandle> {
   const terminal = createTerminal()
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -760,15 +833,29 @@ export function startPanel(services: Services): Promise<PanelHandle> {
 
   return new Promise((resolve, reject) => {
     server.once('error', reject)
-    server.listen(PANEL_PORT, '127.0.0.1', () =>
+    server.listen(options.port ?? PANEL_PORT, '127.0.0.1', () => {
+      const address = server.address()
+      if (!address || typeof address === 'string') {
+        server.close()
+        reject(new Error('The panel did not obtain a TCP port.'))
+        return
+      }
       resolve({
-        port: PANEL_PORT,
+        port: address.port,
         close: () => {
           terminal.stop()
           server.closeAllConnections()
           server.close()
         }
       })
-    )
+    })
   })
+}
+
+// `npm run panel` runs this file directly; the MCP server imports it instead.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const services = createServices()
+  await services.init()
+  const handle = await startPanel(services)
+  console.log(`Toolbox ops panel: http://127.0.0.1:${handle.port}`)
 }

@@ -127,9 +127,9 @@ server.tool(
 
 server.tool(
   'llamafarm_status',
-  'Machine profile for running local models: RAM, cores, GPUs, Ollama install.',
+  'Machine profile for running local models (RAM, cores, GPUs, Ollama) plus a 0-100 PC scorecard grade.',
   { redetect: z.boolean().optional().describe('Force a fresh detection pass') },
-  async ({ redetect }) => json(await services.llamafarmStatus(redetect ?? false))
+  async ({ redetect }) => json(await services.llamafarmStatusReport(redetect ?? false))
 )
 
 server.tool(
@@ -160,6 +160,16 @@ server.tool(
   'Re-detect the machine and force a full catalog refetch from HuggingFace.',
   {},
   async () => json(await services.llamafarmRefresh())
+)
+
+server.tool(
+  'llamafarm_grade',
+  'Rate this PC 0-100, and grade one model against it (weakest-link weighted) when a repo is given.',
+  {
+    repo: z.string().optional().describe('HuggingFace repo id to grade; omit to rate the PC alone'),
+    scenario: z.enum(['now', 'total']).optional().describe("'now' = free resources (default), 'total' = full machine")
+  },
+  async (input) => json(await services.llamafarmGrade(input))
 )
 
 server.tool(
