@@ -15,6 +15,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "npm run build && node dist/index.js",
     "panel": "npm run build && node dist/panel.js",
+    "portable": "node scripts/pack-portable.mjs",
     "test": "npm run build && node --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
