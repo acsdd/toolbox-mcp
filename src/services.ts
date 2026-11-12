@@ -67,7 +67,7 @@ function isCatalogModel(value: unknown): value is CatalogModel {
   )
 }
 
-export const USER_AGENT = 'toolbox-mcp/0.5.0 (+https://github.com/28121978444/toolbox-mcp)'
+export const USER_AGENT = 'toolbox-mcp/0.5.0 (+https://github.com/acsdd/toolbox-mcp)'
 const SERIES_TTL_MS = 30 * 60 * 1000
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000
 const CATALOG_PER_TASK = 24

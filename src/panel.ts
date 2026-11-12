@@ -219,7 +219,7 @@ const PAGE = `<!doctype html>
 <body>
 <div class="shell">
   <header class="topbar">
-    <div class="brand"><b>vrm</b> toolbox-mcp<small>ALL SYSTEMS. ONE TERMINAL.</small></div>
+    <div class="brand"><b>TOOLBOX</b> MCP<small>LOCAL TOOLS · GATEWAY</small></div>
     <div class="spacer"></div>
     <span class="badge">127.0.0.1 ONLY · LOCAL</span>
   </header>
@@ -230,7 +230,7 @@ const PAGE = `<!doctype html>
     <button class="navbtn" data-nav="terminal"><i>❯</i><span>Terminal</span><small>03</small></button>
     <button class="navbtn" data-nav="marketplace"><i>▦</i><span>Marketplace</span><small>04</small></button>
     <button class="navbtn hidden" data-nav="gateway"><i>⇄</i><span>Gateway</span><small>05</small></button>
-    <div class="foot"><b>SESSION</b><br />operator@vrm<br />Local access · stdio + panel</div>
+    <div class="foot"><b>LOCAL SESSION</b><br />MCP stdio + panel<br />127.0.0.1 only</div>
   </aside>
 
   <main>

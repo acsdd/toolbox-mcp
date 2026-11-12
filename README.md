@@ -6,8 +6,8 @@ Part of the Toolbox family:
 
 | App | Repo |
 | --- | --- |
-| Toolbox (desktop) | [`toolbox-desktop`](https://github.com/28121978444/toolbox-desktop) |
-| NAS companion | [`toolbox-nas`](https://github.com/28121978444/toolbox-nas) |
+| Toolbox (desktop) | [`toolbox-desktop`](https://github.com/acsdd/toolbox-desktop) |
+| NAS companion | [`toolbox-nas`](https://github.com/acsdd/toolbox-nas) |
 | Shared widget core | [`toolbox-widgets`](https://github.com/acsdd/toolbox-widgets) |
 
 ## Tools
@@ -99,7 +99,10 @@ model to AstrLink.
 Requires Node.js 22+. The sibling `toolbox-widgets` repo must be checked out next to this one.
 
 ```bash
-npm install
+git clone https://github.com/acsdd/toolbox-widgets.git
+git clone https://github.com/acsdd/toolbox-mcp.git
+cd toolbox-mcp
+npm ci
 npm start          # MCP server on stdio + ops panel on 127.0.0.1:3851
 ```
 
