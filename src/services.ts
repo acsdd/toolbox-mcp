@@ -6,6 +6,8 @@ import {
   createResourceMonitor,
   detectMachine,
   fetchCatalog,
+  fetchGatewayRequests,
+  fetchGatewayStatus,
   fetchGmailInbox,
   fetchMarkets,
   fetchModelById,
@@ -34,6 +36,8 @@ import {
   type ExecFileLike,
   type FetchLike,
   type FitScenario,
+  type GatewayRequestsResult,
+  type GatewayStatus,
   type GmailCheckResult,
   type MachineGrade,
   type MachineProfile,
@@ -68,10 +72,13 @@ const SERIES_TTL_MS = 30 * 60 * 1000
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000
 const CATALOG_PER_TASK = 24
 const REGISTRY_TTL_MS = 5 * 60 * 1000
+const GATEWAY_TTL_MS = 30 * 1000
 
 interface ServicesOptions {
   fetchImpl?: FetchLike
   execFileImpl?: ExecFileLike
+  /** Path to the read-only astrlink CLI; defaults to the AstrLink install. */
+  gatewayCliPath?: string
   /** Pulls a model into the local Ollama runtime (injectable for tests). */
   pullModel?: (reference: string) => Promise<PullResult>
   /** Runs an arbitrary Ollama subcommand (injectable for tests). */
@@ -150,6 +157,8 @@ export interface LlamafarmInstallResult {
   output: string
   /** What to run next. */
   steps: string[]
+  /** Manual setup for the default local Ollama server; present only after success. */
+  astrlink: { baseUrl: string; model: string; capability: 'openai.chat' } | null
 }
 
 export interface MarketplaceListedModule extends MarketplaceModule {
@@ -221,6 +230,7 @@ export function createServices(options: ServicesOptions = {}) {
   let catalogError: string | null = null
   let registry: { modules: MarketplaceModule[]; updated: string; fetchedAt: number } | null = null
   let registryError: string | null = null
+  let gateway: { status: GatewayStatus; fetchedAt: number } | null = null
   const remotes = new Map<string, { connection: RemoteConnection; tools: RemoteToolDef[] }>()
   const remoteConnect = options.remoteConnect ?? connectRemote
   const detectOptions = { fetchImpl: options.fetchImpl, execFileImpl: options.execFileImpl }
@@ -412,25 +422,35 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   /**
-   * The model catalog, cached on disk for CATALOG_TTL_MS. Wave 1: when
-   * Ollama is installed only GGUF repos are requested, since those are the
-   * ones the machine can actually run.
+   * The model catalog, cached on disk for CATALOG_TTL_MS. Ollama is the only
+   * runtime Model Farm installs into, and it can only pull GGUF, so the
+   * catalog is restricted to GGUF repos. A cache written before this rule
+   * (or by a session without Ollama) may still list safetensors checkpoints;
+   * it is treated as stale, refetched and filtered either way.
    */
   async function llamafarmCatalog(forceRefresh = false): Promise<{
     models: CatalogModel[]
     fetchedAt: number | null
     error: string | null
   }> {
-    const fresh = catalog !== null && catalog.fetchedAt !== null && Date.now() - catalog.fetchedAt < CATALOG_TTL_MS
+    const installable = (models: CatalogModel[]): CatalogModel[] =>
+      models.filter((model) => model.formats.includes('gguf'))
+
+    const cachedModels = catalog?.models ?? []
+    const staleFormats = cachedModels.some((model) => !model.formats.includes('gguf'))
+    const fresh =
+      catalog !== null &&
+      catalog.fetchedAt !== null &&
+      Date.now() - catalog.fetchedAt < CATALOG_TTL_MS &&
+      !staleFormats
     if (!forceRefresh && (fresh || (catalog !== null && catalogError !== null))) {
-      return { models: catalog?.models ?? [], fetchedAt: catalog?.fetchedAt ?? null, error: catalogError }
+      return { models: installable(cachedModels), fetchedAt: catalog?.fetchedAt ?? null, error: catalogError }
     }
-    const profile = await llamafarmStatus(forceRefresh)
     let models: CatalogModel[]
     let fetchedAt: number | null
     try {
       models = await fetchCatalog({
-        formats: profile.ollama.installed ? ['gguf'] : ['gguf', 'safetensors'],
+        formats: ['gguf'],
         perTask: CATALOG_PER_TASK,
         fetchImpl: options.fetchImpl
       })
@@ -443,7 +463,7 @@ export function createServices(options: ServicesOptions = {}) {
       fetchedAt = catalog?.fetchedAt ?? null
     }
     catalog = { models, fetchedAt }
-    return { models, fetchedAt, error: catalogError }
+    return { models: installable(models), fetchedAt, error: catalogError }
   }
 
   /**
@@ -489,8 +509,8 @@ export function createServices(options: ServicesOptions = {}) {
   /** Re-detect the machine and force a catalog refetch. */
   async function llamafarmRefresh(): Promise<{ machine: MachineProfile; catalog: number }> {
     machine = await detectMachine(detectOptions)
-    await llamafarmCatalog(true)
-    return { machine: await llamafarmStatus(), catalog: catalog?.models.length ?? 0 }
+    const { models } = await llamafarmCatalog(true)
+    return { machine: await llamafarmStatus(), catalog: models.length }
   }
 
   /**
@@ -532,6 +552,7 @@ export function createServices(options: ServicesOptions = {}) {
       message,
       output: '',
       steps: [],
+      astrlink: null,
       ...extra
     })
     if (!repo) {
@@ -568,7 +589,9 @@ export function createServices(options: ServicesOptions = {}) {
     }
 
     let result
-    if (typeof input.offload === 'number' && Number.isFinite(input.offload)) {
+    const split = typeof input.offload === 'number' && Number.isFinite(input.offload)
+    const installedModel = split ? plan.modelName : plan.reference
+    if (split) {
       const directory = mkdtempSync(join(tmpdir(), 'toolbox-mcp-'))
       const modelfilePath = join(directory, 'Modelfile')
       writeFileSync(modelfilePath, buildModelfile(plan.reference, { numGpu: input.offload }), 'utf8')
@@ -594,10 +617,45 @@ export function createServices(options: ServicesOptions = {}) {
       reference: plan.reference,
       modelName: plan.modelName,
       reason: 'installed',
-      message: `${plan.reference} is ready to run.`,
+      message: `${installedModel} is ready to run.`,
       output: result.output,
-      steps: plan.steps
+      steps: split ? [`ollama run ${installedModel}`] : plan.steps,
+      astrlink: {
+        baseUrl: 'http://127.0.0.1:11434/v1',
+        model: installedModel,
+        capability: 'openai.chat'
+      }
     }
+  }
+
+  // --- astrlink gateway: read-only observability -----------------------------
+
+  /**
+   * The local AstrLink gateway report, cached briefly because the panel polls
+   * it. Reads go through the gateway's own observer CLI: no setting can be
+   * changed from here, and no request bodies are ever fetched.
+   */
+  async function gatewayStatus(forceRefresh = false): Promise<GatewayStatus> {
+    if (!forceRefresh && gateway && Date.now() - gateway.fetchedAt < GATEWAY_TTL_MS) {
+      return gateway.status
+    }
+    const status = await fetchGatewayStatus({
+      execFileImpl: options.execFileImpl,
+      ...(options.gatewayCliPath ? { cliPath: options.gatewayCliPath } : {})
+    })
+    gateway = { status, fetchedAt: Date.now() }
+    return status
+  }
+
+  /** Recent gateway request records (metadata only) with a spend summary. */
+  async function gatewayRequests(
+    input: { limit?: number; status?: string; serviceId?: string } = {}
+  ): Promise<GatewayRequestsResult> {
+    return fetchGatewayRequests({
+      ...input,
+      execFileImpl: options.execFileImpl,
+      ...(options.gatewayCliPath ? { cliPath: options.gatewayCliPath } : {})
+    })
   }
 
   // --- marketplace: live registry + installs --------------------------------
@@ -772,6 +830,8 @@ export function createServices(options: ServicesOptions = {}) {
     llamafarmRefresh,
     llamafarmGrade,
     llamafarmInstall,
+    gatewayStatus,
+    gatewayRequests,
     marketplaceList,
     marketplaceInstall,
     marketplaceUninstall,

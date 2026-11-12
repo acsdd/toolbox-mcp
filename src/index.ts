@@ -134,7 +134,7 @@ server.tool(
 
 server.tool(
   'llamafarm_catalog',
-  'HuggingFace model catalog (top per task) with real file sizes; cached 6h. Wave 1 requests only formats the machine can run.',
+  'HuggingFace model catalog (top per task) with real file sizes; cached 6h. GGUF repos only — the ones Ollama can actually pull.',
   { refresh: z.boolean().optional().describe('Ignore the cache and refetch') },
   async ({ refresh }) => json(await services.llamafarmCatalog(refresh ?? false))
 )
@@ -174,13 +174,33 @@ server.tool(
 
 server.tool(
   'llamafarm_install',
-  'Install a catalog model into the local Ollama runtime (GGUF from HuggingFace).',
+  'Install a catalog model into local Ollama (GGUF from HuggingFace). Successful installs include manual AstrLink setup details; no gateway settings are changed.',
   {
     repo: z.string().describe('HuggingFace repo id, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF"'),
     quant: z.string().optional().describe('Quantization tag, e.g. "Q4_K_M" (defaults to the catalog entry)'),
     offload: z.number().optional().describe('Layers to keep on the GPU; writes a Modelfile instead of a plain pull')
   },
   async (input) => json(await services.llamafarmInstall(input))
+)
+
+// --- astrlink gateway: read-only observability -------------------------------
+
+server.tool(
+  'gateway_status',
+  'Local AstrLink gateway health: providers and subscription state, routing posture, capture/privacy settings and the alerts that follow. Read-only metadata, cached 30s.',
+  { refresh: z.boolean().optional().describe('Ignore the cache and re-read the gateway') },
+  async ({ refresh }) => json(await services.gatewayStatus(refresh ?? false))
+)
+
+server.tool(
+  'gateway_requests',
+  'Recent AstrLink request records — model, provider, status, latency and token counts. Metadata only: no prompt or response bodies.',
+  {
+    limit: z.number().optional().describe('1-200 records (default 25)'),
+    status: z.string().optional().describe('Filter by status, e.g. "failed"'),
+    serviceId: z.string().optional().describe('Filter by upstream service id from gateway_status')
+  },
+  async (input) => json(await services.gatewayRequests(input))
 )
 
 // --- marketplace -------------------------------------------------------------
