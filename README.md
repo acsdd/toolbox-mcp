@@ -98,6 +98,9 @@ model to AstrLink.
 
 Requires Node.js 22+. The sibling `toolbox-widgets` repo must be checked out next to this one.
 
+For the complete Windows setup—including Ollama, AstrLink and MCP client
+configuration—see [Set up Toolbox MCP with AstrLink](docs/astrlink-setup.md).
+
 ```bash
 git clone https://github.com/acsdd/toolbox-widgets.git
 git clone https://github.com/acsdd/toolbox-mcp.git

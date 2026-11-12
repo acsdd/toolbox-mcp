@@ -304,7 +304,7 @@ const PAGE = `<!doctype html>
 
     <section id="sec-gateway" class="hidden">
       <h1>AstrLink gateway</h1>
-      <p class="sub">Read-only view of the local API gateway: providers, routing, capture posture and recent traffic. Metadata only — no prompt bodies, no setting changes.</p>
+      <p class="sub">Read-only view of the local API gateway: providers, routing, capture posture and recent traffic. Metadata only — no prompt bodies, no setting changes. <a href="https://docs.astrsk.ai/en/How-to-connect-providers" target="_blank" rel="noopener">AstrLink setup guide ↗</a></p>
       <div class="mf-bar">
         <button class="btn primary" onclick="gwLoad(true)">Refresh</button>
         <label>status <select id="gw-filter" onchange="gwLoadRequests()">
