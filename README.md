@@ -36,7 +36,18 @@ then install the **AstrLink Gateway** feature from Marketplace. Model Farm
 installs can also show the provider settings needed to connect each Ollama
 model to AstrLink.
 
-- **Overview** — the shared widgets, live.
+- **Overview** — the server's front page. A hero card states the identity of the
+  running server (version, transport, panel URL, repo link), four stat tiles
+  count the MCP tools, the recorded tool calls and the failures, and the
+  **MCP tool surface** lists every tool the server exposes — grouped by
+  feature (Crypto watch, Gmail announcer, Resource monitor, Model Farm,
+  AstrLink gateway, Marketplace, Remote servers, Widget bundles), searchable
+  by name or purpose and filterable by group, with each tool's parameter
+  schema shown as chips. A **Live activity** feed on the right lists the tool
+  calls as they land, with outcome and duration. The four shared widgets sit
+  below as real UI: a price table, a mail list, resource meters and a widget
+  bundle summary. The whole page is served by the server itself — nothing is
+  fetched from the network.
 - **Model Farm** — top HuggingFace models per skill (Text Generation, Text to Image,
   Text to Speech, …) as columns, color-marked against this machine:
   green = runs now, yellow = runs if you free resources, red = doesn't fit.
@@ -97,6 +108,8 @@ model to AstrLink.
   uploaded. The terminal command history is kept in the browser's local
   storage, so it survives a page reload but never leaves the browser.
 
+![Overview](docs/panel-overview.png)
+
 ![Model Farm](docs/panel-model-farm.png)
 
 ## Run
@@ -149,19 +162,19 @@ which bundles the ops panel and the widget core into one Windows executable.
 ### Build the portable app
 
 The portable build borrows the Electron toolchain from the sibling desktop
-checkout (`../quoder`, the `toolbox-desktop` repo), so that checkout has to be
+checkout (`../toolbox-desktop`, the `toolbox-desktop` repo), so that checkout has to be
 present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.6.1.exe
+npm run portable      # → dist/ModelFarm-Portable-0.7.0.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
 packaged `app.asar`:
 
 ```bash
-../quoder/node_modules/.bin/electron scripts/smoke-portable.cjs \
+../toolbox-desktop/node_modules/.bin/electron scripts/smoke-portable.cjs \
   <unpacked-app>/resources/app.asar
 ```
 
@@ -177,15 +190,15 @@ the widget core repo, so **the widget core has to be published first**:
 
 ```bash
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.6.1
+git tag v0.7.0
 git push origin main --tags
-gh release create v0.6.1 dist/ModelFarm-Portable-0.6.1.exe \
-  --title "Model Farm 0.6.1" --notes-file release-notes.md
+gh release create v0.7.0 dist/ModelFarm-Portable-0.7.0.exe \
+  --title "Model Farm 0.7.0" --notes-file release-notes.md
 ```
 
-This repository is public, but no credential ever lands in it: the Gmail App
-Password is written to `~/.toolbox-mcp/settings.json` on your machine only. The
-release artifact contains code, not your settings.
+No credential ever lands in this repository: the Gmail App Password is written
+to `~/.toolbox-mcp/settings.json` on your machine only. The release artifact
+contains code, not your settings.
 
 ## License
 

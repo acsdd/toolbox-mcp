@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const toolchain = resolve(process.argv[2] ?? join(root, '../quoder'))
+const toolchain = resolve(process.argv[2] ?? join(root, '../toolbox-desktop'))
 const output = resolve(process.argv[3] ?? join(root, 'dist'))
 const widgets = await realpath(join(root, 'node_modules/@toolbox/widgets'))
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
@@ -31,7 +31,12 @@ const buildDir = join(stage, 'release')
 await mkdir(join(appDir, 'scripts'), { recursive: true })
 await cp(join(root, 'dist'), join(appDir, 'dist'), {
   recursive: true,
-  filter: (path) => !/\.(exe|map|ts)$/.test(path)
+  filter: (path) => {
+    const rel = relative(join(root, 'dist'), path)
+    // Never ship runtime data (the Electron profile) inside the bundle.
+    if (rel === 'ModelFarm-data' || rel.startsWith(`ModelFarm-data${sep}`)) return false
+    return !/\.(exe|map|ts)$/.test(path)
+  }
 })
 await copyFile(join(root, 'scripts/desktop.cjs'), join(appDir, 'scripts/desktop.cjs'))
 

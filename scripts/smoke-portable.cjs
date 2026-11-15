@@ -50,6 +50,13 @@ require(path.join(appRoot, 'scripts/desktop.cjs')).then(async (window) => {
   const settings = await fetch(`${origin}/api/settings`).then((r) => r.json())
   assert.ok(Array.isArray(settings.watchlist))
   assert.equal(typeof settings.showProcesses, 'boolean')
+  // The packaged app serves the MCP tool catalogue the Overview reads.
+  const catalog = await fetch(`${origin}/api/catalog`).then((r) => r.json())
+  assert.equal(catalog.server.name, 'toolbox-mcp')
+  assert.equal(catalog.server.version, expectedVersion)
+  assert.ok(catalog.groups.length > 0)
+  assert.ok(catalog.tools.length >= 20)
+  assert.ok(catalog.tools.every((tool) => catalog.groups.some((group) => group.id === tool.group)))
   const result = await response.json()
   assert.equal(result.groups[0].models[0].grade.axes.length, 4)
   const rendered = await window.webContents.executeJavaScript(`
@@ -81,7 +88,29 @@ require(path.join(appRoot, 'scripts/desktop.cjs')).then(async (window) => {
   await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
   const screenshot = path.join(home, 'portable-smoke.png')
   fs.writeFileSync(screenshot, (await window.webContents.capturePage()).toPNG())
-  console.log(JSON.stringify({ ok: true, port: new URL(origin).port, scorecardRows: rendered.rows, sandbox: true, screenshot }))
+  // The Overview is the MCP front page: the tool surface has to render.
+  const overview = await window.webContents.executeJavaScript(`
+    (async () => {
+      show('overview');
+      for (let i = 0; i < 50; i += 1) {
+        if (document.querySelectorAll('#ov-tools .tool').length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return { tools: document.querySelectorAll('#ov-tools .tool').length,
+               tiles: document.querySelectorAll('#ov-tiles .tile').length,
+               groups: document.querySelectorAll('#ov-groups .grp-chip').length,
+               counter: document.getElementById('ov-tool-count').textContent };
+    })()
+  `)
+  assert.ok(overview.tools >= 20)
+  assert.equal(overview.tiles, 4)
+  assert.ok(overview.groups > 1)
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+  // Keep a picture of the Overview next to the Model Farm one.
+  const docs = path.join(__dirname, '..', 'docs')
+  fs.mkdirSync(docs, { recursive: true })
+  fs.writeFileSync(path.join(docs, 'panel-overview.png'), (await window.webContents.capturePage()).toPNG())
+  console.log(JSON.stringify({ ok: true, port: new URL(origin).port, scorecardRows: rendered.rows, sandbox: true, overviewTools: overview.tools, screenshot }))
   clearTimeout(watchdog)
   // Closing the last window must close the owned HTTP listener too.
   app.once('before-quit', (event) => {
