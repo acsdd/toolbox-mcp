@@ -6,6 +6,11 @@ const os = require('node:os')
 const path = require('node:path')
 
 const appRoot = path.resolve(process.argv[2] ?? path.join(__dirname, '..'))
+// The packaged manifest carries the released version; it also feeds the
+// version the MCP server reports.
+const expectedVersion = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version
+const packagedVersion = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8')).version
+assert.equal(packagedVersion, expectedVersion)
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'modelfarm-smoke-'))
 process.env.PORTABLE_EXECUTABLE_DIR = home
 process.env.TOOLBOX_MCP_HOME = path.join(home, 'ModelFarm-data/settings')
@@ -39,6 +44,12 @@ require(path.join(appRoot, 'scripts/desktop.cjs')).then(async (window) => {
     body: JSON.stringify({ scenario: 'now' })
   })
   assert.equal(response.status, 200)
+  // The panel only answers this machine: a foreign origin is refused.
+  const foreign = await fetch(`${origin}/api/overview`, { headers: { Origin: 'https://evil.example.com' } })
+  assert.equal(foreign.status, 403)
+  const settings = await fetch(`${origin}/api/settings`).then((r) => r.json())
+  assert.ok(Array.isArray(settings.watchlist))
+  assert.equal(typeof settings.showProcesses, 'boolean')
   const result = await response.json()
   assert.equal(result.groups[0].models[0].grade.axes.length, 4)
   const rendered = await window.webContents.executeJavaScript(`
@@ -58,6 +69,15 @@ require(path.join(appRoot, 'scripts/desktop.cjs')).then(async (window) => {
   assert.equal(rendered.nodeVisible, false)
   assert.equal(rendered.modelsVisible, true)
   assert.equal(rendered.overviewHidden, true)
+  const settingsView = await window.webContents.executeJavaScript(`
+    show('settings');
+    ({ settingsVisible: !document.getElementById('sec-settings').classList.contains('hidden'),
+       modelsHidden: document.getElementById('sec-models').classList.contains('hidden'),
+       watchlistField: typeof document.getElementById('set-watchlist') === 'object' });
+  `)
+  assert.equal(settingsView.settingsVisible, true)
+  assert.equal(settingsView.modelsHidden, true)
+  assert.equal(settingsView.watchlistField, true)
   await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
   const screenshot = path.join(home, 'portable-smoke.png')
   fs.writeFileSync(screenshot, (await window.webContents.capturePage()).toPNG())

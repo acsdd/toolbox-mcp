@@ -1,6 +1,6 @@
 # toolbox-mcp
 
-Private, local-first MCP server that exposes the shared [Toolbox widgets](https://github.com/acsdd/toolbox-widgets) — **crypto watch**, **Gmail announcer** and **resource monitor** — to any MCP client, plus a small ops panel on `http://127.0.0.1:3851`.
+Local-first MCP server that exposes the shared [Toolbox widgets](https://github.com/acsdd/toolbox-widgets) — **crypto watch**, **Gmail announcer** and **resource monitor** — to any MCP client, plus a small ops panel on `http://127.0.0.1:3851`.
 
 Part of the Toolbox family:
 
@@ -91,6 +91,11 @@ model to AstrLink.
   not appear in the live Marketplace until `toolbox-widgets/registry.json` is
   published to that repository's default branch; rebuilding this server alone
   does not publish the registry.
+- **Settings** — edit the preferences the panel stores in
+  `~/.toolbox-mcp/settings.json`: the crypto watchlist, the disk the resource
+  monitor reports on, and whether the process list is shown. Nothing is
+  uploaded. The terminal command history is kept in the browser's local
+  storage, so it survives a page reload but never leaves the browser.
 
 ![Model Farm](docs/panel-model-farm.png)
 
@@ -111,7 +116,8 @@ npm start          # MCP server on stdio + ops panel on 127.0.0.1:3851
 
 Settings live in `~/.toolbox-mcp/settings.json` (override with `TOOLBOX_MCP_HOME`).
 The file is owner-readable only (`0600`). **Note:** the Gmail App Password is stored
-there until OS keychain integration lands — keep the repo private and the file safe.
+there in plain text until OS keychain integration lands — keep the file safe, and
+never commit it. Nothing else you keep in that file is sent anywhere.
 
 ## Development
 
@@ -119,6 +125,20 @@ there until OS keychain integration lands — keep the repo private and the file
 npm test           # build + node:test suite
 npm run typecheck
 ```
+
+## Security
+
+- The server binds to `127.0.0.1` only — it is never reachable from the network.
+- The ops panel answers only requests that come from this machine: a foreign
+  `Host` header (DNS rebinding) or a foreign `Origin` (a web page driving the
+  panel) is refused with `403`.
+- The panel page loads nothing from the network and runs under a strict content
+  security policy; request bodies are capped at 1 MB.
+- Credentials live in `~/.toolbox-mcp/settings.json` (`0600`), never in the
+  repository. The Gmail App Password is stored in plain text there until OS
+  keychain integration lands.
+- Remote marketplace modules are opt-in and badged: their tool arguments leave
+  this machine.
 
 ## Release
 
@@ -134,7 +154,7 @@ present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.6.0.exe
+npm run portable      # → dist/ModelFarm-Portable-0.6.1.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -157,15 +177,15 @@ the widget core repo, so **the widget core has to be published first**:
 
 ```bash
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.6.0
+git tag v0.6.1
 git push origin main --tags
-gh release create v0.6.0 dist/ModelFarm-Portable-0.6.0.exe \
-  --title "Model Farm 0.6.0" --notes-file release-notes.md
+gh release create v0.6.1 dist/ModelFarm-Portable-0.6.1.exe \
+  --title "Model Farm 0.6.1" --notes-file release-notes.md
 ```
 
-This repository is private — the Gmail App Password is written to
-`~/.toolbox-mcp/settings.json` — so a release is only visible to the people
-who already have access to the repository.
+This repository is public, but no credential ever lands in it: the Gmail App
+Password is written to `~/.toolbox-mcp/settings.json` on your machine only. The
+release artifact contains code, not your settings.
 
 ## License
 
