@@ -219,7 +219,7 @@ const PAGE = `<!doctype html>
 <body>
 <div class="shell">
   <header class="topbar">
-    <div class="brand"><b>vrm</b> toolbox-mcp<small>ALL SYSTEMS. ONE TERMINAL.</small></div>
+    <div class="brand"><b>TOOLBOX</b> MCP<small>LOCAL TOOLS · GATEWAY</small></div>
     <div class="spacer"></div>
     <span class="badge">127.0.0.1 ONLY · LOCAL</span>
   </header>
@@ -230,7 +230,7 @@ const PAGE = `<!doctype html>
     <button class="navbtn" data-nav="terminal"><i>❯</i><span>Terminal</span><small>03</small></button>
     <button class="navbtn" data-nav="marketplace"><i>▦</i><span>Marketplace</span><small>04</small></button>
     <button class="navbtn hidden" data-nav="gateway"><i>⇄</i><span>Gateway</span><small>05</small></button>
-    <div class="foot"><b>SESSION</b><br />operator@vrm<br />Local access · stdio + panel</div>
+    <div class="foot"><b>LOCAL SESSION</b><br />MCP stdio + panel<br />127.0.0.1 only</div>
   </aside>
 
   <main>
@@ -304,7 +304,7 @@ const PAGE = `<!doctype html>
 
     <section id="sec-gateway" class="hidden">
       <h1>AstrLink gateway</h1>
-      <p class="sub">Read-only view of the local API gateway: providers, routing, capture posture and recent traffic. Metadata only — no prompt bodies, no setting changes.</p>
+      <p class="sub">Read-only view of the local API gateway: providers, routing, capture posture and recent traffic. Metadata only — no prompt bodies, no setting changes. <a href="https://docs.astrsk.ai/en/How-to-connect-providers" target="_blank" rel="noopener">AstrLink setup guide ↗</a></p>
       <div class="mf-bar">
         <button class="btn primary" onclick="gwLoad(true)">Refresh</button>
         <label>status <select id="gw-filter" onchange="gwLoadRequests()">
@@ -496,6 +496,7 @@ function renderAstrlinkSetup(id, inst) {
     inst.copyState === 'error' ? 'Copy unavailable — select and copy the settings above.' : ''
   return '<div class="msetup"><strong>Use in AstrLink</strong>' +
     '<p>Add an OpenAI-compatible service in AstrLink using these settings. ' +
+    'See the <a href="https://docs.astrsk.ai/en/How-to-connect-providers" target="_blank" rel="noopener">AstrLink provider setup guide ↗</a>. ' +
     'This uses the default local Ollama address; adjust it if your server runs elsewhere.</p>' +
     '<pre tabindex="0" aria-label="AstrLink service settings">' + esc(mfAstrlinkText(inst.astrlink)) + '</pre>' +
     '<div class="msetup-actions"><button class="btn" data-copy-setup="' + esc(id) +

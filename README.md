@@ -6,8 +6,8 @@ Part of the Toolbox family:
 
 | App | Repo |
 | --- | --- |
-| Toolbox (desktop) | [`toolbox-desktop`](https://github.com/28121978444/toolbox-desktop) |
-| NAS companion | [`toolbox-nas`](https://github.com/28121978444/toolbox-nas) |
+| Toolbox (desktop) | [`toolbox-desktop`](https://github.com/acsdd/toolbox-desktop) |
+| NAS companion | [`toolbox-nas`](https://github.com/acsdd/toolbox-nas) |
 | Shared widget core | [`toolbox-widgets`](https://github.com/acsdd/toolbox-widgets) |
 
 ## Tools
@@ -28,6 +28,13 @@ Part of the Toolbox family:
 ## Ops panel
 
 `http://127.0.0.1:3851` (override with `TOOLBOX_MCP_PORT`), localhost only.
+
+The AstrLink Gateway section requires the AstrLink desktop and its agent tools
+for this host. Install AstrLink, add local Ollama as a provider using the
+[provider setup guide](https://docs.astrsk.ai/en/How-to-connect-providers),
+then install the **AstrLink Gateway** feature from Marketplace. Model Farm
+installs can also show the provider settings needed to connect each Ollama
+model to AstrLink.
 
 - **Overview** — the shared widgets, live.
 - **Model Farm** — top HuggingFace models per skill (Text Generation, Text to Image,
@@ -52,6 +59,8 @@ Part of the Toolbox family:
   OpenAI-compatible provider, default local base URL `http://127.0.0.1:11434/v1`,
   the installed model and `openai.chat`. Plain pulls use the full quantized
   `hf.co` reference; GPU-split installs use the created local model name.
+  Follow AstrLink's [provider connection guide](https://docs.astrsk.ai/en/How-to-connect-providers)
+  for adding the service, or see the [AstrLink project](https://github.com/Calcium-Ion/AstrLink).
   Adjust the address if Ollama runs elsewhere. These are manual service settings,
   not an import file: no credentials are included and nothing is configured in
   AstrLink automatically. Failed installs offer no setup. The same success-only
@@ -89,8 +98,14 @@ Part of the Toolbox family:
 
 Requires Node.js 22+. The sibling `toolbox-widgets` repo must be checked out next to this one.
 
+For the complete Windows setup—including Ollama, AstrLink and MCP client
+configuration—see [Set up Toolbox MCP with AstrLink](docs/astrlink-setup.md).
+
 ```bash
-npm install
+git clone https://github.com/acsdd/toolbox-widgets.git
+git clone https://github.com/acsdd/toolbox-mcp.git
+cd toolbox-mcp
+npm ci
 npm start          # MCP server on stdio + ops panel on 127.0.0.1:3851
 ```
 
