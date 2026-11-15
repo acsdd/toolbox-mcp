@@ -104,6 +104,17 @@ const PAGE = `<!doctype html>
   .minstall button:hover:not(:disabled) { filter: brightness(1.08); }
   .minstall .ok { color: var(--accent); }
   .minstall .err { color: #e08b7a; }
+  .minstall .note { color: var(--dim); }
+  .msetup { margin: 12px 0; padding: 14px; border: 1px solid var(--border); border-left: 3px solid var(--accent); background: var(--bg); font-size: 12px; color: var(--text); }
+  .msetup strong { color: var(--accent); font-size: 13px; }
+  .msetup p { margin: 8px 0; line-height: 1.6; color: var(--text); }
+  .msetup pre { margin: 12px 0; font: inherit; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+  .msetup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  .msetup-actions .btn { min-height: 44px; padding: 10px 16px; }
+  .msetup-actions .btn:disabled { opacity: 0.55; cursor: progress; }
+  .msetup pre:focus-visible, .msetup-actions .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .msetup-actions [role="status"] { color: var(--accent); overflow-wrap: anywhere; }
+  .msetup .msetup-note { margin-bottom: 0; color: var(--text); }
   .grade { flex: 0 0 auto; min-width: 40px; text-align: right; font-size: 11px; letter-spacing: 0.5px; }
   .grade b { font-weight: 600; }
   .grade small { display: block; color: var(--dim); font-size: 9px; }
@@ -164,6 +175,29 @@ const PAGE = `<!doctype html>
   @keyframes mp-pulse { 50% { opacity: .4; } }
   @media (max-width: 1100px) { .mp-layout { grid-template-columns: 1fr; } }
 
+  /* gateway */
+  .gw-alerts { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .gw-alert { display: flex; gap: 10px; align-items: flex-start; padding: 11px 14px; border: 1px solid var(--border); border-left-width: 3px; border-radius: 5px; background: var(--panel); font-size: 11px; color: #a6b4aa; }
+  .gw-alert.error { border-left-color: var(--red); }
+  .gw-alert.warn { border-left-color: var(--yellow); }
+  .gw-alert.info { border-left-color: var(--dim); }
+  .gw-alert i { flex: 0 0 auto; font-style: normal; }
+  .gw-alert.error i { color: var(--red); }
+  .gw-alert.warn i { color: var(--yellow); }
+  .gw-alert.info i { color: var(--muted); }
+  .gw-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .gw-table th { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--dim); font-weight: 400; font-size: 9px; letter-spacing: .06em; }
+  .gw-table td { padding: 10px 14px; border-bottom: 1px solid #132219; color: #c3cec5; vertical-align: top; }
+  .gw-table tr:last-child td { border-bottom: 0; }
+  .gw-table td small { display: block; color: var(--dim); font-size: 9px; }
+  .gw-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .gw-state { display: inline-block; padding: 3px 9px; border: 1px solid var(--border); border-radius: 3px; font-size: 9px; color: var(--muted); }
+  .gw-state.ok { color: var(--green); border-color: #2a4935; }
+  .gw-state.bad { color: var(--red); border-color: #4a2a2c; }
+  .gw-state.off { color: var(--dim); }
+  .gw-empty { padding: 36px 16px; text-align: center; color: var(--dim); font-size: 11px; line-height: 1.8; }
+  .gw-log { margin-top: 14px; }
+
   /* terminal */
   .term { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 7px; background: #050a07; overflow: hidden; }
   .term-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 10px; }
@@ -195,6 +229,7 @@ const PAGE = `<!doctype html>
     <button class="navbtn" data-nav="models"><i>⌁</i><span>Model Farm</span><small>02</small></button>
     <button class="navbtn" data-nav="terminal"><i>❯</i><span>Terminal</span><small>03</small></button>
     <button class="navbtn" data-nav="marketplace"><i>▦</i><span>Marketplace</span><small>04</small></button>
+    <button class="navbtn hidden" data-nav="gateway"><i>⇄</i><span>Gateway</span><small>05</small></button>
     <div class="foot"><b>SESSION</b><br />operator@vrm<br />Local access · stdio + panel</div>
   </aside>
 
@@ -266,6 +301,26 @@ const PAGE = `<!doctype html>
         <div class="mp-detail" id="mp-detail"><div class="mp-empty">select a module to see details</div></div>
       </div>
     </section>
+
+    <section id="sec-gateway" class="hidden">
+      <h1>AstrLink gateway</h1>
+      <p class="sub">Read-only view of the local API gateway: providers, routing, capture posture and recent traffic. Metadata only — no prompt bodies, no setting changes.</p>
+      <div class="mf-bar">
+        <button class="btn primary" onclick="gwLoad(true)">Refresh</button>
+        <label>status <select id="gw-filter" onchange="gwLoadRequests()">
+          <option value="">all</option><option value="succeeded">succeeded</option><option value="failed">failed</option>
+          <option value="blocked">blocked</option><option value="cancelled">cancelled</option>
+        </select></label>
+        <div class="mf-status" id="gw-line">reading the gateway…</div>
+      </div>
+      <div class="machine" id="gw-chips"></div>
+      <div class="gw-alerts" id="gw-alerts"></div>
+      <div class="card-grid">
+        <div class="card"><h2>Providers</h2><div id="gw-providers"></div></div>
+        <div class="card"><h2>Posture</h2><div id="gw-posture"></div></div>
+      </div>
+      <div class="card gw-log"><h2>Recent requests</h2><div id="gw-requests"></div></div>
+    </section>
   </main>
 </div>
 
@@ -275,12 +330,13 @@ var lastResult = null
 
 function show(name) {
   document.querySelectorAll('.navbtn').forEach(function (b) { b.classList.toggle('active', b.dataset.nav === name) })
-  ;['overview', 'models', 'terminal', 'marketplace'].forEach(function (s) {
+  ;['overview', 'models', 'terminal', 'marketplace', 'gateway'].forEach(function (s) {
     document.getElementById('sec-' + s).classList.toggle('hidden', s !== name)
   })
   if (name === 'models' && !lastResult) mfLoad()
   if (name === 'terminal') termAutoStart()
   if (name === 'marketplace' && !mp.data) mpLoad()
+  if (name === 'gateway' && !gw.data) gwLoad()
 }
 document.querySelectorAll('.navbtn').forEach(function (b) { b.onclick = function () { show(b.dataset.nav) } })
 
@@ -303,6 +359,9 @@ async function bootOverview() {
   document.querySelectorAll('[data-widget]').forEach(function (card) {
     card.classList.toggle('hidden', installed.indexOf(card.dataset.widget) === -1)
   })
+  var gwInstalled = installed.indexOf('astrlink-gateway') !== -1
+  document.querySelector('[data-nav="gateway"]').classList.toggle('hidden', !gwInstalled)
+  if (!gwInstalled && !document.getElementById('sec-gateway').classList.contains('hidden')) show('overview')
   loadBundle()
 }
 bootOverview()
@@ -426,6 +485,37 @@ function renderScorecard(grade) {
     '<th>THIS PC</th><th>MODEL WANTS</th><th>HEADROOM</th></tr></thead><tbody>' + rows + '</tbody></table>' +
     '<p>' + esc(grade.bottleneck.advice) + '</p>'
 }
+function mfAstrlinkText(setup) {
+  return 'Provider: OpenAI-compatible\\nBase URL: ' + setup.baseUrl +
+    '\\nModel: ' + setup.model + '\\nCapability: ' + setup.capability
+}
+function renderAstrlinkSetup(id, inst) {
+  if (!inst || inst.state !== 'ok' || !inst.astrlink) return ''
+  var copying = inst.copyState === 'copying'
+  var feedback = inst.copyState === 'copied' ? 'Copied' :
+    inst.copyState === 'error' ? 'Copy unavailable — select and copy the settings above.' : ''
+  return '<div class="msetup"><strong>Use in AstrLink</strong>' +
+    '<p>Add an OpenAI-compatible service in AstrLink using these settings. ' +
+    'This uses the default local Ollama address; adjust it if your server runs elsewhere.</p>' +
+    '<pre tabindex="0" aria-label="AstrLink service settings">' + esc(mfAstrlinkText(inst.astrlink)) + '</pre>' +
+    '<div class="msetup-actions"><button class="btn" data-copy-setup="' + esc(id) +
+    '" onclick="mfCopyAstrlink(this.dataset.copySetup)"' + (copying ? ' disabled' : '') + '>Copy setup</button>' +
+    '<span role="status" aria-live="polite">' + esc(copying ? 'Copying…' : feedback) + '</span></div>' +
+    '<p class="msetup-note">Manual setup only. No credentials included; no gateway settings changed.</p></div>'
+}
+async function mfCopyAstrlink(id) {
+  var inst = mf.install[id]
+  if (!inst || inst.state !== 'ok' || !inst.astrlink || inst.copyState === 'copying') return
+  inst.copyState = 'copying'
+  if (lastResult) renderGroups(lastResult)
+  try {
+    await navigator.clipboard.writeText(mfAstrlinkText(inst.astrlink))
+    inst.copyState = 'copied'
+  } catch {
+    inst.copyState = 'error'
+  }
+  if (mf.install[id] === inst && lastResult) renderGroups(lastResult)
+}
 function renderGroups(result) {
   var status = document.getElementById('mf-status')
   if (result.error) {
@@ -452,14 +542,17 @@ function renderGroups(result) {
       if (mf.expanded[m.id]) {
         var hints = m.hints.map(function (h) { return '<li>' + esc(h) + '</li>' }).join('')
         var inst = mf.install[m.id]
+        var pullable = (m.formats || []).indexOf('gguf') !== -1
         var installBlock = '<div class="minstall">' +
-          '<button onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install in Ollama</button>' +
+          (pullable
+            ? '<button onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install in Ollama</button>'
+            : '<span class="note">safetensors only — convert to GGUF to install in Ollama</span>') +
           (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '">' + esc(inst.message) + '</span>' : '') +
           '</div>'
         row += '<div class="mdetail"><p>' + esc(m.reason) + '</p>' +
           renderScorecard(m.grade) +
           (hints ? '<ul>' + hints + '</ul>' : '') +
-          installBlock +
+          installBlock + renderAstrlinkSetup(m.id, inst) +
           '<a href="' + esc(m.hfUrl) + '" target="_blank" rel="noopener">huggingface.co ↗</a>' +
           '<div>' + esc(m.id) + ' · ' + m.downloads.toLocaleString() + ' downloads' + (m.license ? ' · ' + esc(m.license) : '') + '</div></div>'
       }
@@ -490,10 +583,11 @@ async function mfInstall(id) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: id })
     })
     var body = await res.json()
+    var ok = res.ok && body.ok === true
     var steps = body.steps || []
-    var message = body.message || (body.ok ? 'Installed' : 'Install failed')
-    if (body.ok && steps.length) message = steps[steps.length - 1]
-    mf.install[id] = { state: body.ok ? 'ok' : 'err', message: message }
+    var message = body.message || body.error || (ok ? 'Installed' : 'Install failed')
+    if (ok && steps.length) message = steps[steps.length - 1]
+    mf.install[id] = { state: ok ? 'ok' : 'err', message: message, astrlink: ok ? body.astrlink : null }
   } catch (cause) {
     mf.install[id] = { state: 'err', message: String(cause && cause.message ? cause.message : cause) }
   }
@@ -610,6 +704,157 @@ async function mpUninstall(id) {
   mp.note = result.error || 'Uninstalled. Settings were kept.'
   await mpLoad()
   bootOverview()
+}
+
+/* ---- astrlink gateway ---- */
+var gw = { data: null, log: null }
+
+function gwMs(value) {
+  if (value === null || value === undefined) return '—'
+  return value >= 1000 ? (value / 1000).toFixed(1) + 's' : value + 'ms'
+}
+function gwPlural(count, word, plural) { return count + ' ' + (count === 1 ? word : (plural || word + 's')) }
+function gwState(text, kind) { return '<span class="gw-state ' + kind + '">' + esc(text) + '</span>' }
+function gwEmpty(message) { return '<div class="gw-empty">' + esc(message) + '</div>' }
+function gwDownMessage(status) {
+  if (status.availability === 'not-installed') {
+    return 'AstrLink CLI not found. Open the AstrLink desktop, go to Settings → Agent tools and install the tools for this host.'
+  }
+  if (status.availability === 'not-running') {
+    return 'The AstrLink desktop gateway is not running. Start it and wait until it shows Ready.'
+  }
+  if (status.availability === 'blocked') {
+    return 'The host sandbox blocked the AstrLink local socket. Reinstall the agent tools for this host, or approve running outside the sandbox.'
+  }
+  return status.error || 'The gateway could not be read.'
+}
+async function gwLoad(force) {
+  document.getElementById('gw-line').textContent = 'reading the gateway…'
+  var res = force
+    ? await fetch('/api/gateway/refresh', { method: 'POST' })
+    : await fetch('/api/gateway/status')
+  gw.data = await res.json()
+  gwRender()
+  await gwLoadRequests()
+}
+async function gwLoadRequests() {
+  if (!gw.data || gw.data.availability !== 'ready') return
+  var filter = document.getElementById('gw-filter').value
+  var res = await fetch('/api/gateway/requests?limit=25' + (filter ? '&status=' + encodeURIComponent(filter) : ''))
+  gw.log = await res.json()
+  gwRenderRequests()
+  gwRenderChips()
+}
+function gwRender() {
+  var status = gw.data
+  var line = document.getElementById('gw-line')
+  if (status.availability !== 'ready') {
+    line.innerHTML = '<span class="err">' + esc(status.availability) + '</span>'
+    document.getElementById('gw-chips').innerHTML = ''
+    document.getElementById('gw-alerts').innerHTML = gwEmpty(gwDownMessage(status))
+    document.getElementById('gw-providers').innerHTML = gwEmpty('No provider data.')
+    document.getElementById('gw-posture').innerHTML = gwEmpty('No posture data.')
+    document.getElementById('gw-requests').innerHTML = gwEmpty('No request records.')
+    return
+  }
+  line.textContent = gwPlural(status.services.length, 'provider') + ' · read ' + new Date(status.checkedAt).toLocaleTimeString() +
+    (status.warnings.length ? ' · ' + gwPlural(status.warnings.length, 'section') + ' unavailable' : '')
+  document.getElementById('gw-alerts').innerHTML = status.alerts.map(function (a) {
+    var icon = a.level === 'error' ? '✖' : a.level === 'warn' ? '▲' : 'ℹ'
+    return '<div class="gw-alert ' + a.level + '"><i>' + icon + '</i><span>' + esc(a.message) + '</span></div>'
+  }).join('')
+  gwRenderChips()
+  gwRenderProviders()
+  gwRenderPosture()
+}
+function gwRenderChips() {
+  var status = gw.data
+  if (!status || status.availability !== 'ready') return
+  var enabled = status.services.filter(function (s) { return s.enabled }).length
+  var subs = status.services.filter(function (s) { return s.subscription })
+  var connected = subs.filter(function (s) { return s.subscription.status === 'connected' }).length
+  var errors = status.alerts.filter(function (a) { return a.level === 'error' }).length
+  var warns = status.alerts.filter(function (a) { return a.level === 'warn' }).length
+  var html = '<div class="chip"><span>PROVIDERS</span><b>' + enabled + ' / ' + status.services.length + ' enabled</b></div>'
+  html += '<div class="chip"><span>SUBSCRIPTIONS</span><b>' + connected + ' / ' + subs.length + ' connected</b></div>'
+  html += '<div class="chip"><span>ALERTS</span><b>' + gwPlural(errors, 'error') + ' · ' + gwPlural(warns, 'warning') + '</b></div>'
+  if (gw.log && gw.log.availability === 'ready') {
+    html += '<div class="chip"><span>RECENT REQUESTS</span><b>' + gw.log.summary.count + ' · ' + gw.log.summary.failed + ' failed</b></div>'
+    html += '<div class="chip"><span>TOKENS</span><b>' + gw.log.summary.totalTokens.toLocaleString() + '</b></div>'
+    html += '<div class="chip"><span>AVG LATENCY</span><b>' + gwMs(gw.log.summary.avgLatencyMs) + '</b></div>'
+  }
+  document.getElementById('gw-chips').innerHTML = html
+}
+function gwRenderProviders() {
+  var rows = gw.data.services.map(function (s) {
+    var state = !s.enabled ? gwState('disabled', 'off')
+      : s.subscription ? gwState(s.subscription.status, s.subscription.status === 'connected' ? 'ok' : 'bad')
+      : gwState('enabled', 'ok')
+    var expiry = s.subscription && s.subscription.tokenExpiresAt
+      ? '<small>token ' + esc(new Date(s.subscription.tokenExpiresAt).toLocaleString()) + '</small>'
+      : ''
+    var protocols = s.capabilities.map(function (c) { return c.protocol }).join(', ')
+    return '<tr><td>' + esc(s.name) + '<small>' + esc(s.kind) + '</small></td>' +
+      '<td>' + state + expiry + '</td>' +
+      '<td class="num">' + (s.models.length || 'dynamic') + '</td>' +
+      '<td>' + esc(protocols || '—') + '</td></tr>'
+  }).join('')
+  document.getElementById('gw-providers').innerHTML = rows
+    ? '<table class="gw-table"><thead><tr><th>PROVIDER</th><th>STATE</th><th class="num">MODELS</th><th>PROTOCOLS</th></tr></thead><tbody>' + rows + '</tbody></table>'
+    : gwEmpty('No providers configured.')
+}
+function gwRenderPosture() {
+  var status = gw.data
+  var rows = []
+  function row(label, value) { rows.push('<tr><td>' + esc(label) + '</td><td>' + value + '</td></tr>') }
+  if (status.routing) {
+    var r = status.routing
+    row('Strategy', esc(r.strategy) + ' · ' + gwPlural(r.maxAttempts, 'attempt') + ' · ' + gwPlural(r.maxRetries, 'retry', 'retries'))
+    row('Identity enforced', r.identityEnforcement.length ? esc(r.identityEnforcement.join(', ')) : '—')
+    row('Risk protection', r.subscriptionRiskProtection ? 'on' : 'off')
+    row('Session isolation', r.sessionIsolation ? 'on' : 'off')
+    row('Channel stickiness', r.channelStickinessSeconds === null ? 'off' : r.channelStickinessSeconds + 's')
+    row('Reasoning', esc(r.reasoningMode + ' · ' + r.reasoningLevel))
+    if (r.redirects.length) {
+      row('Redirects', r.redirects.map(function (x) { return esc(x.from + ' → ' + x.to) }).join('<br />'))
+    }
+  }
+  if (status.audit) {
+    var a = status.audit
+    row('Body capture', (a.requestBodyEnabled || a.responseContentEnabled) ? 'on' : 'off')
+    row('Retention', a.metadataRetentionDays + 'd metadata · ' + a.contentRetentionDays + 'd content')
+    row('Agent raw access', a.agentRawAccessEnabled ? 'your approval required' : 'off')
+  }
+  status.privacy.forEach(function (p) {
+    row('Privacy', (p.enabled ? 'enabled' : 'disabled') + ' · request ' + esc(p.requestAction) +
+      '<small>' + esc(p.enabledKinds.join(', ') || 'no kinds') + ' · ' + gwPlural(p.customRuleCount, 'custom rule') + ' · ' +
+      gwPlural(p.allowlistCount, 'allowlist entry', 'allowlist entries') + '</small>')
+  })
+  document.getElementById('gw-posture').innerHTML = rows.length
+    ? '<table class="gw-table"><tbody>' + rows.join('') + '</tbody></table>'
+    : gwEmpty('No posture data.')
+}
+function gwRenderRequests() {
+  var box = document.getElementById('gw-requests')
+  if (!gw.log) { box.innerHTML = gwEmpty('No request records.'); return }
+  if (gw.log.availability !== 'ready') { box.innerHTML = gwEmpty(gwDownMessage(gw.log)); return }
+  var names = {}
+  gw.data.services.forEach(function (s) { names[s.id] = s.name })
+  var rows = gw.log.requests.map(function (r) {
+    var kind = r.status === 'succeeded' ? 'ok' : (r.status === 'failed' || r.status === 'blocked') ? 'bad' : 'off'
+    var model = esc(r.requestedModel) +
+      (r.upstreamModel && r.upstreamModel !== r.requestedModel ? '<small>→ ' + esc(r.upstreamModel) + '</small>' : '')
+    return '<tr><td>' + esc(new Date(r.startedAt).toLocaleString()) +
+      '<small>' + esc(r.clientType) + ' · ' + esc(r.inputProtocol) + '</small></td>' +
+      '<td>' + model + '</td>' +
+      '<td>' + esc(names[r.serviceId] || r.serviceId || '—') + '</td>' +
+      '<td>' + gwState(r.status, kind) + (r.errorMessage ? '<small>' + esc(r.errorMessage) + '</small>' : '') + '</td>' +
+      '<td class="num">' + gwMs(r.latencyMs) + '<small>first ' + gwMs(r.firstTokenMs) + '</small></td>' +
+      '<td class="num">' + (r.usage ? r.usage.totalTokens.toLocaleString() : '—') + '</td></tr>'
+  }).join('')
+  box.innerHTML = rows
+    ? '<table class="gw-table"><thead><tr><th>WHEN</th><th>MODEL</th><th>PROVIDER</th><th>STATUS</th><th class="num">LATENCY</th><th class="num">TOKENS</th></tr></thead><tbody>' + rows + '</tbody></table>'
+    : gwEmpty('No requests match this filter.')
 }
 
 /* ---- terminal ---- */
@@ -781,6 +1026,25 @@ export function startPanel(services: Services, options: { port?: number } = {}):
         if (req.method === 'POST' && url.pathname === '/api/marketplace/uninstall') {
           const raw = JSON.parse(await readBody(req)) as { id?: unknown }
           send(res, 200, JSON.stringify(await services.marketplaceUninstall(raw.id)))
+          return
+        }
+
+        // --- astrlink gateway ----------------------------------------------
+        if (req.method === 'GET' && url.pathname === '/api/gateway/status') {
+          send(res, 200, JSON.stringify(await services.gatewayStatus()))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/gateway/refresh') {
+          send(res, 200, JSON.stringify(await services.gatewayStatus(true)))
+          return
+        }
+        if (req.method === 'GET' && url.pathname === '/api/gateway/requests') {
+          const limit = Number(url.searchParams.get('limit'))
+          send(res, 200, JSON.stringify(await services.gatewayRequests({
+            ...(Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+            status: url.searchParams.get('status') ?? undefined,
+            serviceId: url.searchParams.get('serviceId') ?? undefined
+          })))
           return
         }
 
