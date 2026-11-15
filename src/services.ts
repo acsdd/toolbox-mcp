@@ -56,6 +56,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadCatalogCache, loadSettings, saveCatalogCache, saveSettings, type StoredSettings } from './config.js'
 import { connectRemote, proxiedToolName, type ProxiedTool, type RemoteConnect, type RemoteConnection, type RemoteToolDef } from './remote.js'
+import { appVersion } from './version.js'
 
 function isCatalogModel(value: unknown): value is CatalogModel {
   const candidate = value as Partial<CatalogModel> | null
@@ -67,7 +68,7 @@ function isCatalogModel(value: unknown): value is CatalogModel {
   )
 }
 
-export const USER_AGENT = 'toolbox-mcp/0.6.0 (+https://github.com/acsdd/toolbox-mcp)'
+export const USER_AGENT = `toolbox-mcp/${appVersion()} (+https://github.com/acsdd/toolbox-mcp)`
 const SERIES_TTL_MS = 30 * 60 * 1000
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000
 const CATALOG_PER_TASK = 24
@@ -195,6 +196,13 @@ export interface GmailState {
   unread: number
   messages: GmailCheckResult['messages']
   error: string | null
+}
+
+/** The subset of local settings the panel can read and edit. */
+export interface PanelSettings {
+  watchlist: string[]
+  diskPath: string
+  showProcesses: boolean
 }
 
 export function createServices(options: ServicesOptions = {}) {
@@ -336,6 +344,31 @@ export function createServices(options: ServicesOptions = {}) {
   async function resourceProcesses(): Promise<TopProcess[]> {
     if (!settings.current.resource.showProcesses) return []
     return monitor.getTopProcesses()
+  }
+
+  /** The editable local settings, as the panel shows them. */
+  async function settingsSnapshot(): Promise<PanelSettings> {
+    return {
+      watchlist: [...crypto.watchlist],
+      diskPath: settings.current.resource.diskPath ?? '',
+      showProcesses: settings.current.resource.showProcesses
+    }
+  }
+
+  /**
+   * Store the resource monitor preferences. The disk path is optional: an
+   * empty value clears it so the monitor falls back to the system disk.
+   */
+  async function resourceSetSettings(input: unknown): Promise<PanelSettings> {
+    const raw = (input ?? {}) as { diskPath?: unknown; showProcesses?: unknown }
+    const diskPath = typeof raw.diskPath === 'string' ? raw.diskPath.trim() : ''
+    settings.current.resource = {
+      ...(diskPath === '' ? {} : { diskPath }),
+      showProcesses: raw.showProcesses !== false
+    }
+    monitor = createResourceMonitor({ diskPath: settings.current.resource.diskPath })
+    await saveSettings(settings.current)
+    return settingsSnapshot()
   }
 
   /** Export the current widget setup as a portable bundle (JSON string). */
@@ -823,6 +856,8 @@ export function createServices(options: ServicesOptions = {}) {
     gmailCheck,
     resourceStats,
     resourceProcesses,
+    settingsSnapshot,
+    resourceSetSettings,
     llamafarmStatus,
     llamafarmStatusReport,
     llamafarmCatalog,

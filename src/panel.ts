@@ -11,22 +11,61 @@ import { createServices, type Services } from './services.js'
 import { createTerminal } from './terminal.js'
 
 const PANEL_PORT = Number(process.env.TOOLBOX_MCP_PORT ?? 3851)
+/** Request bodies are small JSON documents; anything larger is refused. */
+const MAX_BODY_BYTES = 1_000_000
+/** Upper bound for a body that is drained instead of buffered. */
+const MAX_DRAIN_BYTES = 10_000_000
+/** Only these hostnames may address the panel (loopback, by name or address). */
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
+/**
+ * The panel is loopback-only, but a web page the user visits can still try to
+ * talk to it. Requests that name a foreign host (DNS rebinding) or carry a
+ * foreign origin are refused, so a page cannot drive the local terminal.
+ */
+function isLocalHost(host: string | undefined): boolean {
+  if (!host) return false
+  const name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0]
+  return LOCAL_HOSTS.has(name)
+}
+
+function isLocalOrigin(origin: string | undefined): boolean {
+  if (!origin) return true // Not a browser request (curl, the desktop app, tests).
+  try {
+    const url = new URL(origin)
+    return url.protocol === 'http:' && isLocalHost(url.hostname)
+  } catch {
+    return false
+  }
+}
+
+/** An error that carries the HTTP status the client should see. */
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message)
+  }
+}
 
 const PAGE = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
 <title>toolbox-mcp · ops panel</title>
 <style>
-  @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+  /* No webfont: the panel loads nothing from the network, so it works
+     offline and the page can run under a strict content security policy. */
   :root {
     --bg: #070d0a; --panel: #0b1510; --panel2: #0a110e; --border: #203a2d;
     --text: #d9dfda; --muted: #67746b; --dim: #41554b; --accent: #9cf37e;
     --green: #92ec74; --yellow: #e8c35c; --red: #ff5f62;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.5 "IBM Plex Mono", ui-monospace, monospace; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.5 "Cascadia Mono", ui-monospace, Consolas, "IBM Plex Mono", monospace; }
   button, input, select { font: inherit; color: inherit; }
   button { cursor: pointer; }
   button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
@@ -209,6 +248,16 @@ const PAGE = `<!doctype html>
   .term-line input { flex: 1; min-height: 38px; border: 0; background: transparent; color: var(--text); font-size: 12px; }
   .term-line input:focus { outline: none; }
 
+  /* settings */
+  .set-body { padding: 14px 16px 16px; }
+  .set-hint { margin: 0 0 10px; color: var(--dim); font-size: 10px; line-height: 1.7; }
+  .set-input { width: 100%; min-height: 38px; padding: 0 10px; border: 1px solid var(--border); border-radius: 3px; background: var(--panel2); color: var(--text); font-size: 12px; }
+  .set-check { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; color: var(--muted); font-size: 11px; }
+  .set-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 14px; }
+  .set-msg { color: var(--dim); font-size: 10px; }
+  .set-msg.ok { color: var(--accent); }
+  .set-msg.err { color: var(--red); }
+
   @media (max-width: 860px) {
     .shell { grid-template: 58px 1fr / 1fr; }
     .sidebar { display: none; }
@@ -230,6 +279,7 @@ const PAGE = `<!doctype html>
     <button class="navbtn" data-nav="terminal"><i>❯</i><span>Terminal</span><small>03</small></button>
     <button class="navbtn" data-nav="marketplace"><i>▦</i><span>Marketplace</span><small>04</small></button>
     <button class="navbtn hidden" data-nav="gateway"><i>⇄</i><span>Gateway</span><small>05</small></button>
+    <button class="navbtn" data-nav="settings"><i>⚙</i><span>Settings</span><small>06</small></button>
     <div class="foot"><b>LOCAL SESSION</b><br />MCP stdio + panel<br />127.0.0.1 only</div>
   </aside>
 
@@ -321,6 +371,36 @@ const PAGE = `<!doctype html>
       </div>
       <div class="card gw-log"><h2>Recent requests</h2><div id="gw-requests"></div></div>
     </section>
+
+    <section id="sec-settings" class="hidden">
+      <h1>Settings</h1>
+      <p class="sub">Local preferences. They are stored in your Toolbox settings file, never uploaded.</p>
+      <div class="card-grid">
+        <div class="card">
+          <h2>Crypto watchlist</h2>
+          <div class="set-body">
+            <p class="set-hint">Coin ids from CoinGecko, comma separated. Up to 8.</p>
+            <input class="set-input" id="set-watchlist" type="text" spellcheck="false" placeholder="bitcoin, ethereum, solana" />
+            <div class="set-actions">
+              <button class="btn primary" onclick="setSaveWatchlist()">Save watchlist</button>
+              <span class="set-msg" id="set-watchlist-msg" role="status"></span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Resource monitor</h2>
+          <div class="set-body">
+            <p class="set-hint">Disk to report. Leave empty to follow the system disk.</p>
+            <input class="set-input" id="set-diskpath" type="text" spellcheck="false" placeholder="C:\\" />
+            <label class="set-check"><input type="checkbox" id="set-processes" /> <span>Show the process list</span></label>
+            <div class="set-actions">
+              <button class="btn primary" onclick="setSaveResource()">Save monitor settings</button>
+              <span class="set-msg" id="set-resource-msg" role="status"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 </div>
 
@@ -330,13 +410,14 @@ var lastResult = null
 
 function show(name) {
   document.querySelectorAll('.navbtn').forEach(function (b) { b.classList.toggle('active', b.dataset.nav === name) })
-  ;['overview', 'models', 'terminal', 'marketplace', 'gateway'].forEach(function (s) {
+  ;['overview', 'models', 'terminal', 'marketplace', 'gateway', 'settings'].forEach(function (s) {
     document.getElementById('sec-' + s).classList.toggle('hidden', s !== name)
   })
   if (name === 'models' && !lastResult) mfLoad()
   if (name === 'terminal') termAutoStart()
   if (name === 'marketplace' && !mp.data) mpLoad()
   if (name === 'gateway' && !gw.data) gwLoad()
+  if (name === 'settings') setLoad()
 }
 document.querySelectorAll('.navbtn').forEach(function (b) { b.onclick = function () { show(b.dataset.nav) } })
 
@@ -365,6 +446,61 @@ async function bootOverview() {
   loadBundle()
 }
 bootOverview()
+
+/* ---- settings ---- */
+var setDirty = false
+function setMsg(id, text, kind) {
+  var el = document.getElementById(id)
+  el.textContent = text
+  el.className = 'set-msg' + (kind ? ' ' + kind : '')
+}
+async function setLoad() {
+  if (setDirty) return
+  var res = await fetch('/api/settings')
+  if (!res.ok) {
+    setMsg('set-watchlist-msg', 'Could not read the local settings.', 'err')
+    return
+  }
+  var data = await res.json()
+  document.getElementById('set-watchlist').value = (data.watchlist || []).join(', ')
+  document.getElementById('set-diskpath').value = data.diskPath || ''
+  document.getElementById('set-processes').checked = data.showProcesses !== false
+}
+document.getElementById('set-watchlist').addEventListener('input', function () { setDirty = true })
+document.getElementById('set-diskpath').addEventListener('input', function () { setDirty = true })
+document.getElementById('set-processes').addEventListener('change', function () { setDirty = true })
+async function setSaveWatchlist() {
+  var ids = document.getElementById('set-watchlist').value.split(',').map(function (s) { return s.trim() }).filter(Boolean)
+  var res = await fetch('/api/settings/watchlist', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ watchlist: ids })
+  })
+  var body = await res.json().catch(function () { return {} })
+  if (!res.ok) {
+    setMsg('set-watchlist-msg', body.error || 'Could not save the watchlist.', 'err')
+    return
+  }
+  setDirty = false
+  document.getElementById('set-watchlist').value = (body.watchlist || []).join(', ')
+  setMsg('set-watchlist-msg', 'Saved · ' + (body.watchlist || []).length + ' coins', 'ok')
+  bootOverview()
+}
+async function setSaveResource() {
+  var res = await fetch('/api/settings/resource', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      diskPath: document.getElementById('set-diskpath').value,
+      showProcesses: document.getElementById('set-processes').checked
+    })
+  })
+  var body = await res.json().catch(function () { return {} })
+  if (!res.ok) {
+    setMsg('set-resource-msg', body.error || 'Could not save the monitor settings.', 'err')
+    return
+  }
+  setDirty = false
+  setMsg('set-resource-msg', 'Saved.', 'ok')
+  bootOverview()
+}
 
 /* ---- model farm ---- */
 function gb(bytes) { return (bytes / Math.pow(2, 30)).toFixed(1) + ' GB' }
@@ -861,8 +997,33 @@ function gwRenderRequests() {
 /* ---- terminal ---- */
 var es = null, termStarted = false
 var cmdHistory = [], hIdx = -1
+var HISTORY_KEY = 'toolbox-mcp.terminal.history'
+var HISTORY_MAX = 200
 var termOut = document.getElementById('term-out')
 var termIn = document.getElementById('term-in')
+
+/* The command history survives a page reload: it lives in this browser's
+   local storage, never on the server. */
+function historyLoad() {
+  try {
+    var raw = window.localStorage.getItem(HISTORY_KEY)
+    var parsed = raw ? JSON.parse(raw) : []
+    if (Array.isArray(parsed)) {
+      cmdHistory = parsed.filter(function (entry) { return typeof entry === 'string' && entry !== '' })
+    }
+  } catch (cause) {
+    cmdHistory = []
+  }
+  hIdx = cmdHistory.length
+}
+function historySave() {
+  try {
+    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(cmdHistory.slice(-HISTORY_MAX)))
+  } catch (cause) {
+    // Storage can be unavailable (private mode, quota) — history is a nicety.
+  }
+}
+historyLoad()
 
 function termRenderState(st) {
   document.getElementById('term-state').textContent = st.running
@@ -893,7 +1054,11 @@ termIn.addEventListener('keydown', async function (ev) {
   if (ev.key === 'Enter') {
     var line = termIn.value
     termIn.value = ''
-    if (line.trim()) { cmdHistory.push(line); hIdx = cmdHistory.length }
+    if (line.trim()) {
+      if (cmdHistory[cmdHistory.length - 1] !== line) cmdHistory.push(line)
+      hIdx = cmdHistory.length
+      historySave()
+    }
     termOut.textContent += line + '\\r\\n'
     termOut.scrollTop = termOut.scrollHeight
     await fetch('/api/terminal/input', {
@@ -916,18 +1081,57 @@ termIn.addEventListener('keydown', async function (ev) {
 </body>
 </html>`
 
+const SECURITY_HEADERS: Record<string, string> = {
+  'Content-Security-Policy':
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'X-Frame-Options': 'DENY'
+}
+
 function send(res: ServerResponse, status: number, body: string, type = 'application/json'): void {
-  res.writeHead(status, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-store' })
+  res.writeHead(status, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-store', ...SECURITY_HEADERS })
   res.end(body)
 }
 
 function readBody(req: import('node:http').IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = ''
-    req.on('data', (chunk) => (body += chunk))
-    req.on('end', () => resolve(body))
+    let size = 0
+    let overflow = false
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > MAX_BODY_BYTES) {
+        // Stop buffering, but keep draining so the client can still read the
+        // 413 answer instead of a dropped connection.
+        if (!overflow) {
+          overflow = true
+          body = ''
+        }
+        if (size > MAX_DRAIN_BYTES) {
+          req.destroy()
+          reject(new HttpError(413, 'Request body too large.'))
+        }
+        return
+      }
+      body += chunk
+    })
+    req.on('end', () => {
+      if (overflow) reject(new HttpError(413, 'Request body too large.'))
+      else resolve(body)
+    })
     req.on('error', reject)
   })
+}
+
+/** Parse a JSON request body, answering 400 rather than 500 when it is malformed. */
+async function readJson<T>(req: import('node:http').IncomingMessage): Promise<T> {
+  const raw = await readBody(req)
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    throw new HttpError(400, 'Invalid JSON body.')
+  }
 }
 
 export interface PanelHandle {
@@ -941,6 +1145,13 @@ export function startPanel(services: Services, options: { port?: number } = {}):
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     void (async () => {
       try {
+        // Refuse anything that does not come from this machine: a foreign
+        // Host header means DNS rebinding, a foreign Origin means a web page
+        // is driving the panel.
+        if (!isLocalHost(req.headers.host) || !isLocalOrigin(req.headers.origin)) {
+          send(res, 403, JSON.stringify({ error: 'Only local requests are accepted.' }))
+          return
+        }
         if (req.method === 'GET' && url.pathname === '/') {
           send(res, 200, PAGE, 'text/html')
           return
@@ -966,24 +1177,44 @@ export function startPanel(services: Services, options: { port?: number } = {}):
           send(res, 200, JSON.stringify(await services.resourceStats()))
           return
         }
+        if (req.method === 'GET' && url.pathname === '/api/settings') {
+          send(res, 200, JSON.stringify(await services.settingsSnapshot()))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/settings/watchlist') {
+          const raw = await readJson<{ watchlist?: unknown }>(req)
+          try {
+            send(res, 200, JSON.stringify(await services.cryptoSetWatchlist(raw.watchlist)))
+          } catch (cause) {
+            // The watchlist validator is the only expected failure here.
+            send(res, 400, JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) }))
+          }
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/settings/resource') {
+          const raw = await readJson<{ diskPath?: unknown; showProcesses?: unknown }>(req)
+          send(res, 200, JSON.stringify(await services.resourceSetSettings(raw)))
+          return
+        }
         if (req.method === 'GET' && url.pathname === '/api/widgets_export') {
           send(res, 200, await services.exportWidgets(), 'application/json')
           return
         }
         if (req.method === 'POST' && url.pathname === '/api/widgets_import') {
-          send(res, 200, JSON.stringify(await services.importWidgets(JSON.parse(await readBody(req)))))
+          const bundle = await readJson<unknown>(req)
+          send(res, 200, JSON.stringify(await services.importWidgets(bundle)))
           return
         }
 
         // --- llamafarm -----------------------------------------------------
         if (req.method === 'POST' && url.pathname === '/api/llamafarm/score') {
-          const raw = JSON.parse(await readBody(req)) as {
+          const raw = await readJson<{
             scenario?: 'now' | 'total'
             search?: string
             minParams?: number | null
             maxParams?: number | null
             onlyReachable?: boolean
-          }
+          }>(req)
           send(res, 200, JSON.stringify(await services.llamafarmScore({
             scenario: raw.scenario === 'total' ? 'total' : 'now',
             search: raw.search,
@@ -998,7 +1229,7 @@ export function startPanel(services: Services, options: { port?: number } = {}):
           return
         }
         if (req.method === 'POST' && url.pathname === '/api/llamafarm/install') {
-          const raw = JSON.parse(await readBody(req)) as { repo?: string; quant?: string; offload?: number }
+          const raw = await readJson<{ repo?: string; quant?: string; offload?: number }>(req)
           send(res, 200, JSON.stringify(await services.llamafarmInstall({
             repo: raw.repo ?? '',
             ...(raw.quant ? { quant: raw.quant } : {}),
@@ -1020,12 +1251,12 @@ export function startPanel(services: Services, options: { port?: number } = {}):
           return
         }
         if (req.method === 'POST' && url.pathname === '/api/marketplace/install') {
-          const raw = JSON.parse(await readBody(req)) as { id?: unknown }
+          const raw = await readJson<{ id?: unknown }>(req)
           send(res, 200, JSON.stringify(await services.marketplaceInstall(raw.id)))
           return
         }
         if (req.method === 'POST' && url.pathname === '/api/marketplace/uninstall') {
-          const raw = JSON.parse(await readBody(req)) as { id?: unknown }
+          const raw = await readJson<{ id?: unknown }>(req)
           send(res, 200, JSON.stringify(await services.marketplaceUninstall(raw.id)))
           return
         }
@@ -1067,7 +1298,7 @@ export function startPanel(services: Services, options: { port?: number } = {}):
           return
         }
         if (req.method === 'POST' && url.pathname === '/api/terminal/input') {
-          const raw = JSON.parse(await readBody(req)) as { data?: unknown }
+          const raw = await readJson<{ data?: unknown }>(req)
           send(res, 200, JSON.stringify(terminal.input(typeof raw.data === 'string' ? raw.data : '')))
           return
         }
@@ -1091,6 +1322,12 @@ export function startPanel(services: Services, options: { port?: number } = {}):
 
         send(res, 404, JSON.stringify({ error: 'Not found' }))
       } catch (cause) {
+        // Client-side problems keep their own status; everything else is a
+        // genuine server fault and must not leak internals.
+        if (cause instanceof HttpError) {
+          send(res, cause.status, JSON.stringify({ error: cause.message }))
+          return
+        }
         send(res, 500, JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) }))
       }
     })()
