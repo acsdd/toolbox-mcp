@@ -1,8 +1,7 @@
 /* Local portable build using the sibling desktop app's installed Electron tools.
  * Usage: node scripts/pack-portable.mjs [desktop-toolchain-directory] [output-directory]
  */
-import { constants } from 'node:fs'
-import { copyFile, cp, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -88,6 +87,9 @@ run(join(toolchain, 'node_modules/electron-builder/cli.js'), [
 
 await mkdir(output, { recursive: true })
 const artifactName = `ModelFarm-Portable-${manifest.version}.exe`
-await copyFile(join(buildDir, artifactName), join(output, artifactName), constants.COPYFILE_EXCL)
+const artifactPath = join(output, artifactName)
+// A rebuild of the same version replaces the previous artifact.
+await rm(artifactPath, { force: true })
+await copyFile(join(buildDir, artifactName), artifactPath)
 console.log(`PORTABLE_EXE=${join(output, artifactName)}`)
 console.log(`UNPACKED_APP=${join(buildDir, 'win-unpacked')}`)
