@@ -2,11 +2,15 @@
  * tools are listed, and call one tool per remote server through the proxy. */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: ['dist/index.js'],
-  cwd: 'E:/_2026-AI/Projects/toolbox-mcp',
+  cwd: root,
   env: { ...process.env, TOOLBOX_MCP_PORT: '3854' },
   stderr: 'pipe'
 })

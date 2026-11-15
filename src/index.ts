@@ -10,8 +10,9 @@ import { z } from 'zod'
 import { createServices } from './services.js'
 import { startPanel } from './panel.js'
 import { jsonSchemaToZodShape } from './remote.js'
+import { appVersion } from './version.js'
 
-const server = new McpServer({ name: 'toolbox-mcp', version: '0.5.0' })
+const server = new McpServer({ name: 'toolbox-mcp', version: appVersion() })
 
 // Remote-server marketplace modules register their tools here at runtime.
 const remoteRegistrations = new Map<string, RegisteredTool[]>()
@@ -37,8 +38,29 @@ const services = createServices({
 })
 await services.init()
 
+/**
+ * Whether a tool payload describes a failure rather than data.
+ *
+ * Services report soft failures inside the payload (`ok: false`, or a
+ * non-empty `error`), so the payload is wrapped with `isError` to keep a
+ * client from reading an error message as if it were a result. Gateway
+ * payloads carry an `availability` state instead — a stopped or missing
+ * gateway is a state, not a tool failure — so those only count as a failure
+ * when the observer itself broke.
+ */
+function isFailure(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record.ok === false) return true
+  const error = record.error
+  if (typeof error !== 'string' || error === '') return false
+  if (typeof record.availability === 'string') return record.availability === 'error'
+  return true
+}
+
 const json = (value: unknown) => ({
-  content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }]
+  content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
+  isError: isFailure(value)
 })
 
 // --- crypto-watch -----------------------------------------------------------
@@ -69,7 +91,9 @@ server.tool(
   'Price history for one coin (range 30, 90 or 180 days).',
   {
     id: z.string().describe('CoinGecko coin id, e.g. bitcoin'),
-    days: z.number().describe('30, 90 or 180')
+    days: z
+      .union([z.literal(30), z.literal(90), z.literal(180)])
+      .describe('History window in days: 30, 90 or 180')
   },
   async ({ id, days }) => json(await services.cryptoSeries(id, days))
 )
