@@ -6,11 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/28121978444/toolbox-mcp.git"
+    "url": "git+https://github.com/acsdd/toolbox-mcp.git"
   },
-  "homepage": "https://github.com/28121978444/toolbox-mcp#readme",
+  "homepage": "https://github.com/acsdd/toolbox-mcp#readme",
   "bugs": {
-    "url": "https://github.com/28121978444/toolbox-mcp/issues"
+    "url": "https://github.com/acsdd/toolbox-mcp/issues"
   },
   "keywords": [
     "mcp",

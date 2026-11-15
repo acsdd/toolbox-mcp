@@ -1,6 +1,6 @@
 # toolbox-mcp
 
-Private, local-first MCP server that exposes the shared [Toolbox widgets](https://github.com/28121978444/toolbox-widgets) — **crypto watch**, **Gmail announcer** and **resource monitor** — to any MCP client, plus a small ops panel on `http://127.0.0.1:3851`.
+Private, local-first MCP server that exposes the shared [Toolbox widgets](https://github.com/acsdd/toolbox-widgets) — **crypto watch**, **Gmail announcer** and **resource monitor** — to any MCP client, plus a small ops panel on `http://127.0.0.1:3851`.
 
 Part of the Toolbox family:
 
@@ -8,7 +8,7 @@ Part of the Toolbox family:
 | --- | --- |
 | Toolbox (desktop) | [`toolbox-desktop`](https://github.com/28121978444/toolbox-desktop) |
 | NAS companion | [`toolbox-nas`](https://github.com/28121978444/toolbox-nas) |
-| Shared widget core | [`toolbox-widgets`](https://github.com/28121978444/toolbox-widgets) |
+| Shared widget core | [`toolbox-widgets`](https://github.com/acsdd/toolbox-widgets) |
 
 ## Tools
 
@@ -60,7 +60,7 @@ Part of the Toolbox family:
   with your user rights; the panel never binds beyond 127.0.0.1.
 - **Marketplace** — VS Code-style storefront for shared Toolbox modules.
   The listing populates live from the public
-  [`registry.json`](https://github.com/28121978444/toolbox-widgets/blob/main/registry.json)
+  [`registry.json`](https://github.com/acsdd/toolbox-widgets/blob/main/registry.json)
   (cached 5 min) and search filters as you type. Installing a widget module
   applies its default settings through the portable bundle validator;
   uninstalling keeps your settings. The registry carries data only — never
