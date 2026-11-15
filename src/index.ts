@@ -6,11 +6,12 @@
 import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { z } from 'zod'
 import { createServices } from './services.js'
 import { startPanel } from './panel.js'
 import { jsonSchemaToZodShape } from './remote.js'
 import { appVersion } from './version.js'
+import { TOOL_CATALOG } from './catalog.js'
+import { createActivity } from './activity.js'
 
 const server = new McpServer({ name: 'toolbox-mcp', version: appVersion() })
 
@@ -63,229 +64,121 @@ const json = (value: unknown) => ({
   isError: isFailure(value)
 })
 
-// --- crypto-watch -----------------------------------------------------------
+// --- tool handlers -----------------------------------------------------------
+//
+// The metadata lives in the shared catalog so the ops panel renders exactly
+// what the server exposes; only the behaviour stays here.
 
-server.tool(
-  'crypto_status',
-  'Current crypto watch state: watchlist, cached prices and last refresh.',
-  {},
-  async () => json(services.crypto)
-)
+type ToolArgs = Record<string, unknown>
+type ToolHandler = (args: ToolArgs) => Promise<CallToolResult>
 
-server.tool(
-  'crypto_refresh',
-  'Refresh coin prices from CoinGecko for the configured watchlist.',
-  {},
-  async () => json(await services.cryptoRefresh())
-)
+const handlers: Record<string, ToolHandler> = {
+  // crypto-watch
+  crypto_status: async () => json(services.crypto),
+  crypto_refresh: async () => json(await services.cryptoRefresh()),
+  crypto_set_watchlist: async (args) => json(await services.cryptoSetWatchlist(args.watchlist)),
+  crypto_series: async (args) => json(await services.cryptoSeries(args.id, args.days)),
 
-server.tool(
-  'crypto_set_watchlist',
-  'Replace the crypto watchlist (1-8 CoinGecko coin ids).',
-  { watchlist: z.array(z.string()).min(1).describe('CoinGecko coin ids, e.g. ["bitcoin"]') },
-  async ({ watchlist }) => json(await services.cryptoSetWatchlist(watchlist))
-)
+  // gmail-announcer
+  gmail_status: async () => json(services.gmail),
+  gmail_check: async () => json(await services.gmailCheck()),
+  gmail_connect: async (args) => json(await services.gmailConnect(args)),
+  gmail_disconnect: async () => json(await services.gmailDisconnect()),
 
-server.tool(
-  'crypto_series',
-  'Price history for one coin (range 30, 90 or 180 days).',
-  {
-    id: z.string().describe('CoinGecko coin id, e.g. bitcoin'),
-    days: z
-      .union([z.literal(30), z.literal(90), z.literal(180)])
-      .describe('History window in days: 30, 90 or 180')
-  },
-  async ({ id, days }) => json(await services.cryptoSeries(id, days))
-)
+  // resource-monitor
+  system_stats: async () => json(await services.resourceStats()),
+  system_processes: async () => json(await services.resourceProcesses()),
 
-// --- gmail-announcer --------------------------------------------------------
+  // llamafarm: local model catalog
+  llamafarm_status: async (args) => json(await services.llamafarmStatusReport(args.redetect === true)),
+  llamafarm_catalog: async (args) => json(await services.llamafarmCatalog(args.refresh === true)),
+  llamafarm_score: async (args) =>
+    json(
+      await services.llamafarmScore({
+        scenario: args.scenario === 'total' ? 'total' : 'now',
+        ...(typeof args.search === 'string' ? { search: args.search } : {}),
+        minParams: typeof args.minParams === 'number' ? args.minParams : null,
+        maxParams: typeof args.maxParams === 'number' ? args.maxParams : null,
+        onlyReachable: args.onlyReachable === true
+      })
+    ),
+  llamafarm_refresh: async () => json(await services.llamafarmRefresh()),
+  llamafarm_grade: async (args) =>
+    json(
+      await services.llamafarmGrade({
+        ...(typeof args.repo === 'string' ? { repo: args.repo } : {}),
+        ...(args.scenario === 'total' || args.scenario === 'now' ? { scenario: args.scenario } : {})
+      })
+    ),
+  llamafarm_install: async (args) =>
+    json(
+      await services.llamafarmInstall({
+        repo: typeof args.repo === 'string' ? args.repo : '',
+        ...(typeof args.quant === 'string' ? { quant: args.quant } : {}),
+        ...(typeof args.offload === 'number' ? { offload: args.offload } : {})
+      })
+    ),
 
-server.tool(
-  'gmail_status',
-  'Gmail announcer state: connected account, unread count, recent messages.',
-  {},
-  async () => json(services.gmail)
-)
+  // astrlink gateway: read-only observability
+  gateway_status: async (args) => json(await services.gatewayStatus(args.refresh === true)),
+  gateway_requests: async (args) =>
+    json(
+      await services.gatewayRequests({
+        ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+        ...(typeof args.status === 'string' ? { status: args.status } : {}),
+        ...(typeof args.serviceId === 'string' ? { serviceId: args.serviceId } : {})
+      })
+    ),
 
-server.tool(
-  'gmail_check',
-  'Run a read-only IMAP check of the Gmail inbox now.',
-  {},
-  async () => json(await services.gmailCheck())
-)
+  // marketplace
+  marketplace_list: async (args) =>
+    json(
+      await services.marketplaceList(
+        {
+          ...(typeof args.query === 'string' ? { query: args.query } : {}),
+          ...(typeof args.category === 'string' ? { category: args.category } : {})
+        },
+        args.refresh === true
+      )
+    ),
+  marketplace_install: async (args) => json(await services.marketplaceInstall(args.id)),
+  marketplace_uninstall: async (args) => json(await services.marketplaceUninstall(args.id)),
+  remote_status: async () => json(services.remoteStatus()),
 
-server.tool(
-  'gmail_connect',
-  'Connect a Gmail account with a 16-character App Password (read-only IMAP).',
-  {
-    email: z.string().describe('Gmail address'),
-    password: z.string().describe('16-character App Password from myaccount.google.com/apppasswords')
-  },
-  async (input) => json(await services.gmailConnect(input))
-)
-
-server.tool(
-  'gmail_disconnect',
-  'Remove the stored Gmail account and App Password from this machine.',
-  {},
-  async () => json(await services.gmailDisconnect())
-)
-
-// --- resource-monitor -------------------------------------------------------
-
-server.tool(
-  'system_stats',
-  'CPU, memory and disk usage of the machine running toolbox-mcp.',
-  {},
-  async () => json(await services.resourceStats())
-)
-
-server.tool(
-  'system_processes',
-  'Top processes by memory (Windows only; empty elsewhere).',
-  {},
-  async () => json(await services.resourceProcesses())
-)
-
-// --- llamafarm: local model catalog -----------------------------------------
-
-server.tool(
-  'llamafarm_status',
-  'Machine profile for running local models (RAM, cores, GPUs, Ollama) plus a 0-100 PC scorecard grade.',
-  { redetect: z.boolean().optional().describe('Force a fresh detection pass') },
-  async ({ redetect }) => json(await services.llamafarmStatusReport(redetect ?? false))
-)
-
-server.tool(
-  'llamafarm_catalog',
-  'HuggingFace model catalog (top per task) with real file sizes; cached 6h. GGUF repos only — the ones Ollama can actually pull.',
-  { refresh: z.boolean().optional().describe('Ignore the cache and refetch') },
-  async ({ refresh }) => json(await services.llamafarmCatalog(refresh ?? false))
-)
-
-server.tool(
-  'llamafarm_score',
-  'Score catalog models green/yellow/red against this machine for a scenario.',
-  {
-    scenario: z.enum(['now', 'total']).describe("'now' = resources free right now, 'total' = full machine"),
-    search: z.string().optional().describe('Filter by repo id or name (substring)'),
-    minParams: z.number().optional().describe('Minimum parameter count in billions'),
-    maxParams: z.number().optional().describe('Maximum parameter count in billions'),
-    onlyReachable: z
-      .boolean()
-      .optional()
-      .describe('Suppress red models that have no offload path (wave 3 default)')
-  },
-  async (input) => json(await services.llamafarmScore(input))
-)
-
-server.tool(
-  'llamafarm_refresh',
-  'Re-detect the machine and force a full catalog refetch from HuggingFace.',
-  {},
-  async () => json(await services.llamafarmRefresh())
-)
-
-server.tool(
-  'llamafarm_grade',
-  'Rate this PC 0-100, and grade one model against it (weakest-link weighted) when a repo is given.',
-  {
-    repo: z.string().optional().describe('HuggingFace repo id to grade; omit to rate the PC alone'),
-    scenario: z.enum(['now', 'total']).optional().describe("'now' = free resources (default), 'total' = full machine")
-  },
-  async (input) => json(await services.llamafarmGrade(input))
-)
-
-server.tool(
-  'llamafarm_install',
-  'Install a catalog model into local Ollama (GGUF from HuggingFace). Successful installs include manual AstrLink setup details; no gateway settings are changed.',
-  {
-    repo: z.string().describe('HuggingFace repo id, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF"'),
-    quant: z.string().optional().describe('Quantization tag, e.g. "Q4_K_M" (defaults to the catalog entry)'),
-    offload: z.number().optional().describe('Layers to keep on the GPU; writes a Modelfile instead of a plain pull')
-  },
-  async (input) => json(await services.llamafarmInstall(input))
-)
-
-// --- astrlink gateway: read-only observability -------------------------------
-
-server.tool(
-  'gateway_status',
-  'Local AstrLink gateway health: providers and subscription state, routing posture, capture/privacy settings and the alerts that follow. Read-only metadata, cached 30s.',
-  { refresh: z.boolean().optional().describe('Ignore the cache and re-read the gateway') },
-  async ({ refresh }) => json(await services.gatewayStatus(refresh ?? false))
-)
-
-server.tool(
-  'gateway_requests',
-  'Recent AstrLink request records — model, provider, status, latency and token counts. Metadata only: no prompt or response bodies.',
-  {
-    limit: z.number().optional().describe('1-200 records (default 25)'),
-    status: z.string().optional().describe('Filter by status, e.g. "failed"'),
-    serviceId: z.string().optional().describe('Filter by upstream service id from gateway_status')
-  },
-  async (input) => json(await services.gatewayRequests(input))
-)
-
-// --- marketplace -------------------------------------------------------------
-
-server.tool(
-  'marketplace_list',
-  'Live marketplace listing of installable Toolbox modules (fetches the public registry, cached 5 min).',
-  {
-    query: z.string().optional().describe('Live search across name, description, tags'),
-    category: z.string().optional().describe('Exact category filter, e.g. "monitoring"'),
-    refresh: z.boolean().optional().describe('Ignore the cache and refetch the registry')
-  },
-  async ({ query, category, refresh }) => json(await services.marketplaceList({ query, category }, refresh ?? false))
-)
-
-server.tool(
-  'marketplace_install',
-  'Install a marketplace module by id. Widget bundles are applied through the portable bundle validator.',
-  { id: z.string().describe('Module id from marketplace_list') },
-  async ({ id }) => json(await services.marketplaceInstall(id))
-)
-
-server.tool(
-  'marketplace_uninstall',
-  'Uninstall a marketplace module (settings are kept; built-ins cannot be removed).',
-  { id: z.string().describe('Module id from marketplace_list') },
-  async ({ id }) => json(await services.marketplaceUninstall(id))
-)
-
-server.tool(
-  'remote_status',
-  'Connected remote MCP servers and how many tools each provides.',
-  {},
-  async () => json(services.remoteStatus())
-)
-
-// --- portable widgets -------------------------------------------------------
-
-server.tool(
-  'widgets_export',
-  'Export the widget setup as a portable Toolbox bundle (JSON).',
-  {},
-  async () => {
+  // portable widgets
+  widgets_export: async () => {
     const bundle = await services.exportWidgets()
     return { content: [{ type: 'text' as const, text: bundle }] }
-  }
-)
-
-server.tool(
-  'widgets_import',
-  'Import a portable Toolbox widget bundle (object or JSON text).',
-  { bundle: z.unknown().describe('Bundle object or JSON string from widgets_export') },
-  async ({ bundle }) => {
+  },
+  widgets_import: async (args) => {
+    const bundle = args.bundle
     const value = typeof bundle === 'string' ? JSON.parse(bundle) : bundle
     return json(await services.importWidgets(value))
   }
-)
+}
+
+const activity = createActivity(true)
+
+for (const spec of TOOL_CATALOG) {
+  const handler = handlers[spec.name]
+  if (!handler) throw new Error(`No handler for the ${spec.name} tool.`)
+  server.tool(spec.name, spec.description, spec.shape, async (args) => {
+    const started = Date.now()
+    try {
+      const result = await handler((args ?? {}) as ToolArgs)
+      activity.record(spec.name, result.isError !== true, Date.now() - started)
+      return result
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      activity.record(spec.name, false, Date.now() - started, message)
+      throw cause
+    }
+  })
+}
 
 await server.connect(new StdioServerTransport())
 
-const panel = await startPanel(services)
+const panel = await startPanel(services, { activity })
 console.error(`toolbox-mcp ready. Ops panel: http://127.0.0.1:${panel.port}/`)
 
 const restored = await services.remoteRestore()

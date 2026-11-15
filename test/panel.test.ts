@@ -170,3 +170,103 @@ describe('panel settings editing', () => {
     assert.deepEqual(await services.resourceProcesses(), [])
   })
 })
+
+describe('panel tool catalog', () => {
+  it('publishes the tool surface the MCP server registers', async () => {
+    const reply = await ask({ path: '/api/catalog' })
+    assert.equal(reply.status, 200)
+    const data = JSON.parse(reply.body) as {
+      server: { name: string; version: string; transport: string; panel: string; repo: string }
+      groups: { id: string; label: string; icon: string; hint: string }[]
+      tools: { name: string; group: string; description: string; params: { name: string; required: boolean }[] }[]
+    }
+    assert.equal(data.server.name, 'toolbox-mcp')
+    assert.match(data.server.version, /^\d+\.\d+\.\d+/)
+    assert.equal(data.server.transport, 'stdio')
+    assert.match(data.server.panel, /http:\/\/127\.0\.0\.1:\d+/)
+    assert.match(data.server.repo, /github\.com/)
+    assert.ok(data.tools.length >= 20)
+    // Every tool belongs to a group the panel knows how to label.
+    const groupIds = data.groups.map((group) => group.id)
+    for (const tool of data.tools) {
+      assert.ok(groupIds.includes(tool.group), `${tool.name} has an unknown group`)
+      assert.ok(tool.description.length > 0)
+    }
+    // The catalog and the registered server must agree.
+    const { TOOL_CATALOG } = await import('../dist/catalog.js')
+    assert.deepEqual(
+      data.tools.map((tool) => tool.name).sort(),
+      TOOL_CATALOG.map((tool) => tool.name).sort()
+    )
+  })
+
+  it('describes the parameters of a tool that takes some', async () => {
+    const reply = await ask({ path: '/api/catalog' })
+    const data = JSON.parse(reply.body) as {
+      tools: { name: string; params: { name: string; type: string; required: boolean; description: string }[] }[]
+    }
+    const score = data.tools.find((tool) => tool.name === 'llamafarm_score')
+    assert.ok(score)
+    const names = score.params.map((param) => param.name)
+    assert.deepEqual(names.sort(), ['maxParams', 'minParams', 'onlyReachable', 'scenario', 'search'])
+    assert.equal(score.params.find((param) => param.name === 'scenario')?.required, true)
+    assert.equal(score.params.find((param) => param.name === 'search')?.required, false)
+  })
+
+  it('reports an unattached activity recorder when no server feeds it', async () => {
+    const reply = await ask({ path: '/api/activity' })
+    assert.equal(reply.status, 200)
+    const data = JSON.parse(reply.body) as {
+      attached: boolean
+      calls: unknown[]
+      total: number
+      failed: number
+      perTool: unknown[]
+    }
+    assert.equal(data.attached, false)
+    assert.equal(data.total, 0)
+    assert.deepEqual(data.calls, [])
+  })
+})
+
+describe('panel activity recorder', () => {
+  it('records the tool calls an attached server reports', async () => {
+    const { createActivity } = await import('../dist/activity.js')
+    const activity = createActivity(true)
+    activity.record('crypto_status', true, 12)
+    activity.record('llamafarm_score', false, 340, 'catalog unavailable')
+    const attached = await startPanel(services, { port: 0, activity })
+    try {
+      const body = await new Promise<string>((resolve, reject) => {
+        const req = httpRequest(
+          { host: '127.0.0.1', port: attached.port, path: '/api/activity', method: 'GET' },
+          (res) => {
+            let text = ''
+            res.setEncoding('utf8')
+            res.on('data', (chunk: string) => { text += chunk })
+            res.on('end', () => resolve(text))
+          }
+        )
+        req.on('error', reject)
+        req.end()
+      })
+      const data = JSON.parse(body) as {
+        attached: boolean
+        total: number
+        failed: number
+        calls: { tool: string; ok: boolean; ms: number; error: string | null }[]
+        perTool: { tool: string; calls: number; failed: number }[]
+      }
+      assert.equal(data.attached, true)
+      assert.equal(data.total, 2)
+      assert.equal(data.failed, 1)
+      assert.equal(data.calls[0].tool, 'llamafarm_score')
+      assert.equal(data.calls[0].ok, false)
+      assert.equal(data.calls[0].error, 'catalog unavailable')
+      assert.deepEqual(data.calls[1].tool, 'crypto_status')
+      assert.deepEqual(data.perTool.map((tool) => tool.tool).sort(), ['crypto_status', 'llamafarm_score'])
+    } finally {
+      attached.close()
+    }
+  })
+})

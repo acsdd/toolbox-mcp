@@ -9,8 +9,13 @@ import { createServer, type Server, type ServerResponse } from 'node:http'
 import { pathToFileURL } from 'node:url'
 import { createServices, type Services } from './services.js'
 import { createTerminal } from './terminal.js'
+import { TOOL_GROUPS, catalogEntries } from './catalog.js'
+import { createActivity, type Activity } from './activity.js'
+import { appVersion } from './version.js'
 
 const PANEL_PORT = Number(process.env.TOOLBOX_MCP_PORT ?? 3851)
+/** The repository the panel points at for source and issue reports. */
+const REPO_URL = 'https://github.com/acsdd/toolbox-mcp'
 /** Request bodies are small JSON documents; anything larger is refused. */
 const MAX_BODY_BYTES = 1_000_000
 /** Upper bound for a body that is drained instead of buffered. */
@@ -60,47 +65,157 @@ const PAGE = `<!doctype html>
   /* No webfont: the panel loads nothing from the network, so it works
      offline and the page can run under a strict content security policy. */
   :root {
-    --bg: #070d0a; --panel: #0b1510; --panel2: #0a110e; --border: #203a2d;
-    --text: #d9dfda; --muted: #67746b; --dim: #41554b; --accent: #9cf37e;
-    --green: #92ec74; --yellow: #e8c35c; --red: #ff5f62;
+    --bg: #060b08; --bg-2: #08110c; --panel: #0c1712; --panel2: #0a1410;
+    --elevated: #112018; --border: #1f3a2d; --border-soft: #16281f;
+    --text: #dde5df; --muted: #6d7f74; --dim: #46584d;
+    --accent: #9cf37e; --accent-2: #5fd7c0;
+    --green: #92ec74; --yellow: #e8c35c; --red: #ff6b6e;
+    --radius: 10px;
+    --shadow-lg: 0 22px 46px -22px rgba(0, 0, 0, .8);
+    --shadow-sm: 0 2px 12px -6px rgba(0, 0, 0, .7);
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.5 "Cascadia Mono", ui-monospace, Consolas, "IBM Plex Mono", monospace; }
+  body {
+    margin: 0; color: var(--text); font: 13px/1.5 "Cascadia Mono", ui-monospace, Consolas, "IBM Plex Mono", monospace;
+    background:
+      radial-gradient(1100px 620px at 80% -14%, rgba(156, 243, 126, .07), transparent 62%),
+      radial-gradient(900px 540px at 4% 108%, rgba(95, 215, 192, .05), transparent 60%),
+      var(--bg);
+    background-attachment: fixed;
+  }
   button, input, select { font: inherit; color: inherit; }
   button { cursor: pointer; }
   button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 
-  .shell { display: grid; grid-template: 58px 1fr / 216px minmax(0, 1fr); height: 100vh; }
-  .topbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 24px; padding: 0 24px; background: var(--panel2); border-bottom: 1px solid var(--border); }
+  .shell { display: grid; grid-template: 62px 1fr / 232px minmax(0, 1fr); height: 100vh; }
+  .topbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 24px; padding: 0 26px; background: rgba(10, 20, 16, .92); border-bottom: 1px solid var(--border-soft); backdrop-filter: blur(8px); }
   .brand { font-size: 17px; font-weight: 600; letter-spacing: .02em; }
   .brand b { color: var(--accent); font-weight: 600; }
   .brand small { display: block; margin-top: 2px; color: var(--dim); font-size: 9px; letter-spacing: .08em; }
   .topbar .spacer { flex: 1; }
-  .badge { padding: 5px 12px; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); font-size: 10px; }
+  .badge { padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 10px; }
+  .badge.live { color: var(--accent); border-color: #2a4c34; background: rgba(156, 243, 126, .06); }
 
-  .sidebar { grid-row: 2; display: flex; flex-direction: column; gap: 6px; padding: 20px 14px; background: var(--panel2); border-right: 1px solid var(--border); }
-  .navbtn { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; min-height: 46px; padding: 0 12px; border: 0; border-radius: 2px; background: transparent; color: #71847a; text-align: left; }
+  .sidebar { grid-row: 2; display: flex; flex-direction: column; gap: 6px; padding: 22px 16px; background: rgba(8, 17, 12, .72); border-right: 1px solid var(--border-soft); }
+  .navbtn { display: grid; grid-template-columns: 30px 1fr auto; align-items: center; min-height: 48px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; color: #71847a; text-align: left; transition: background .12s ease, color .12s ease; }
   .navbtn i { font-style: normal; font-size: 17px; }
   .navbtn small { color: var(--dim); font-size: 9px; }
-  .navbtn:hover { color: #a4c69f; background: #102017; }
-  .navbtn.active { color: var(--accent); background: #183024; box-shadow: inset 2px 0 0 var(--accent); }
-  .sidebar .foot { margin-top: auto; padding: 12px; border: 1px solid var(--border); border-radius: 3px; color: var(--dim); font-size: 9px; line-height: 1.8; }
+  .navbtn:hover { color: #a4c69f; background: #0f1d16; }
+  .navbtn.active { color: var(--accent); background: linear-gradient(90deg, #16291f, #12211a); box-shadow: inset 2px 0 0 var(--accent), var(--shadow-sm); }
+  .sidebar .foot { margin-top: auto; padding: 13px 14px; border: 1px solid var(--border-soft); border-radius: 7px; color: var(--dim); font-size: 9px; line-height: 1.9; }
   .sidebar .foot b { color: var(--muted); font-weight: 400; }
 
-  main { overflow: auto; padding: 24px 26px 40px; min-width: 0; }
-  h1 { margin: 0 0 4px; font-size: 24px; font-weight: 500; }
-  .sub { margin: 0 0 18px; color: var(--muted); font-size: 11px; }
+  main { overflow: auto; padding: 28px 30px 48px; min-width: 0; }
+  h1 { margin: 0 0 4px; font-size: 25px; font-weight: 500; letter-spacing: -.01em; }
+  .sub { margin: 0 0 22px; color: var(--muted); font-size: 11px; line-height: 1.7; max-width: 76ch; }
   .hidden { display: none !important; }
 
-  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
-  .card { border: 1px solid var(--border); border-radius: 7px; background: var(--panel); overflow: hidden; }
-  .card h2 { margin: 0; padding: 14px 16px; border-bottom: 1px solid #16271e; font-size: 11px; font-weight: 400; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; }
-  .card pre { margin: 0; padding: 14px 16px; white-space: pre-wrap; word-break: break-word; font-size: 11px; color: #b8c3ba; max-height: 300px; overflow: auto; }
-  .card .actions { padding: 0 16px 14px; display: flex; gap: 10px; }
-  .btn { min-height: 36px; padding: 0 16px; border: 1px solid var(--border); border-radius: 3px; background: #0d1a13; color: #a4c69f; font-size: 11px; }
-  .btn:hover { border-color: var(--accent); color: var(--accent); }
-  .btn.primary { background: #183024; color: var(--accent); }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+  .card { border: 1px solid var(--border-soft); border-radius: var(--radius); background: linear-gradient(180deg, var(--panel), var(--panel2)); box-shadow: var(--shadow-sm); overflow: hidden; }
+  .card h2 { margin: 0; padding: 15px 18px; border-bottom: 1px solid var(--border-soft); font-size: 11px; font-weight: 400; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .card h2 em { font-style: normal; color: var(--dim); letter-spacing: 0; text-transform: none; }
+  .card pre { margin: 0; padding: 14px 18px; white-space: pre-wrap; word-break: break-word; font-size: 11px; color: #b8c3ba; max-height: 300px; overflow: auto; }
+  .card .actions { padding: 0 18px 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn { min-height: 38px; padding: 0 16px; border: 1px solid var(--border); border-radius: 6px; background: #0e1d15; color: #a4c69f; font-size: 11px; transition: border-color .12s ease, color .12s ease, background .12s ease; }
+  .btn:hover { border-color: var(--accent); color: var(--accent); background: #12241a; }
+  .btn.primary { background: linear-gradient(180deg, #1b3527, #163024); color: var(--accent); border-color: #2b4d38; }
+  .btn.primary:hover { border-color: var(--accent); }
   .btn:disabled { opacity: .45; cursor: default; }
+  .btn.small { min-height: 30px; padding: 0 11px; font-size: 10px; }
+
+  /* overview: the MCP feature surface */
+  .hero { position: relative; margin-bottom: 16px; padding: 24px 26px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: linear-gradient(135deg, #10241a 0%, #0b1611 52%, #091310 100%); box-shadow: var(--shadow-lg); }
+  .hero::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(560px 220px at 86% -10%, rgba(156, 243, 126, .14), transparent 68%); }
+  .hero-top { position: relative; z-index: 1; display: flex; align-items: flex-start; gap: 20px; flex-wrap: wrap; }
+  .hero-mark { flex: 0 0 auto; width: 54px; height: 54px; display: flex; align-items: center; justify-content: center; border: 1px solid #2b4d38; border-radius: 13px; background: linear-gradient(150deg, #1a3726, #102018); color: var(--accent); font-size: 24px; box-shadow: var(--shadow-sm); }
+  .hero-id { flex: 1; min-width: 260px; }
+  .hero-id h2 { margin: 0 0 4px; font-size: 22px; font-weight: 500; letter-spacing: -.01em; }
+  .hero-id h2 b { color: var(--accent); font-weight: 500; }
+  .hero-id p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+  .hero-facts { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+  .fact { display: flex; align-items: center; gap: 7px; padding: 6px 12px; border: 1px solid var(--border-soft); border-radius: 999px; background: rgba(8, 17, 12, .6); color: var(--muted); font-size: 10px; }
+  .fact b { color: var(--text); font-weight: 500; }
+  .fact .dot-live { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px rgba(156, 243, 126, .7); }
+  .fact .dot-off { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .tile { padding: 15px 17px; border: 1px solid var(--border-soft); border-radius: var(--radius); background: linear-gradient(180deg, var(--panel), var(--panel2)); box-shadow: var(--shadow-sm); }
+  .tile span { display: block; margin-bottom: 6px; color: var(--dim); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+  .tile b { display: block; font-size: 22px; font-weight: 500; line-height: 1.1; color: var(--text); }
+  .tile b em { font-style: normal; color: var(--accent); }
+  .tile small { display: block; margin-top: 5px; color: var(--muted); font-size: 9px; }
+  .tile.warn b { color: var(--yellow); }
+  .tile.bad b { color: var(--red); }
+
+  .ov-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, .85fr); gap: 16px; align-items: start; }
+  .ov-activity-card { position: sticky; top: 0; }
+  @media (max-width: 1180px) { .ov-grid { grid-template-columns: 1fr; } .ov-activity-card { position: static; } }
+
+  .tool-search { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 18px; border-bottom: 1px solid var(--border-soft); }
+  .tool-search input[type="search"] { flex: 1; min-width: 200px; min-height: 38px; padding: 0 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel2); color: var(--text); font-size: 12px; }
+  .tool-search input[type="search"]::placeholder { color: var(--dim); }
+  .grp-chips { display: flex; flex-wrap: wrap; gap: 7px; padding: 12px 18px; border-bottom: 1px solid var(--border-soft); }
+  .grp-chip { min-height: 30px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted); font-size: 10px; }
+  .grp-chip:hover { color: var(--text); border-color: #2f5340; }
+  .grp-chip.on { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+
+  .tool-group { border-bottom: 1px solid var(--border-soft); }
+  .tool-group:last-child { border-bottom: 0; }
+  .tool-group > h3 { display: flex; align-items: center; gap: 9px; margin: 0; padding: 13px 18px 7px; color: var(--muted); font-size: 10px; font-weight: 400; letter-spacing: .09em; text-transform: uppercase; }
+  .tool-group > h3 i { font-style: normal; color: var(--accent); font-size: 13px; }
+  .tool-group > h3 small { margin-left: auto; color: var(--dim); letter-spacing: 0; text-transform: none; font-size: 9px; }
+  .tool { padding: 9px 18px 12px 40px; border-top: 1px solid rgba(22, 40, 31, .55); }
+  .tool:first-of-type { border-top: 0; }
+  .tool b { display: block; color: #c9d4cb; font-size: 12px; font-weight: 500; }
+  .tool p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.7; }
+  .tool .params { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .param { padding: 3px 9px; border: 1px solid var(--border-soft); border-radius: 4px; background: rgba(8, 17, 12, .7); color: var(--dim); font-size: 9px; }
+  .param i { font-style: normal; color: #7fae8c; }
+  .param.req { color: var(--accent-2); border-color: #24463f; }
+  .tool-empty { padding: 30px 18px; text-align: center; color: var(--dim); font-size: 11px; }
+
+  .act-list { max-height: 460px; overflow: auto; }
+  .act { display: flex; align-items: baseline; gap: 9px; padding: 9px 16px; border-bottom: 1px solid rgba(22, 40, 31, .55); font-size: 10px; }
+  .act:last-child { border-bottom: 0; }
+  .act .mark { flex: 0 0 auto; font-size: 10px; }
+  .act.ok .mark { color: var(--accent); }
+  .act.bad .mark { color: var(--red); }
+  .act .nm { flex: 1; min-width: 0; color: #c9d4cb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .act .ms { flex: 0 0 auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .act .when { flex: 0 0 auto; color: var(--dim); font-size: 9px; }
+  .act .err { display: block; margin-top: 3px; color: var(--red); overflow-wrap: anywhere; }
+  .act-note { padding: 18px; color: var(--muted); font-size: 10px; line-height: 1.8; }
+
+  /* widget cards on the overview */
+  .wtable { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .wtable th { text-align: right; padding: 0 16px 8px; color: var(--dim); font-weight: 400; font-size: 9px; letter-spacing: .07em; }
+  .wtable th:first-child { text-align: left; padding-left: 18px; }
+  .wtable td { padding: 8px 16px; border-top: 1px solid rgba(22, 40, 31, .55); color: #c9d4cb; text-align: right; font-variant-numeric: tabular-nums; }
+  .wtable td:first-child { text-align: left; padding-left: 18px; }
+  .wtable td small { display: block; color: var(--dim); font-size: 9px; }
+  .wtable .up { color: var(--green); }
+  .wtable .down { color: var(--red); }
+  .wtable .flat { color: var(--muted); }
+  .wlist { list-style: none; margin: 0; padding: 0; }
+  .wlist li { padding: 10px 18px; border-top: 1px solid rgba(22, 40, 31, .55); font-size: 11px; }
+  .wlist li:first-child { border-top: 0; }
+  .wlist b { display: block; color: #c9d4cb; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wlist small { display: block; margin-top: 2px; color: var(--dim); font-size: 9px; }
+  .wlist .unread { color: var(--accent); }
+  .wlist .seen { color: var(--dim); }
+  .meters { padding: 16px 18px; display: flex; flex-direction: column; gap: 13px; }
+  .meter-label { display: flex; justify-content: space-between; margin-bottom: 6px; color: var(--muted); font-size: 10px; }
+  .meter-label b { color: #c9d4cb; font-weight: 400; font-variant-numeric: tabular-nums; }
+  .meter { height: 7px; border-radius: 999px; background: #101d16; overflow: hidden; }
+  .meter i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+  .meter.warn i { background: linear-gradient(90deg, #d8b45c, var(--yellow)); }
+  .meter.bad i { background: linear-gradient(90deg, #d9925a, var(--red)); }
+  .wmeta { display: flex; flex-wrap: wrap; gap: 10px; padding: 0 18px 16px; color: var(--dim); font-size: 9px; }
+  .wmeta b { color: var(--muted); font-weight: 400; }
+  .wempty { padding: 26px 18px; color: var(--dim); font-size: 10px; line-height: 1.8; }
+  details.json { padding: 0 18px 16px; }
+  details.json summary { cursor: pointer; color: var(--muted); font-size: 10px; padding: 6px 0; }
+  details.json pre { max-height: 220px; }
 
   /* model farm */
   .mf-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px; }
@@ -113,7 +228,7 @@ const PAGE = `<!doctype html>
   .mf-status { width: 100%; color: var(--dim); font-size: 10px; }
   .mf-status .err { color: var(--red); }
   .machine { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-  .chip { display: flex; flex-direction: column; gap: 3px; min-width: 130px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); }
+  .chip { display: flex; flex-direction: column; gap: 3px; min-width: 130px; padding: 11px 15px; border: 1px solid var(--border-soft); border-radius: 8px; background: linear-gradient(180deg, var(--panel), var(--panel2)); }
   .chip span { color: var(--dim); font-size: 9px; letter-spacing: .06em; }
   .chip b { color: var(--text); font-size: 13px; font-weight: 500; }
   .chip b em { color: var(--green); font-style: normal; }
@@ -259,9 +374,10 @@ const PAGE = `<!doctype html>
   .set-msg.err { color: var(--red); }
 
   @media (max-width: 860px) {
-    .shell { grid-template: 58px 1fr / 1fr; }
+    .shell { grid-template: 62px 1fr / 1fr; }
     .sidebar { display: none; }
     .mf-bar input[type="search"] { width: 100%; }
+    main { padding: 22px 18px 40px; }
   }
 </style>
 </head>
@@ -270,6 +386,7 @@ const PAGE = `<!doctype html>
   <header class="topbar">
     <div class="brand"><b>TOOLBOX</b> MCP<small>LOCAL TOOLS · GATEWAY</small></div>
     <div class="spacer"></div>
+    <span class="badge" id="ov-version">…</span>
     <span class="badge">127.0.0.1 ONLY · LOCAL</span>
   </header>
 
@@ -285,13 +402,45 @@ const PAGE = `<!doctype html>
 
   <main>
     <section id="sec-overview">
-      <h1>System overview</h1>
-      <p class="sub">Shared Toolbox widgets, live from this machine.</p>
+      <h1>toolbox-mcp</h1>
+      <p class="sub">The server's front page: the tools it exposes to an agent, what it is doing right now, and the widgets it is wired to. Everything below is served by this machine.</p>
+
+      <div class="hero">
+        <div class="hero-top">
+          <div class="hero-mark">◈</div>
+          <div class="hero-id">
+            <h2><b>toolbox-mcp</b> · MCP server</h2>
+            <p id="ov-blurb">A local-first MCP server: crypto watch, Gmail announcer, resource monitor, Model Farm scoring, marketplace and gateway observability — over stdio, with this panel on the side.</p>
+          </div>
+        </div>
+        <div class="hero-facts" id="ov-facts"></div>
+      </div>
+
+      <div class="tiles" id="ov-tiles"></div>
+
+      <div class="ov-grid">
+        <div class="card">
+          <h2>MCP tool surface <em id="ov-tool-count"></em></h2>
+          <div class="tool-search">
+            <input type="search" id="ov-tool-search" placeholder="search tools by name, group or purpose…" oninput="ovFilterTools()" autocomplete="off" spellcheck="false" />
+            <button class="btn small" onclick="ovFilterTools()">Filter</button>
+          </div>
+          <div class="grp-chips" id="ov-groups"></div>
+          <div id="ov-tools"></div>
+        </div>
+
+        <div class="card ov-activity-card">
+          <h2>Live activity <em id="ov-act-count"></em></h2>
+          <div class="act-list" id="ov-activity"></div>
+        </div>
+      </div>
+
+      <h2 style="margin:26px 0 12px;font-size:11px;font-weight:400;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">Widgets on this machine</h2>
       <div class="card-grid">
-        <div class="card" data-widget="crypto-watch"><h2>Crypto watch</h2><pre id="crypto">…</pre><div class="actions"><button class="btn" onclick="act('crypto_refresh','crypto')">Refresh prices</button></div></div>
-        <div class="card" data-widget="gmail-announcer"><h2>Gmail announcer</h2><pre id="gmail">…</pre><div class="actions"><button class="btn" onclick="act('gmail_check','gmail')">Check inbox</button></div></div>
-        <div class="card" data-widget="resource-monitor"><h2>Resource monitor</h2><pre id="resource">…</pre><div class="actions"><button class="btn" onclick="act('system_stats','resource')">Refresh stats</button></div></div>
-        <div class="card"><h2>Widget bundle</h2><pre id="bundle">…</pre><div class="actions"><button class="btn" onclick="loadBundle()">Export widgets</button></div></div>
+        <div class="card" data-widget="crypto-watch"><h2>Crypto watch <em id="ov-crypto-meta"></em></h2><div id="crypto"></div><div class="actions"><button class="btn" onclick="act('crypto_refresh','crypto')">Refresh prices</button></div></div>
+        <div class="card" data-widget="gmail-announcer"><h2>Gmail announcer <em id="ov-gmail-meta"></em></h2><div id="gmail"></div><div class="actions"><button class="btn" onclick="act('gmail_check','gmail')">Check inbox</button></div></div>
+        <div class="card" data-widget="resource-monitor"><h2>Resource monitor <em id="ov-res-meta"></em></h2><div id="resource"></div><div class="actions"><button class="btn" onclick="act('system_stats','resource')">Refresh stats</button></div></div>
+        <div class="card"><h2>Widget bundle <em id="ov-bundle-meta"></em></h2><div id="bundle"></div><div class="actions"><button class="btn" onclick="loadBundle()">Export widgets</button></div></div>
       </div>
     </section>
 
@@ -418,24 +567,282 @@ function show(name) {
   if (name === 'marketplace' && !mp.data) mpLoad()
   if (name === 'gateway' && !gw.data) gwLoad()
   if (name === 'settings') setLoad()
+  if (name === 'overview') ovTimer()
 }
 document.querySelectorAll('.navbtn').forEach(function (b) { b.onclick = function () { show(b.dataset.nav) } })
 
-/* ---- overview ---- */
+/* ---- overview: the MCP feature surface ---- */
+var ov = { catalog: null, tools: [], groups: [], group: '', query: '', activity: null, timer: null }
+
+function fmtPrice(value) {
+  if (typeof value !== 'number' || !isFinite(value)) return '—'
+  if (value >= 1000) return '$' + value.toLocaleString(undefined, { maximumFractionDigits: 0 })
+  if (value >= 1) return '$' + value.toLocaleString(undefined, { maximumFractionDigits: 2 })
+  return '$' + value.toPrecision(3)
+}
+function fmtPct(value) {
+  if (typeof value !== 'number' || !isFinite(value)) return '—'
+  return (value >= 0 ? '+' : '') + value.toFixed(2) + '%'
+}
+function fmtBytes(bytes) {
+  if (typeof bytes !== 'number' || !isFinite(bytes)) return '—'
+  var units = ['B', 'KB', 'MB', 'GB', 'TB']
+  var index = 0
+  var value = bytes
+  while (value >= 1024 && index < units.length - 1) { value /= 1024; index++ }
+  return value.toFixed(index === 0 ? 0 : 1) + ' ' + units[index]
+}
+function fmtUptime(seconds) {
+  if (typeof seconds !== 'number' || !isFinite(seconds)) return '—'
+  var days = Math.floor(seconds / 86400)
+  var hours = Math.floor((seconds % 86400) / 3600)
+  var minutes = Math.floor((seconds % 3600) / 60)
+  if (days) return days + 'd ' + hours + 'h'
+  if (hours) return hours + 'h ' + minutes + 'm'
+  return minutes + 'm'
+}
+function fmtWhen(ms) {
+  if (!ms) return '—'
+  var delta = Date.now() - ms
+  if (delta < 60000) return 'just now'
+  if (delta < 3600000) return Math.floor(delta / 60000) + 'm ago'
+  if (delta < 86400000) return Math.floor(delta / 3600000) + 'h ago'
+  return new Date(ms).toLocaleDateString()
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] }) }
+
+/* --- identity, stats --- */
+function renderHero(server) {
+  var facts = document.getElementById('ov-facts')
+  var attached = ov.activity && ov.activity.attached
+  var info = server || {}
+  facts.innerHTML =
+    '<span class="fact"><span class="' + (attached ? 'dot-live' : 'dot-off') + '"></span>' +
+      (attached ? 'MCP server attached' : 'Panel only — no MCP client') + '</span>' +
+    '<span class="fact">VERSION <b>' + esc(info.version || '—') + '</b></span>' +
+    '<span class="fact">TRANSPORT <b>' + esc(info.transport || '—') + '</b></span>' +
+    '<span class="fact">TOOLS <b>' + ov.tools.length + '</b></span>' +
+    '<span class="fact">PANEL <b>' + esc(info.panel || '—') + '</b></span>' +
+    (info.repo ? '<span class="fact"><a href="' + esc(info.repo) + '" target="_blank" rel="noopener" style="color:var(--accent)">github ↗</a></span>' : '')
+  document.getElementById('ov-version').textContent = 'toolbox-mcp ' + (info.version || '')
+}
+function renderTiles(server) {
+  var activity = ov.activity && Array.isArray(ov.activity.perTool)
+    ? ov.activity
+    : { total: 0, failed: 0, perTool: [] }
+  var groups = ov.groups.length
+  var used = activity.perTool.length
+  var tiles = document.getElementById('ov-tiles')
+  var html = '<div class="tile"><span>MCP tools</span><b><em>' + ov.tools.length + '</em></b><small>across ' + groups + ' feature groups</small></div>'
+  html += '<div class="tile"><span>Tool calls</span><b>' + activity.total + '</b><small>' + (used ? used + ' distinct tools used' : 'no calls recorded yet') + '</small></div>'
+  html += '<div class="tile' + (activity.failed ? ' warn' : '') + '"><span>Failed calls</span><b>' + activity.failed + '</b><small>' + (activity.failed ? 'the last calls did not all succeed' : 'every recorded call succeeded') + '</small></div>'
+  html += '<div class="tile"><span>Transport</span><b>' + esc((server && server.transport) || '—') + '</b><small>clients speak MCP over stdio</small></div>'
+  tiles.innerHTML = html
+}
+
+/* --- the tool surface --- */
+function renderGroupChips() {
+  var box = document.getElementById('ov-groups')
+  box.innerHTML = '<button class="grp-chip' + (ov.group === '' ? ' on' : '') + '" onclick="ovPickGroup(\\'\\')">all</button>' +
+    ov.groups.map(function (g) {
+      var count = ov.tools.filter(function (t) { return t.group === g.id }).length
+      return '<button class="grp-chip' + (ov.group === g.id ? ' on' : '') + '" onclick="ovPickGroup(\\\'' + esc(g.id) + '\\\')">' +
+        esc(g.icon) + ' ' + esc(g.label) + ' · ' + count + '</button>'
+    }).join('')
+}
+function ovPickGroup(id) {
+  ov.group = id
+  renderGroupChips()
+  renderTools()
+}
+function ovFilterTools() {
+  ov.query = document.getElementById('ov-tool-search').value.trim().toLowerCase()
+  renderTools()
+}
+function renderTools() {
+  var box = document.getElementById('ov-tools')
+  var groups = ov.groups.filter(function (g) { return !ov.group || g.id === ov.group })
+  var total = 0
+  var html = ''
+  groups.forEach(function (group) {
+    var tools = ov.tools.filter(function (tool) {
+      if (tool.group !== group.id) return false
+      if (!ov.query) return true
+      var haystack = (tool.name + ' ' + tool.description + ' ' + group.label + ' ' +
+        tool.params.map(function (p) { return p.name + ' ' + p.description }).join(' ')).toLowerCase()
+      return haystack.indexOf(ov.query) !== -1
+    })
+    if (!tools.length) return
+    total += tools.length
+    var rows = tools.map(function (tool) {
+      var params = tool.params.map(function (p) {
+        return '<span class="param' + (p.required ? ' req' : '') + '"><i>' + esc(p.name) + '</i> · ' +
+          esc(p.type) + (p.required ? ' · required' : '') + (p.description ? ' — ' + esc(p.description) : '') + '</span>'
+      }).join('')
+      return '<div class="tool"><b>' + esc(tool.name) + '</b><p>' + esc(tool.description) + '</p>' +
+        (params ? '<div class="params">' + params + '</div>' : '') + '</div>'
+    }).join('')
+    html += '<div class="tool-group"><h3><i>' + esc(group.icon) + '</i> ' + esc(group.label) +
+      '<small>' + tools.length + ' tool' + (tools.length === 1 ? '' : 's') + ' · ' + esc(group.hint) + '</small></h3>' + rows + '</div>'
+  })
+  document.getElementById('ov-tool-count').textContent = total + ' of ' + ov.tools.length
+  box.innerHTML = html || '<div class="tool-empty">No tool matches "' + esc(ov.query) + '".</div>'
+}
+
+/* --- live activity --- */
+function renderActivity() {
+  var box = document.getElementById('ov-activity')
+  var snapshot = ov.activity
+  if (!snapshot || !snapshot.attached) {
+    document.getElementById('ov-act-count').textContent = ''
+    box.innerHTML = '<div class="act-note">The panel is running without an MCP server attached, so there are no tool calls to show. ' +
+      'Start the server with <b>toolbox-mcp</b> to watch an agent drive the tool surface.</div>'
+    return
+  }
+  var calls = Array.isArray(snapshot.calls) ? snapshot.calls : []
+  document.getElementById('ov-act-count').textContent = (snapshot.total || 0) + ' call' + ((snapshot.total || 0) === 1 ? '' : 's')
+  if (!calls.length) {
+    box.innerHTML = '<div class="act-note">No calls yet. An agent is connected but has not called a tool.</div>'
+    return
+  }
+  box.innerHTML = calls.map(function (call) {
+    return '<div class="act ' + (call.ok ? 'ok' : 'bad') + '">' +
+      '<span class="mark">' + (call.ok ? '●' : '✖') + '</span>' +
+      '<span class="nm">' + esc(call.tool) + (call.error ? '<span class="err">' + esc(call.error) + '</span>' : '') + '</span>' +
+      '<span class="ms">' + call.ms + 'ms</span>' +
+      '<span class="when">' + fmtWhen(call.at) + '</span></div>'
+  }).join('')
+}
+
+/* --- widget cards --- */
+function renderCrypto(state) {
+  var box = document.getElementById('crypto')
+  var meta = document.getElementById('ov-crypto-meta')
+  if (!state) { box.innerHTML = '<div class="wempty">No crypto state.</div>'; return }
+  if (state.error) {
+    meta.textContent = 'error'
+    box.innerHTML = '<div class="wempty">' + esc(state.error) + '</div>'
+    return
+  }
+  meta.textContent = (state.watchlist || []).length + ' coins'
+  if (!state.coins || !state.coins.length) {
+    box.innerHTML = '<div class="wempty">No prices cached yet. Hit “Refresh prices”, or set a watchlist in Settings.</div>'
+    return
+  }
+  var rows = state.coins.map(function (coin) {
+    var change = coin.change24h
+    var cls = change === null || change === undefined ? 'flat' : change >= 0 ? 'up' : 'down'
+    return '<tr><td>' + esc(coin.symbol ? coin.symbol.toUpperCase() : coin.id) +
+      '<small>' + esc(coin.name || coin.id) + '</small></td>' +
+      '<td>' + fmtPrice(coin.price) + '</td>' +
+      '<td class="' + cls + '">' + fmtPct(change) + '</td></tr>'
+  }).join('')
+  var missing = (state.missing && state.missing.length)
+    ? '<div class="wmeta"><b>missing:</b> ' + esc(state.missing.join(', ')) + '</div>'
+    : ''
+  box.innerHTML = '<table class="wtable"><thead><tr><th>COIN</th><th>PRICE</th><th>24H</th></tr></thead><tbody>' +
+    rows + '</tbody></table>' + missing +
+    '<div class="wmeta"><b>updated</b> ' + fmtWhen(state.lastCheck) + '</div>'
+}
+function renderGmail(state) {
+  var box = document.getElementById('gmail')
+  var meta = document.getElementById('ov-gmail-meta')
+  if (!state) { box.innerHTML = '<div class="wempty">No Gmail state.</div>'; return }
+  if (!state.configured) {
+    meta.textContent = 'not connected'
+    box.innerHTML = '<div class="wempty">No Gmail account is connected. An agent can connect one with <b>gmail_connect</b> using a 16-character App Password — it is stored only on this machine.</div>'
+    return
+  }
+  meta.textContent = state.unread + ' unread'
+  if (state.error) {
+    box.innerHTML = '<div class="wempty">' + esc(state.error) + '</div>'
+    return
+  }
+  var messages = state.messages || []
+  if (!messages.length) {
+    box.innerHTML = '<div class="wempty">Inbox is clear. Last checked ' + fmtWhen(state.lastCheck) + '.</div>'
+    return
+  }
+  var items = messages.map(function (message) {
+    return '<li><b class="' + (message.seen ? 'seen' : 'unread') + '">' +
+      (message.seen ? '' : '● ') + esc(message.subject || '(no subject)') + '</b>' +
+      '<small>' + esc(message.from || 'unknown sender') + ' · ' + esc(message.date ? new Date(message.date).toLocaleString() : 'no date') + '</small></li>'
+  }).join('')
+  box.innerHTML = '<ul class="wlist">' + items + '</ul>' +
+    '<div class="wmeta"><b>' + esc(state.email) + '</b> · last checked ' + fmtWhen(state.lastCheck) + '</div>'
+}
+function renderResource(stats) {
+  var box = document.getElementById('resource')
+  var meta = document.getElementById('ov-res-meta')
+  if (!stats) { box.innerHTML = '<div class="wempty">No resource data.</div>'; return }
+  meta.textContent = stats.hostname || ''
+  function meter(label, used, total, format) {
+    var pct = total > 0 ? Math.min(100, Math.max(0, (used / total) * 100)) : 0
+    var cls = pct >= 90 ? 'bad' : pct >= 75 ? 'warn' : ''
+    return '<div><div class="meter-label"><span>' + esc(label) + '</span><b>' + esc(format(used, total, pct)) + '</b></div>' +
+      '<div class="meter ' + cls + '"><i style="width:' + pct.toFixed(1) + '%"></i></div></div>'
+  }
+  var mem = meter('MEMORY', stats.memUsed, stats.memTotal, function (used, total) {
+    return fmtBytes(used) + ' / ' + fmtBytes(total)
+  })
+  var disk = meter('DISK · ' + (stats.diskName || ''), stats.diskTotal - stats.diskFree, stats.diskTotal, function (used, total) {
+    return fmtBytes(used) + ' used of ' + fmtBytes(total)
+  })
+  var cpu = meter('CPU', stats.cpuPercent, 100, function (used) { return used.toFixed(0) + '%' })
+  box.innerHTML = '<div class="meters">' + cpu + mem + disk + '</div>' +
+    '<div class="wmeta"><b>' + esc(stats.hostname || 'host') + '</b> · ' + esc(stats.platform || '') + ' · ' +
+    esc(stats.cores || 0) + ' cores · up ' + esc(fmtUptime(stats.uptime)) + '</div>' +
+    (stats.cpuModel ? '<div class="wmeta"><b>cpu</b> ' + esc(stats.cpuModel) + '</div>' : '')
+}
+function renderBundle(raw) {
+  var box = document.getElementById('bundle')
+  var meta = document.getElementById('ov-bundle-meta')
+  var bundle = null
+  try { bundle = JSON.parse(raw) } catch (cause) { bundle = null }
+  if (!bundle || !Array.isArray(bundle.widgets)) {
+    box.innerHTML = '<div class="wempty">The bundle could not be read.</div>'
+    return
+  }
+  meta.textContent = bundle.widgets.length + ' widgets'
+  var names = bundle.widgets.map(function (entry) { return entry.widget }).join(', ')
+  box.innerHTML = '<div class="wmeta"><b>' + esc(names) + '</b></div>' +
+    '<details class="json"><summary>Show bundle JSON</summary><pre>' + esc(raw) + '</pre></details>'
+}
+
+/* --- boot --- */
 async function act(action, target) {
   var res = await fetch('/api/' + action, { method: 'POST' })
-  document.getElementById(target).textContent = JSON.stringify(await res.json(), null, 2)
+  var data = await res.json()
+  if (target === 'crypto') renderCrypto(data)
+  else if (target === 'gmail') renderGmail(data)
+  else if (target === 'resource') renderResource(data)
+  ovTimer()
 }
 async function loadBundle() {
   var res = await fetch('/api/widgets_export')
-  document.getElementById('bundle').textContent = await res.text()
+  renderBundle(await res.text())
+}
+async function loadActivity() {
+  var res = await fetch('/api/activity')
+  ov.activity = await res.json()
+  renderActivity()
+  renderTiles(ov.catalog ? ov.catalog.server : { transport: 'stdio' })
 }
 async function bootOverview() {
   var res = await fetch('/api/overview')
   var data = await res.json()
-  document.getElementById('crypto').textContent = JSON.stringify(data.crypto, null, 2)
-  document.getElementById('gmail').textContent = JSON.stringify(data.gmail, null, 2)
-  document.getElementById('resource').textContent = JSON.stringify(data.resource, null, 2)
+  var catalogRes = await fetch('/api/catalog')
+  var catalog = await catalogRes.json()
+  ov.catalog = catalog
+  ov.groups = catalog.groups || []
+  ov.tools = catalog.tools || []
+  await loadActivity()
+  renderHero(catalog.server)
+  renderGroupChips()
+  renderTools()
+  renderCrypto(data.crypto)
+  renderGmail(data.gmail)
+  renderResource(data.resource)
   var installed = data.installed || []
   document.querySelectorAll('[data-widget]').forEach(function (card) {
     card.classList.toggle('hidden', installed.indexOf(card.dataset.widget) === -1)
@@ -443,9 +850,20 @@ async function bootOverview() {
   var gwInstalled = installed.indexOf('astrlink-gateway') !== -1
   document.querySelector('[data-nav="gateway"]').classList.toggle('hidden', !gwInstalled)
   if (!gwInstalled && !document.getElementById('sec-gateway').classList.contains('hidden')) show('overview')
-  loadBundle()
+  loadBundle().catch(function () {})
 }
-bootOverview()
+/** The activity feed polls gently so it stays live without hammering the panel. */
+function ovTimer() {
+  clearTimeout(ov.timer)
+  // Only poll while the overview is on screen.
+  if (document.getElementById('sec-overview').classList.contains('hidden')) return
+  ov.timer = setTimeout(function () { loadActivity().catch(function () {}) }, 4000)
+}
+bootOverview().catch(function (cause) {
+  var box = document.getElementById('ov-tools')
+  if (box) box.innerHTML = '<div class="tool-empty">The tool catalog could not be read: ' + esc(cause && cause.message ? cause.message : cause) + '</div>'
+})
+ovTimer()
 
 /* ---- settings ---- */
 var setDirty = false
@@ -482,7 +900,7 @@ async function setSaveWatchlist() {
   setDirty = false
   document.getElementById('set-watchlist').value = (body.watchlist || []).join(', ')
   setMsg('set-watchlist-msg', 'Saved · ' + (body.watchlist || []).length + ' coins', 'ok')
-  bootOverview()
+  bootOverview().catch(function () {})
 }
 async function setSaveResource() {
   var res = await fetch('/api/settings/resource', {
@@ -499,12 +917,11 @@ async function setSaveResource() {
   }
   setDirty = false
   setMsg('set-resource-msg', 'Saved.', 'ok')
-  bootOverview()
+  bootOverview().catch(function () {})
 }
 
 /* ---- model farm ---- */
 function gb(bytes) { return (bytes / Math.pow(2, 30)).toFixed(1) + ' GB' }
-function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] }) }
 
 function setScenario(sc) {
   mf.scenario = sc
@@ -828,7 +1245,7 @@ async function mpInstall(id) {
   mp.note = result.error ? result.error
     : [result.note].concat(result.missingCredentials && result.missingCredentials.length ? ['missing credentials: ' + result.missingCredentials.join(', ')] : []).filter(Boolean).join(' · ') || 'Installed.'
   await mpLoad()
-  bootOverview()
+  bootOverview().catch(function () {})
 }
 async function mpUninstall(id) {
   mp.busy = true
@@ -840,7 +1257,7 @@ async function mpUninstall(id) {
   mp.busy = false
   mp.note = result.error || 'Uninstalled. Settings were kept.'
   await mpLoad()
-  bootOverview()
+  bootOverview().catch(function () {})
 }
 
 /* ---- astrlink gateway ---- */
@@ -1139,8 +1556,19 @@ export interface PanelHandle {
   close: () => void
 }
 
-export function startPanel(services: Services, options: { port?: number } = {}): Promise<PanelHandle> {
+export interface PanelOptions {
+  port?: number
+  /**
+   * The MCP call recorder. When it is not attached the panel still works; the
+   * activity card then explains that no server is feeding it.
+   */
+  activity?: Activity
+}
+
+export function startPanel(services: Services, options: PanelOptions = {}): Promise<PanelHandle> {
   const terminal = createTerminal()
+  const activity = options.activity ?? createActivity(false)
+  let panelPort = options.port ?? PANEL_PORT
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     void (async () => {
@@ -1163,6 +1591,26 @@ export function startPanel(services: Services, options: { port?: number } = {}):
             resource: await services.resourceStats(),
             installed: services.installedWidgets()
           }))
+          return
+        }
+        if (req.method === 'GET' && url.pathname === '/api/catalog') {
+          // The same catalog the MCP server registers, so the panel and an
+          // agent always see the same tool surface.
+          send(res, 200, JSON.stringify({
+            server: {
+              name: 'toolbox-mcp',
+              version: appVersion(),
+              transport: 'stdio',
+              panel: `http://127.0.0.1:${panelPort}`,
+              repo: REPO_URL
+            },
+            groups: TOOL_GROUPS,
+            tools: catalogEntries()
+          }))
+          return
+        }
+        if (req.method === 'GET' && url.pathname === '/api/activity') {
+          send(res, 200, JSON.stringify(activity.snapshot()))
           return
         }
         if (req.method === 'POST' && url.pathname === '/api/crypto_refresh') {
@@ -1342,6 +1790,7 @@ export function startPanel(services: Services, options: { port?: number } = {}):
         reject(new Error('The panel did not obtain a TCP port.'))
         return
       }
+      panelPort = address.port
       resolve({
         port: address.port,
         close: () => {

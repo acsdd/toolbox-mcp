@@ -527,7 +527,10 @@ describe('Model Farm setup panel', () => {
       },
       navigator: { clipboard: { writeText } },
       fetch: (url: string) => url === '/api/llamafarm/install' ? reply() : Promise.resolve(Response.json({})),
-      setTimeout, clearTimeout
+      // Timers are stubbed: the panel polls its activity feed while the
+      // overview is visible, and a test has no reason to wait for that.
+      setTimeout: () => 0,
+      clearTimeout: () => {}
     })
     client.mf.expanded[repo] = true
     client.setResult({ total: 1, fetchedAt: 1, groups: [{
