@@ -23,7 +23,8 @@ Part of the Toolbox family:
 | `system_stats` / `system_processes` | CPU / memory / disk and top processes |
 | `llamafarm_status` / `llamafarm_catalog` / `llamafarm_score` / `llamafarm_refresh` | Model Farm: HuggingFace catalog fit-scored against this machine; `status` also returns a 0–100 PC scorecard |
 | `llamafarm_grade` | Rate this PC 0–100, and grade one model against it (weakest-link weighted) when a repo is given |
-| `llamafarm_install` | Pull a catalog model into the local Ollama runtime (optional GPU split) |
+| `llamafarm_install` | Pull a catalog model into the local runtime (Ollama by default, or the runtime you picked) |
+| `runtimes_detect` / `runtimes_install` / `runtimes_use` / `runtimes_models` / `runtimes_download` | Local model runtimes: find Ollama, LM Studio, llama.cpp, Jan, GPT4All, KoboldCpp, LocalAI, vLLM, llamafile and text-generation-webui, install Ollama, and choose which one the Model Farm installs into |
 | `marketplace_list` / `marketplace_install` / `marketplace_uninstall` | Live module marketplace (public registry, installs via the bundle validator) |
 | `remote_status` | Connected remote MCP servers and their tool counts |
 | `gateway_status` / `gateway_requests` | Local AstrLink gateway: providers and subscription health, routing posture, capture/privacy settings, alerts, and recent call metadata (read-only, cached 30s) |
@@ -66,10 +67,14 @@ model to AstrLink.
   digits-only PC-vs-model comparison with signed headroom and the weak-link
   sentence.
   The catalog is cached in `~/.toolbox-mcp/llamafarm-cache.json` for 6 hours.
-  Expanding a model shows an **Install in Ollama** action: Ollama serves any
-  GGUF straight from the Hub, so the install is a single `ollama pull
+  Expanding a model shows an **Install in &lt;runtime&gt;** action: the runtime is
+  the one you picked under **Local runtimes** — Ollama by default. Ollama serves
+  any GGUF straight from the Hub, so that install is a single `ollama pull
   hf.co/owner/repo:Q4_K_M` — with a GPU split it writes a Modelfile instead.
-  If Ollama is missing, the action says so and prints the exact command to run.
+  A runtime that takes files instead of pulls gets the GGUF downloaded into its
+  own models folder, and one that serves a single model per process (llama.cpp,
+  llamafile) is started with it. If the runtime is missing, the action says so
+  and prints the exact command to run.
   Successful installs show **Use in AstrLink** with a **Copy setup** button:
   OpenAI-compatible provider, default local base URL `http://127.0.0.1:11434/v1`,
   the installed model and `openai.chat`. Plain pulls use the full quantized
@@ -80,6 +85,20 @@ model to AstrLink.
   not an import file: no credentials are included and nothing is configured in
   AstrLink automatically. Failed installs offer no setup. The same success-only
   settings are returned in the `astrlink` field of `llamafarm_install`.
+- **Local runtimes** — Ollama is not the only local runtime. This card scans
+  the machine for **Ollama, LM Studio, llama.cpp, Jan, GPT4All, KoboldCpp,
+  LocalAI, vLLM, llamafile and text-generation-webui**, and reports each one
+  as installed, running or missing. A runtime is found three ways: a server
+  answering on its well-known port, its command line on `PATH`, and the
+  program in its install folder — a leftover data folder alone does not count,
+  so an app you uninstalled is not reported as present. When two runtimes share
+  a port, the one that names itself in its banner wins and the other says
+  which runtime holds the port. Pick one with **use this** and the Model Farm
+  installs into that runtime from then on; the choice is stored in
+  `~/.toolbox-mcp/settings.json`. **Install / update Ollama** downloads the
+  official installer and runs it silently (per user, no administrator rights)
+  so you end up with a fresh version rather than a stale one. Runtimes with
+  their own installer get a **get it** link instead.
 - **Terminal** — a local PowerShell session streamed to the browser. It runs
   with your user rights; the panel never binds beyond 127.0.0.1.
 - **Marketplace** — VS Code-style storefront for shared Toolbox modules.
@@ -108,13 +127,16 @@ model to AstrLink.
   does not publish the registry.
 - **Settings** — edit the preferences the panel stores in
   `~/.toolbox-mcp/settings.json`: the crypto watchlist, the disk the resource
-  monitor reports on, and whether the process list is shown. Nothing is
+  monitor reports on, whether the process list is shown, and the local runtime
+  the Model Farm installs into. Nothing is
   uploaded. The terminal command history is kept in the browser's local
   storage, so it survives a page reload but never leaves the browser.
 
 ![Overview](docs/panel-overview.png)
 
 ![Model Farm](docs/panel-model-farm.png)
+
+![Local runtimes](docs/panel-runtimes.png)
 
 ## Run
 
@@ -171,7 +193,7 @@ present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.7.0.exe
+npm run portable      # → dist/ModelFarm-Portable-0.8.0.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -194,10 +216,10 @@ the widget core repo, so **the widget core has to be published first**:
 
 ```bash
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.7.0
+git tag v0.8.0
 git push origin main --tags
-gh release create v0.7.0 dist/ModelFarm-Portable-0.7.0.exe \
-  --title "Model Farm 0.7.0" --notes-file release-notes.md
+gh release create v0.8.0 dist/ModelFarm-Portable-0.8.0.exe \
+  --title "Model Farm 0.8.0" --notes-file release-notes.md
 ```
 
 No credential ever lands in this repository: the Gmail App Password is written

@@ -233,6 +233,24 @@ const PAGE = `<!doctype html>
   .chip b { color: var(--text); font-size: 13px; font-weight: 500; }
   .chip b em { color: var(--green); font-style: normal; }
 
+  .rt-card { margin: 0 0 18px; padding: 16px 18px; }
+  .rt-card h2 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 6px; font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .rt-card h2 em { font-style: normal; font-size: 10px; color: var(--dim); text-transform: none; letter-spacing: 0; }
+  .rt-intro { margin: 0 0 12px; color: var(--dim); font-size: 12px; line-height: 1.6; }
+  .rt-list { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-bottom: 12px; }
+  .rt-item { display: flex; flex-direction: column; gap: 6px; padding: 11px 13px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--panel2); }
+  .rt-item.on { border-color: var(--green); box-shadow: inset 2px 0 0 var(--green); }
+  .rt-id { display: flex; align-items: baseline; gap: 8px; }
+  .rt-id b { color: var(--text); font-size: 13px; font-weight: 500; }
+  .rt-id small { color: var(--dim); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+  .rt-item.on .rt-id small { color: var(--green); }
+  .rt-note { color: var(--dim); font-size: 11px; line-height: 1.5; }
+  .rt-item .btn { align-self: flex-start; min-height: 34px; }
+  .rt-log { margin-top: 10px; font-size: 12px; min-height: 18px; }
+  .rt-log .ok { color: var(--green); }
+  .rt-log .err { color: var(--red); }
+  .rt-log pre { margin: 8px 0 0; padding: 10px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--bg); color: var(--dim); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; user-select: text; }
+
   .mf-cols { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 10px; }
   .mf-col { flex: 0 0 300px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); overflow: hidden; }
   .mf-col h3 { display: flex; align-items: center; gap: 8px; margin: 0; padding: 12px 14px; border-bottom: 1px solid #16271e; font-size: 11px; font-weight: 400; color: var(--muted); }
@@ -466,6 +484,16 @@ const PAGE = `<!doctype html>
         <div class="mf-status" id="mf-status">warming up…</div>
       </div>
       <div class="machine" id="mf-machine"></div>
+      <div class="card rt-card" id="rt-card">
+        <h2>Local runtimes <em id="rt-meta">detecting…</em></h2>
+        <p class="rt-intro">Ollama is not the only local runtime. These are the ones found on this machine — pick one and the Model Farm installs into it.</p>
+        <div class="rt-list" id="rt-list"></div>
+        <div class="actions">
+          <button class="btn" onclick="rtDetect()">Scan again</button>
+          <button class="btn primary" onclick="rtInstall()">Install / update Ollama</button>
+        </div>
+        <div class="rt-log" id="rt-log"></div>
+      </div>
       <div class="mf-cols" id="mf-cols"></div>
     </section>
 
@@ -563,6 +591,7 @@ function show(name) {
     document.getElementById('sec-' + s).classList.toggle('hidden', s !== name)
   })
   if (name === 'models' && !lastResult) mfLoad()
+  if (name === 'models' && !rt.data) rtDetect()
   if (name === 'terminal') termAutoStart()
   if (name === 'marketplace' && !mp.data) mpLoad()
   if (name === 'gateway' && !gw.data) gwLoad()
@@ -1008,6 +1037,14 @@ function renderMachine(m, grade) {
     ? 'installed · ' + m.ollama.models.length + ' models'
     : 'not found' + (m.ollama.error ? ' (' + esc(m.ollama.error) + ')' : '')
   html += '<div class="chip"><span>OLLAMA</span><b>' + oll + '</b></div>'
+  var activeId = rt.data && rt.data.active ? rt.data.active : 'ollama'
+  var activeRuntime = rt.data
+    ? rt.data.runtimes.filter(function (r) { return r.id === activeId })[0]
+    : null
+  if (activeRuntime) {
+    var state = activeRuntime.running ? 'running' : (activeRuntime.installed ? 'installed' : 'not running')
+    html += '<div class="chip"><span>ACTIVE RUNTIME</span><b>' + esc(activeRuntime.label) + ' · ' + state + '</b></div>'
+  }
   if (grade) {
     html += '<div class="chip"><span>THIS PC · ' + (mf.scenario === 'now' ? 'AVAILABLE NOW' : 'TOTAL') + '</span><b>' +
       grade.score + '/100 · ' + esc(grade.label) + '</b></div>'
@@ -1070,6 +1107,80 @@ async function mfCopyAstrlink(id) {
   }
   if (mf.install[id] === inst && lastResult) renderGroups(lastResult)
 }
+/* ---- local runtimes ---- */
+var rt = { data: null, busy: false }
+
+async function rtDetect() {
+  var meta = document.getElementById('rt-meta')
+  if (!meta) return
+  meta.textContent = 'scanning…'
+  try {
+    var res = await fetch('/api/runtimes')
+    rt.data = await res.json()
+  } catch (cause) {
+    meta.textContent = 'scan failed'
+    return
+  }
+  rtRender()
+}
+function rtRender() {
+  var meta = document.getElementById('rt-meta')
+  var list = document.getElementById('rt-list')
+  if (!meta || !list || !rt.data || !rt.data.runtimes) return
+  var found = rt.data.runtimes.filter(function (r) { return r.installed || r.running })
+  meta.textContent = found.length + ' of ' + rt.data.runtimes.length + ' found'
+  list.innerHTML = rt.data.runtimes.map(function (r) {
+    var state = r.running ? 'running' : (r.installed ? 'installed' : 'not found')
+    var active = rt.data.active === r.id
+    var detail = r.version ? ' · ' + esc(r.version) : ''
+    var models = r.models && r.models.length ? ' · ' + r.models.length + ' models' : ''
+    var action = active
+      ? '<span class="rt-id"><small>active</small></span>'
+      : r.installed
+        ? '<button class="btn small" onclick="rtUse(\\\'' + esc(r.id) + '\\\')">use this</button>'
+        : '<a class="btn small" href="' + esc(r.homepage) + '" target="_blank" rel="noopener">get it</a>'
+    return '<div class="rt-item' + (active ? ' on' : '') + '">' +
+      '<div class="rt-id"><b>' + esc(r.label) + '</b><small>' + state + detail + '</small></div>' +
+      '<div class="rt-note">' + esc(r.note) + models + '</div>' + action + '</div>'
+  }).join('')
+}
+/** The runtime the Model Farm installs into right now. */
+function rtActiveLabel() {
+  if (!rt.data || !rt.data.runtimes) return 'Ollama'
+  var id = rt.data.active ? rt.data.active : 'ollama'
+  var found = rt.data.runtimes.filter(function (r) { return r.id === id })[0]
+  return found ? found.label : 'Ollama'
+}
+async function rtUse(id) {
+  var log = document.getElementById('rt-log')
+  if (log) log.innerHTML = ''
+  await fetch('/api/runtimes/use', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id })
+  })
+  await rtDetect()
+  if (lastResult) await mfLoad()
+}
+async function rtInstall() {
+  var log = document.getElementById('rt-log')
+  if (!log || rt.busy) return
+  rt.busy = true
+  log.innerHTML = '<span>Downloading the official Ollama installer — this can take a minute…</span>'
+  try {
+    var res = await fetch('/api/runtimes/install', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'ollama' })
+    })
+    var result = await res.json()
+    log.innerHTML = result.ok
+      ? '<span class="ok">' + esc(result.message) + '</span>'
+      : '<span class="err">' + esc(result.message) + '</span>' +
+        (result.log ? '<pre>' + esc(result.log.slice(-2000)) + '</pre>' : '')
+  } catch (cause) {
+    log.innerHTML = '<span class="err">The install request failed.</span>'
+  }
+  rt.busy = false
+  await rtDetect()
+}
+
 function renderGroups(result) {
   var status = document.getElementById('mf-status')
   if (result.error) {
@@ -1097,10 +1208,11 @@ function renderGroups(result) {
         var hints = m.hints.map(function (h) { return '<li>' + esc(h) + '</li>' }).join('')
         var inst = mf.install[m.id]
         var pullable = (m.formats || []).indexOf('gguf') !== -1
+        var targetName = rtActiveLabel()
         var installBlock = '<div class="minstall">' +
           (pullable
-            ? '<button onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install in Ollama</button>'
-            : '<span class="note">safetensors only — convert to GGUF to install in Ollama</span>') +
+            ? '<button onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install in ' + esc(targetName) + '</button>'
+            : '<span class="note">safetensors only — convert to GGUF to install in ' + esc(targetName) + '</span>') +
           (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '">' + esc(inst.message) + '</span>' : '') +
           '</div>'
         row += '<div class="mdetail"><p>' + esc(m.reason) + '</p>' +
@@ -1677,12 +1789,34 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
           return
         }
         if (req.method === 'POST' && url.pathname === '/api/llamafarm/install') {
-          const raw = await readJson<{ repo?: string; quant?: string; offload?: number }>(req)
+          const raw = await readJson<{ repo?: string; quant?: string; offload?: number; runtime?: string }>(req)
           send(res, 200, JSON.stringify(await services.llamafarmInstall({
             repo: raw.repo ?? '',
             ...(raw.quant ? { quant: raw.quant } : {}),
-            ...(typeof raw.offload === 'number' ? { offload: raw.offload } : {})
+            ...(typeof raw.offload === 'number' ? { offload: raw.offload } : {}),
+            ...(raw.runtime ? { runtime: raw.runtime } : {})
           })))
+          return
+        }
+
+        // --- local runtimes -------------------------------------------------
+        if (req.method === 'GET' && url.pathname === '/api/runtimes') {
+          send(res, 200, JSON.stringify(await services.runtimesDetect()))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/runtimes/install') {
+          const raw = await readJson<{ id?: string }>(req)
+          send(res, 200, JSON.stringify(await services.runtimesInstall(raw.id ?? 'ollama')))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/runtimes/use') {
+          const raw = await readJson<{ id?: string }>(req)
+          send(res, 200, JSON.stringify(await services.runtimesUse(raw.id ?? '')))
+          return
+        }
+        if (req.method === 'GET' && url.pathname === '/api/runtimes/models') {
+          const id = url.searchParams.get('id')
+          send(res, 200, JSON.stringify(await services.runtimesModels(id ?? undefined)))
           return
         }
 

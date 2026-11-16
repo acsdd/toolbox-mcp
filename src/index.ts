@@ -115,7 +115,24 @@ const handlers: Record<string, ToolHandler> = {
       await services.llamafarmInstall({
         repo: typeof args.repo === 'string' ? args.repo : '',
         ...(typeof args.quant === 'string' ? { quant: args.quant } : {}),
-        ...(typeof args.offload === 'number' ? { offload: args.offload } : {})
+        ...(typeof args.offload === 'number' ? { offload: args.offload } : {}),
+        ...(typeof args.runtime === 'string' ? { runtime: args.runtime } : {})
+      })
+    ),
+
+  // local runtimes
+  runtimes_detect: async (args) => json(await services.runtimesDetect(args.refresh === true)),
+  runtimes_install: async (args) =>
+    json(await services.runtimesInstall(typeof args.id === 'string' ? args.id : 'ollama')),
+  runtimes_use: async (args) => json(await services.runtimesUse(typeof args.id === 'string' ? args.id : '')),
+  runtimes_models: async (args) =>
+    json(await services.runtimesModels(typeof args.id === 'string' ? args.id : undefined)),
+  runtimes_download: async (args) =>
+    json(
+      await services.runtimesDownload({
+        repo: typeof args.repo === 'string' ? args.repo : '',
+        ...(typeof args.quant === 'string' ? { quant: args.quant } : {}),
+        ...(typeof args.runtime === 'string' ? { runtime: args.runtime } : {})
       })
     ),
 

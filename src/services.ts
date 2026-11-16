@@ -52,10 +52,26 @@ import {
 } from '@toolbox/widgets'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { tmpdir, homedir } from 'node:os'
+import { basename, extname, join } from 'node:path'
 import { loadCatalogCache, loadSettings, saveCatalogCache, saveSettings, type StoredSettings } from './config.js'
 import { connectRemote, proxiedToolName, type ProxiedTool, type RemoteConnect, type RemoteConnection, type RemoteToolDef } from './remote.js'
+import {
+  DEFAULT_RUNTIME_ID,
+  detectRuntimes,
+  downloadGguf,
+  installOllama,
+  listRuntimeModels,
+  providerBaseUrl,
+  resolveGgufFile,
+  runtimeDescriptor,
+  runtimeModelsDir,
+  startServerRuntime,
+  type RuntimeFetch,
+  type RuntimeInstallResult,
+  type RuntimeReport,
+  type RuntimeStatus
+} from './runtimes.js'
 import { appVersion } from './version.js'
 
 function isCatalogModel(value: unknown): value is CatalogModel {
@@ -74,6 +90,7 @@ const CATALOG_TTL_MS = 6 * 60 * 60 * 1000
 const CATALOG_PER_TASK = 24
 const REGISTRY_TTL_MS = 5 * 60 * 1000
 const GATEWAY_TTL_MS = 30 * 1000
+const RUNTIME_TTL_MS = 20 * 1000
 
 interface ServicesOptions {
   fetchImpl?: FetchLike
@@ -90,6 +107,10 @@ interface ServicesOptions {
   onRemoteTools?: (moduleId: string, tools: ProxiedTool[]) => void
   /** Called when a remote server is uninstalled and its tools must go. */
   onRemoteRemoved?: (moduleId: string) => void
+  /** Fetch used for runtime probes and HuggingFace file lookups. */
+  runtimeFetchImpl?: RuntimeFetch
+  /** Downloads a URL to a file (injectable for tests). */
+  downloadFileImpl?: (url: string, target: string) => Promise<number>
 }
 
 export interface LlamafarmScoreInput {
@@ -143,9 +164,16 @@ export interface LlamafarmInstallInput {
   quant?: string
   /** Layers to keep on the GPU; writes a Modelfile instead of a plain pull. */
   offload?: number
+  /** Which runtime to install into; defaults to the active one. */
+  runtime?: string
 }
 
-export type LlamafarmInstallReason = 'installed' | 'ollama-missing' | 'not-found' | 'failed'
+export type LlamafarmInstallReason =
+  | 'installed'
+  | 'ollama-missing'
+  | 'not-found'
+  | 'failed'
+  | 'runtime-missing'
 
 export interface LlamafarmInstallResult {
   ok: boolean
@@ -158,7 +186,11 @@ export interface LlamafarmInstallResult {
   output: string
   /** What to run next. */
   steps: string[]
-  /** Manual setup for the default local Ollama server; present only after success. */
+  /** The runtime the weights went to. */
+  runtime: { id: string; label: string; baseUrl: string | null }
+  /** Where the weights landed, for runtimes that take a file. */
+  file: { path: string; bytes: number } | null
+  /** Manual setup for the local runtime; present only after success. */
   astrlink: { baseUrl: string; model: string; capability: 'openai.chat' } | null
 }
 
@@ -213,7 +245,8 @@ export function createServices(options: ServicesOptions = {}) {
       cryptoWatchlist: ['bitcoin', 'ethereum', 'solana'],
       gmail: null,
       resource: { showProcesses: true },
-      marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] }
+      marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] },
+      runtimes: { active: null }
     }
   }
   const crypto: CryptoState = {
@@ -239,10 +272,15 @@ export function createServices(options: ServicesOptions = {}) {
   let registry: { modules: MarketplaceModule[]; updated: string; fetchedAt: number } | null = null
   let registryError: string | null = null
   let gateway: { status: GatewayStatus; fetchedAt: number } | null = null
+  let runtimeReport: RuntimeReport | null = null
   const remotes = new Map<string, { connection: RemoteConnection; tools: RemoteToolDef[] }>()
   const remoteConnect = options.remoteConnect ?? connectRemote
   const detectOptions = { fetchImpl: options.fetchImpl, execFileImpl: options.execFileImpl }
   const execFileImpl = options.execFileImpl ?? (execFile as unknown as ExecFileLike)
+  const runtimeOptions = {
+    fetchImpl: options.runtimeFetchImpl ?? (globalThis.fetch as RuntimeFetch),
+    execFileImpl: options.execFileImpl as never
+  }
 
   async function init(): Promise<void> {
     settings.current = await loadSettings()
@@ -570,12 +608,18 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   /**
-   * Install a catalog model into the local Ollama runtime. Ollama serves any
-   * GGUF from the Hub directly, so this is a single `ollama pull` — unless a
-   * GPU split is requested, which writes a Modelfile instead.
+   * Install a catalog model into the local runtime.
+   *
+   * Ollama pulls the GGUF straight from the Hub, so that path is a single
+   * `ollama pull` — unless a GPU split is requested, which writes a Modelfile
+   * instead. A runtime that takes files instead of pulls gets the weights
+   * downloaded into its own models folder, and one that serves a single model
+   * per process is started with it.
    */
   async function llamafarmInstall(input: LlamafarmInstallInput): Promise<LlamafarmInstallResult> {
     const repo = input.repo?.trim() ?? ''
+    const runtimeId = (input.runtime ?? settings.current.runtimes.active ?? DEFAULT_RUNTIME_ID).trim() || DEFAULT_RUNTIME_ID
+    const descriptor = runtimeDescriptor(runtimeId)
     const failure = (reason: LlamafarmInstallReason, message: string, extra: Partial<LlamafarmInstallResult> = {}): LlamafarmInstallResult => ({
       ok: false,
       repo,
@@ -585,11 +629,16 @@ export function createServices(options: ServicesOptions = {}) {
       message,
       output: '',
       steps: [],
+      runtime: { id: runtimeId, label: descriptor?.label ?? runtimeId, baseUrl: null },
+      file: null,
       astrlink: null,
       ...extra
     })
     if (!repo) {
       throw new Error('A repo id is required, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF".')
+    }
+    if (!descriptor) {
+      return failure('not-found', `Unknown runtime "${runtimeId}".`)
     }
 
     const cached = catalog?.models.find((entry) => entry.id.toLowerCase() === repo.toLowerCase())
@@ -603,6 +652,10 @@ export function createServices(options: ServicesOptions = {}) {
     }
     if (!model) {
       return failure('not-found', `No GGUF weights found for ${repo}.`)
+    }
+
+    if (descriptor.id !== DEFAULT_RUNTIME_ID) {
+      return installIntoRuntime(descriptor, model, input.quant ?? null)
     }
 
     let plan: ReturnType<typeof planOllamaInstall>
@@ -653,6 +706,8 @@ export function createServices(options: ServicesOptions = {}) {
       message: `${installedModel} is ready to run.`,
       output: result.output,
       steps: split ? [`ollama run ${installedModel}`] : plan.steps,
+      runtime: { id: descriptor.id, label: descriptor.label, baseUrl: 'http://127.0.0.1:11434' },
+      file: null,
       astrlink: {
         baseUrl: 'http://127.0.0.1:11434/v1',
         model: installedModel,
@@ -660,6 +715,187 @@ export function createServices(options: ServicesOptions = {}) {
       }
     }
   }
+
+  /**
+   * Hand the weights to a runtime that cannot pull them itself: the GGUF is
+   * downloaded into the runtime's models folder, and a runtime that serves one
+   * model per process is started with it.
+   */
+  async function installIntoRuntime(
+    descriptor: NonNullable<ReturnType<typeof runtimeDescriptor>>,
+    model: CatalogModel,
+    quant: string | null
+  ): Promise<LlamafarmInstallResult> {
+    const failure = (reason: LlamafarmInstallReason, message: string, extra: Partial<LlamafarmInstallResult> = {}): LlamafarmInstallResult => ({
+      ok: false,
+      repo: model.id,
+      reference: null,
+      modelName: null,
+      reason,
+      message,
+      output: '',
+      steps: [],
+      runtime: { id: descriptor.id, label: descriptor.label, baseUrl: null },
+      file: null,
+      astrlink: null,
+      ...extra
+    })
+
+    const gguf = await resolveGgufFile(model.id, quant ?? model.quantLabel, runtimeOptions)
+    if (!gguf) {
+      return failure('not-found', `No GGUF file found for ${model.id}.`)
+    }
+    const directory = runtimeModelsDir(descriptor) ?? join(homedir(), '.toolbox-mcp', 'models')
+    let downloaded: { path: string; bytes: number }
+    try {
+      downloaded = await downloadGguf(gguf, directory, {
+        ...runtimeOptions,
+        ...(options.downloadFileImpl ? { download: options.downloadFileImpl } : {})
+      })
+    } catch (cause) {
+      return failure('failed', cause instanceof Error ? cause.message : String(cause))
+    }
+
+    const modelName = basename(downloaded.path, extname(downloaded.path))
+    const steps: string[] = []
+    let baseUrl: string | null = null
+
+    if (descriptor.accepts === 'server') {
+      const started = await startServerRuntime(descriptor, downloaded.path, runtimeOptions)
+      baseUrl = started.baseUrl
+      steps.push(...started.steps)
+      if (!started.ok) steps.push(started.message)
+    } else {
+      const status = runtimeReport?.runtimes.find((entry) => entry.id === descriptor.id) ?? null
+      if (status?.running) baseUrl = status.baseUrl
+      steps.push(`Open ${descriptor.label} and load ${basename(downloaded.path)}.`)
+    }
+
+    const openaiBase = baseUrl ? providerBaseUrl({ api: descriptor.api, baseUrl }) : null
+
+    return {
+      ok: true,
+      repo: model.id,
+      reference: null,
+      modelName,
+      reason: 'installed',
+      message: `${modelName} is in ${descriptor.label}'s model folder — ${directory}.`,
+      output: '',
+      steps,
+      runtime: { id: descriptor.id, label: descriptor.label, baseUrl },
+      file: { path: downloaded.path, bytes: downloaded.bytes },
+      astrlink: openaiBase
+        ? { baseUrl: openaiBase, model: modelName, capability: 'openai.chat' }
+        : null
+    }
+  }
+
+  // --- local runtimes ---------------------------------------------------------
+
+  /** Every runtime we can find on this machine, with the active one marked. */
+  async function runtimesDetect(force = false): Promise<RuntimeReport> {
+    if (!force && runtimeReport && Date.now() - runtimeReport.detectedAt < RUNTIME_TTL_MS) {
+      return { ...runtimeReport, active: settings.current.runtimes.active }
+    }
+    const report = await detectRuntimes({ ...runtimeOptions, active: settings.current.runtimes.active })
+    runtimeReport = report
+    return report
+  }
+
+  /** Install a runtime from its official installer — Ollama, for now. */
+  async function runtimesInstall(id: string): Promise<RuntimeInstallResult> {
+    const runtime = (id ?? '').trim() || DEFAULT_RUNTIME_ID
+    const descriptor = runtimeDescriptor(runtime)
+    if (!descriptor) {
+      throw new Error(`Unknown runtime "${runtime}".`)
+    }
+    if (!descriptor.installable) {
+      return {
+        ok: false,
+        id: runtime,
+        action: 'unsupported',
+        version: null,
+        message: `toolbox-mcp cannot install ${descriptor.label} for you — it has its own installer.`,
+        steps: [`Download and install ${descriptor.label} from ${descriptor.homepage}.`],
+        log: ''
+      }
+    }
+    const result = await installOllama({
+      ...runtimeOptions,
+      ...(options.downloadFileImpl ? { download: options.downloadFileImpl } : {})
+    })
+    runtimeReport = null
+    return result
+  }
+
+  /** Point the Model Farm at one of the runtimes that was found. */
+  async function runtimesUse(id: string): Promise<{ active: string | null; runtime: RuntimeStatus | null }> {
+    const value = (id ?? '').trim()
+    if (value === '' || value === 'none') {
+      settings.current.runtimes.active = null
+      await saveSettings(settings.current)
+      runtimeReport = null
+      return { active: null, runtime: null }
+    }
+    const descriptor = runtimeDescriptor(value)
+    if (!descriptor) {
+      throw new Error(`Unknown runtime "${value}".`)
+    }
+    settings.current.runtimes.active = value
+    await saveSettings(settings.current)
+    const report = await runtimesDetect(true)
+    return { active: value, runtime: report.runtimes.find((entry) => entry.id === value) ?? null }
+  }
+
+  /** The models a runtime is serving right now. */
+  async function runtimesModels(id?: string): Promise<{
+    runtime: string
+    models: RuntimeStatus['models']
+    baseUrl: string
+    error: string | null
+  }> {
+    const runtime = (id ?? settings.current.runtimes.active ?? DEFAULT_RUNTIME_ID).trim() || DEFAULT_RUNTIME_ID
+    const descriptor = runtimeDescriptor(runtime)
+    if (!descriptor) {
+      throw new Error(`Unknown runtime "${runtime}".`)
+    }
+    const result = await listRuntimeModels(descriptor, runtimeOptions)
+    return { runtime, models: result.models, baseUrl: result.baseUrl, error: result.error }
+  }
+
+  /** Download a GGUF into a runtime's models folder without installing it. */
+  async function runtimesDownload(input: { runtime?: string; repo: string; quant?: string }): Promise<LlamafarmInstallResult> {
+    const runtime = (input.runtime ?? settings.current.runtimes.active ?? DEFAULT_RUNTIME_ID).trim() || DEFAULT_RUNTIME_ID
+    const descriptor = runtimeDescriptor(runtime)
+    if (!descriptor) {
+      throw new Error(`Unknown runtime "${runtime}".`)
+    }
+    const repo = input.repo?.trim() ?? ''
+    if (!repo) {
+      throw new Error('A repo id is required, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF".')
+    }
+    const cached = catalog?.models.find((entry) => entry.id.toLowerCase() === repo.toLowerCase()) ?? null
+    const model =
+      cached ??
+      (await fetchModelById(repo, { fetchImpl: options.fetchImpl }).catch(() => null)) ?? {
+        id: repo,
+        task: 'text-generation' as const,
+        label: repo.split('/')[1] ?? repo,
+        author: repo.split('/')[0] ?? '',
+        formats: ['gguf' as const],
+        paramsBillions: null,
+        quantLabel: input.quant ?? null,
+        fileBytes: null,
+        runtimeRamBytes: 0,
+        downloads: 0,
+        likes: 0,
+        license: null,
+        tags: [],
+        hfUrl: `https://huggingface.co/${repo}`
+      }
+    return installIntoRuntime(descriptor, model, input.quant ?? null)
+  }
+
 
   // --- astrlink gateway: read-only observability -----------------------------
 
@@ -865,6 +1101,11 @@ export function createServices(options: ServicesOptions = {}) {
     llamafarmRefresh,
     llamafarmGrade,
     llamafarmInstall,
+    runtimesDetect,
+    runtimesInstall,
+    runtimesUse,
+    runtimesModels,
+    runtimesDownload,
     gatewayStatus,
     gatewayRequests,
     marketplaceList,

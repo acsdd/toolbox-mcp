@@ -16,6 +16,8 @@ export interface StoredSettings {
   gmail: { email: string; password: string; notifications: boolean } | null
   resource: { diskPath?: string; showProcesses: boolean }
   marketplace: { installed: string[] }
+  /** The local model runtime the Model Farm installs into; null means Ollama. */
+  runtimes: { active: string | null }
 }
 
 const DEFAULTS: StoredSettings = {
@@ -23,7 +25,8 @@ const DEFAULTS: StoredSettings = {
   cryptoWatchlist: ['bitcoin', 'ethereum', 'solana'],
   gmail: null,
   resource: { showProcesses: true },
-  marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] }
+  marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] },
+  runtimes: { active: null }
 }
 
 export function configDir(): string {
@@ -56,6 +59,9 @@ export async function loadSettings(): Promise<StoredSettings> {
         installed: Array.isArray(raw.marketplace?.installed)
           ? raw.marketplace.installed.filter((id): id is string => typeof id === 'string')
           : [...DEFAULTS.marketplace.installed]
+      },
+      runtimes: {
+        active: typeof raw.runtimes?.active === 'string' ? raw.runtimes.active : null
       }
     }
   } catch {

@@ -14,6 +14,7 @@ export type ToolGroupId =
   | 'gmail'
   | 'system'
   | 'llamafarm'
+  | 'runtimes'
   | 'gateway'
   | 'marketplace'
   | 'remote'
@@ -31,6 +32,7 @@ export const TOOL_GROUPS: ToolGroupMeta[] = [
   { id: 'gmail', label: 'Gmail announcer', icon: '✉', hint: 'Read-only inbox checks over IMAP' },
   { id: 'system', label: 'Resource monitor', icon: '▤', hint: 'CPU, memory, disk and processes' },
   { id: 'llamafarm', label: 'Model Farm', icon: '⌁', hint: 'Local model catalog, fit scoring and Ollama installs' },
+  { id: 'runtimes', label: 'Local runtimes', icon: '⌸', hint: 'Find, install and use Ollama, LM Studio, llama.cpp and friends' },
   { id: 'gateway', label: 'AstrLink gateway', icon: '⇄', hint: 'Read-only gateway observability' },
   { id: 'marketplace', label: 'Marketplace', icon: '▦', hint: 'Shared Toolbox modules from the public registry' },
   { id: 'remote', label: 'Remote servers', icon: '⇢', hint: 'Connected remote MCP servers' },
@@ -160,11 +162,48 @@ export const TOOL_CATALOG: ToolSpec[] = [
   {
     name: 'llamafarm_install',
     group: 'llamafarm',
-    description: 'Install a catalog model into local Ollama (GGUF from HuggingFace). Successful installs include manual AstrLink setup details; no gateway settings are changed.',
+    description: 'Install a catalog model into the active local runtime. Ollama pulls the GGUF from the Hub; other runtimes get the weights downloaded into their own models folder.',
     shape: {
       repo: z.string().describe('HuggingFace repo id, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF"'),
       quant: z.string().optional().describe('Quantization tag, e.g. "Q4_K_M" (defaults to the catalog entry)'),
-      offload: z.number().optional().describe('Layers to keep on the GPU; writes a Modelfile instead of a plain pull')
+      offload: z.number().optional().describe('Layers to keep on the GPU; writes a Modelfile instead of a plain pull'),
+      runtime: z.string().optional().describe('Runtime id to install into; defaults to the active one')
+    }
+  },
+
+  // --- local runtimes --------------------------------------------------------
+  {
+    name: 'runtimes_detect',
+    group: 'runtimes',
+    description: 'Find the local model runtimes on this machine: Ollama, LM Studio, llama.cpp, Jan, GPT4All, KoboldCpp, LocalAI, vLLM, llamafile and text-generation-webui — each one that is installed, running and serving models.',
+    shape: { refresh: z.boolean().optional().describe('Ignore the cache and probe again') }
+  },
+  {
+    name: 'runtimes_install',
+    group: 'runtimes',
+    description: 'Install or update a local runtime from its official installer. Ollama is downloaded from ollama.com and installed silently, so the machine ends up with a fresh version.',
+    shape: { id: z.string().optional().describe('Runtime id to install; defaults to "ollama"') }
+  },
+  {
+    name: 'runtimes_use',
+    group: 'runtimes',
+    description: 'Choose which local runtime the Model Farm installs models into. Pass "none" to go back to the default (Ollama).',
+    shape: { id: z.string().describe('Runtime id, e.g. "lmstudio" — or "none" to clear it') }
+  },
+  {
+    name: 'runtimes_models',
+    group: 'runtimes',
+    description: 'List the models a local runtime is serving right now.',
+    shape: { id: z.string().optional().describe('Runtime id; defaults to the active one') }
+  },
+  {
+    name: 'runtimes_download',
+    group: 'runtimes',
+    description: 'Download a GGUF into a runtime\'s models folder without installing it into a runtime.',
+    shape: {
+      repo: z.string().describe('HuggingFace repo id, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF"'),
+      quant: z.string().optional().describe('Quantization tag, e.g. "Q4_K_M"'),
+      runtime: z.string().optional().describe('Runtime id; defaults to the active one')
     }
   },
 
