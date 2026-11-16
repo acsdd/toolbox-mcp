@@ -51,7 +51,7 @@ paths on your machine:
   "mcpServers": {
     "toolbox": {
       "command": "C:\\Program Files\\nodejs\\node.exe",
-      "args": ["E:\\GPT_Projects\\28121978444\\toolbox-mcp\\dist\\index.js"]
+      "args": ["C:\\path\\to\\toolbox-mcp\\dist\\index.js"]
     }
   }
 }
