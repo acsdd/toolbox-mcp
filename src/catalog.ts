@@ -170,6 +170,42 @@ export const TOOL_CATALOG: ToolSpec[] = [
       runtime: z.string().optional().describe('Runtime id to install into; defaults to the active one')
     }
   },
+  {
+    name: 'llamafarm_search',
+    group: 'llamafarm',
+    description: 'Search HuggingFace live beyond the cached catalog and grade the hits against this machine. Blank query returns nothing without a network call.',
+    shape: {
+      query: z.string().describe('Search text, e.g. "qwen coder"'),
+      scenario: z.enum(['now', 'total']).optional().describe("'now' = free resources (default), 'total' = full machine")
+    }
+  },
+  {
+    name: 'llamafarm_quants',
+    group: 'llamafarm',
+    description: 'List every GGUF quantization a repo offers, with real file sizes, smallest first — so you can pick a quant instead of the catalog default.',
+    shape: { repo: z.string().describe('HuggingFace repo id, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF"') }
+  },
+  {
+    name: 'llamafarm_remove',
+    group: 'llamafarm',
+    description: 'Remove a locally installed Ollama model by repo id or local name. Unknown names report not-found without touching the runtime.',
+    shape: {
+      repo: z.string().optional().describe('HuggingFace repo id of an installed model'),
+      model: z.string().optional().describe('Local Ollama model name, e.g. "qwen2.5-coder-7b-instruct"')
+    }
+  },
+  {
+    name: 'llamafarm_run_now',
+    group: 'llamafarm',
+    description: 'Pick the best green (comfortable) model per task for this machine right now — a shortlist of what will actually run well.',
+    shape: {}
+  },
+  {
+    name: 'llamafarm_progress',
+    group: 'llamafarm',
+    description: 'Report tracked folder downloads: status, percent, bytes received/total and the resulting file, newest last.',
+    shape: {}
+  },
 
   // --- local runtimes --------------------------------------------------------
   {

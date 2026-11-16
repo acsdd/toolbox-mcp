@@ -16,7 +16,7 @@ import { createWriteStream, existsSync, statSync } from 'node:fs'
 import { mkdir, rename, rm, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { parseQuantLabel } from '@toolbox/widgets'
 
@@ -97,9 +97,23 @@ export interface RuntimeFetchResponse {
   json(): Promise<unknown>
   text(): Promise<string>
   body?: ReadableStream<Uint8Array> | null
+  headers?: { get(name: string): string | null }
 }
 
 export type RuntimeFetch = (url: string, init?: RequestInit) => Promise<RuntimeFetchResponse>
+
+/** Bytes received so far in a download; totalBytes null when the size is unknown. */
+export interface DownloadProgress {
+  receivedBytes: number
+  totalBytes: number | null
+}
+
+/** Downloads a URL to a file, optionally reporting progress; returns bytes written. */
+export type DownloadFn = (
+  url: string,
+  target: string,
+  onProgress?: (progress: DownloadProgress) => void
+) => Promise<number>
 
 export type RuntimeExec = (
   file: string,
@@ -123,7 +137,7 @@ export interface RuntimeInstallOptions extends RuntimeOptions {
   /** Runs a downloaded installer; injectable for tests. */
   runInstaller?: (file: string, args: string[], options: { timeoutMs: number }) => Promise<{ code: number | null; output: string }>
   /** Downloads a URL to a file; injectable for tests. */
-  download?: (url: string, target: string) => Promise<number>
+  download?: DownloadFn
   /** Where installers are staged. */
   tempDir?: string
 }
@@ -623,20 +637,33 @@ export interface RuntimeInstallResult {
 export async function downloadFile(
   url: string,
   target: string,
-  options: RuntimeOptions & { fetchImpl?: RuntimeFetch } = {}
+  options: RuntimeOptions & { fetchImpl?: RuntimeFetch } = {},
+  onProgress?: (progress: DownloadProgress) => void
 ): Promise<number> {
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as RuntimeFetch)
   const response = await fetchImpl(url, { redirect: 'follow' })
   if (!response.ok) throw new Error(`Download failed with HTTP ${response.status} for ${url}`)
   await mkdir(path.dirname(target), { recursive: true })
+  const lengthHeader = response.headers?.get('content-length') ?? null
+  const totalBytes = lengthHeader !== null && Number.isFinite(Number(lengthHeader)) ? Number(lengthHeader) : null
   if (response.body) {
-    await pipeline(Readable.fromWeb(response.body as never), createWriteStream(target))
+    let received = 0
+    const counter = new Transform({
+      transform(chunk: Buffer, _enc, callback) {
+        received += chunk.length
+        onProgress?.({ receivedBytes: received, totalBytes })
+        callback(null, chunk)
+      }
+    })
+    await pipeline(Readable.fromWeb(response.body as never), counter, createWriteStream(target))
   } else {
     const buffer = Buffer.from(await response.text(), 'utf8')
     const { writeFile } = await import('node:fs/promises')
     await writeFile(target, buffer)
+    onProgress?.({ receivedBytes: buffer.length, totalBytes: buffer.length })
   }
   const info = await stat(target)
+  onProgress?.({ receivedBytes: info.size, totalBytes: info.size })
   return info.size
 }
 
@@ -893,13 +920,13 @@ export async function resolveGgufFile(
 export async function downloadGguf(
   file: GgufFile,
   directory: string,
-  options: RuntimeOptions & { download?: (url: string, target: string) => Promise<number> } = {}
+  options: RuntimeOptions & { download?: DownloadFn; onProgress?: (progress: DownloadProgress) => void } = {}
 ): Promise<{ path: string; bytes: number }> {
-  const download = options.download ?? ((url: string, target: string) => downloadFile(url, target, options))
+  const download = options.download ?? ((url: string, target: string, onProgress?: (p: DownloadProgress) => void) => downloadFile(url, target, options, onProgress))
   await mkdir(directory, { recursive: true })
   const target = path.join(directory, path.basename(file.filename))
   const staging = `${target}.part`
-  const bytes = await download(file.url, staging)
+  const bytes = await download(file.url, staging, options.onProgress)
   await rename(staging, target)
   return { path: target, bytes }
 }

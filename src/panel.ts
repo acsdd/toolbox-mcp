@@ -7,6 +7,7 @@
  */
 import { createServer, type Server, type ServerResponse } from 'node:http'
 import { pathToFileURL } from 'node:url'
+import { WIDGET_HOST_CSS } from '@toolbox/widgets'
 import { createServices, type Services } from './services.js'
 import { createTerminal } from './terminal.js'
 import { TOOL_GROUPS, catalogEntries } from './catalog.js'
@@ -62,6 +63,7 @@ const PAGE = `<!doctype html>
 <link rel="icon" href="data:," />
 <title>toolbox-mcp · ops panel</title>
 <style>
+${WIDGET_HOST_CSS}
   /* No webfont: the panel loads nothing from the network, so it works
      offline and the page can run under a strict content security policy. */
   :root {
@@ -87,7 +89,8 @@ const PAGE = `<!doctype html>
   button { cursor: pointer; }
   button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 
-  .shell { display: grid; grid-template: 62px 1fr / 232px minmax(0, 1fr); height: 100vh; }
+  /* Widget host: glued stage on the left, vertical tool rail on the RIGHT. */
+  .shell { display: grid; grid-template: 62px 1fr / minmax(0, 1fr) 232px; height: 100vh; }
   .topbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 24px; padding: 0 26px; background: rgba(10, 20, 16, .92); border-bottom: 1px solid var(--border-soft); backdrop-filter: blur(8px); }
   .brand { font-size: 17px; font-weight: 600; letter-spacing: .02em; }
   .brand b { color: var(--accent); font-weight: 600; }
@@ -96,16 +99,18 @@ const PAGE = `<!doctype html>
   .badge { padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 10px; }
   .badge.live { color: var(--accent); border-color: #2a4c34; background: rgba(156, 243, 126, .06); }
 
-  .sidebar { grid-row: 2; display: flex; flex-direction: column; gap: 6px; padding: 22px 16px; background: rgba(8, 17, 12, .72); border-right: 1px solid var(--border-soft); }
+  .sidebar { grid-row: 2; grid-column: 2; display: flex; flex-direction: column; gap: 6px; padding: 22px 16px; background: rgba(8, 17, 12, .72); border-left: 1px solid var(--border-soft); }
   .navbtn { display: grid; grid-template-columns: 30px 1fr auto; align-items: center; min-height: 48px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; color: #71847a; text-align: left; transition: background .12s ease, color .12s ease; }
   .navbtn i { font-style: normal; font-size: 17px; }
   .navbtn small { color: var(--dim); font-size: 9px; }
   .navbtn:hover { color: #a4c69f; background: #0f1d16; }
-  .navbtn.active { color: var(--accent); background: linear-gradient(90deg, #16291f, #12211a); box-shadow: inset 2px 0 0 var(--accent), var(--shadow-sm); }
+  .navbtn.active { color: var(--accent); background: linear-gradient(270deg, #16291f, #12211a); box-shadow: inset -2px 0 0 var(--accent), var(--shadow-sm); }
   .sidebar .foot { margin-top: auto; padding: 13px 14px; border: 1px solid var(--border-soft); border-radius: 7px; color: var(--dim); font-size: 9px; line-height: 1.9; }
   .sidebar .foot b { color: var(--muted); font-weight: 400; }
 
-  main { overflow: auto; padding: 28px 30px 48px; min-width: 0; }
+  main { grid-column: 1; grid-row: 2; min-width: 0; }
+  /* The glued host stage comes from the shared pattern; keep panel spacing. */
+  main.host-screen { padding: 28px 30px 48px; }
   h1 { margin: 0 0 4px; font-size: 25px; font-weight: 500; letter-spacing: -.01em; }
   .sub { margin: 0 0 22px; color: var(--muted); font-size: 11px; line-height: 1.7; max-width: 76ch; }
   .hidden { display: none !important; }
@@ -277,6 +282,24 @@ const PAGE = `<!doctype html>
   .minstall .ok { color: var(--accent); }
   .minstall .err { color: #e08b7a; }
   .minstall .note { color: var(--dim); }
+  .mf-inst { color: var(--accent); font-style: normal; }
+  .mquants { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; font-size: 11px; }
+  .mquants select { font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 3px; padding: 4px 6px; }
+  .mquants .note { color: var(--dim); }
+  .mquants .err { color: #e08b7a; }
+  .mquants .fit-ok { color: var(--accent); }
+  .mquants .fit-warn { color: var(--yellow); }
+  .mf-runnow { margin: 4px 0 10px; }
+  .mf-runnow h3 { margin: 0 0 8px; font-size: 12px; color: var(--accent); letter-spacing: 0.04em; }
+  .mf-runnow .mrow { margin-bottom: 6px; }
+  .mf-progress { margin: 4px 0 10px; }
+  .mf-dl { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--text); padding: 6px 0; }
+  .mf-dl span { min-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mf-dl small { color: var(--dim); }
+  .mf-bar-track { flex: 1; height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .mf-bar-fill { height: 100%; background: var(--accent); transition: width 0.4s ease; }
+  .mf-bar-fill.indet { width: 40%; animation: mf-slide 1.1s ease-in-out infinite; }
+  @keyframes mf-slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
   .msetup { margin: 12px 0; padding: 14px; border: 1px solid var(--border); border-left: 3px solid var(--accent); background: var(--bg); font-size: 12px; color: var(--text); }
   .msetup strong { color: var(--accent); font-size: 13px; }
   .msetup p { margin: 8px 0; line-height: 1.6; color: var(--text); }
@@ -395,7 +418,7 @@ const PAGE = `<!doctype html>
     .shell { grid-template: 62px 1fr / 1fr; }
     .sidebar { display: none; }
     .mf-bar input[type="search"] { width: 100%; }
-    main { padding: 22px 18px 40px; }
+    main.host-screen { padding: 22px 18px 40px; }
   }
 </style>
 </head>
@@ -418,7 +441,7 @@ const PAGE = `<!doctype html>
     <div class="foot"><b>LOCAL SESSION</b><br />MCP stdio + panel<br />127.0.0.1 only</div>
   </aside>
 
-  <main>
+  <main class="host-screen">
     <section id="sec-overview">
       <h1>toolbox-mcp</h1>
       <p class="sub">The server's front page: the tools it exposes to an agent, what it is doing right now, and the widgets it is wired to. Everything below is served by this machine.</p>
@@ -480,6 +503,8 @@ const PAGE = `<!doctype html>
         </select></label>
         <input type="search" id="f-search" placeholder="search models…" oninput="setSearch()" />
         <button class="btn primary" onclick="mfSubmit()">Submit filter</button>
+        <button class="btn" onclick="mfSearch()">Search HuggingFace</button>
+        <button class="btn" onclick="mfRunNow()">Run now</button>
         <button class="btn" onclick="mfRefresh()">Refresh catalog</button>
         <div class="mf-status" id="mf-status">warming up…</div>
       </div>
@@ -494,6 +519,8 @@ const PAGE = `<!doctype html>
         </div>
         <div class="rt-log" id="rt-log"></div>
       </div>
+      <div class="mf-runnow" id="mf-runnow"></div>
+      <div class="mf-progress" id="mf-progress"></div>
       <div class="mf-cols" id="mf-cols"></div>
     </section>
 
@@ -582,7 +609,7 @@ const PAGE = `<!doctype html>
 </div>
 
 <script>
-var mf = { scenario: 'now', search: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {} }
+var mf = { scenario: 'now', search: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null }
 var lastResult = null
 
 function show(name) {
@@ -951,6 +978,27 @@ async function setSaveResource() {
 
 /* ---- model farm ---- */
 function gb(bytes) { return (bytes / Math.pow(2, 30)).toFixed(1) + ' GB' }
+// Pre-flight disk fit for one quant, mirroring the install disk guard: a quant
+// heavier than free disk is "too big", one that fits but leaves <1 GB is "tight".
+function quantDiskFit(sizeBytes) {
+  var free = lastResult && lastResult.machine && typeof lastResult.machine.freeDiskBytes === 'number' ? lastResult.machine.freeDiskBytes : null
+  if (free === null || typeof sizeBytes !== 'number' || sizeBytes <= 0) return null
+  if (sizeBytes > free) return { tag: 'too big', cls: 'fit-warn', headroom: free - sizeBytes }
+  var headroom = free - sizeBytes
+  if (headroom < Math.pow(2, 30)) return { tag: 'tight', cls: 'fit-warn', headroom: headroom }
+  return { tag: 'fits', cls: 'fit-ok', headroom: headroom }
+}
+function quantFitNote(quant) {
+  var generic = '<span class="note">disk fit unavailable — checked again at install</span>'
+  var chosenVal = quant.chosen
+  var q = (quant.list || []).find(function (entry) { return (entry.quant || entry.filename) === chosenVal })
+  if (!q) return generic
+  var fit = quantDiskFit(q.sizeBytes)
+  if (!fit) return generic
+  if (fit.tag === 'too big') return '<span class="fit-warn">' + esc(chosenVal) + ' needs ' + gb(q.sizeBytes) + ' — only ' + gb(q.sizeBytes + fit.headroom) + ' free (short ' + gb(-fit.headroom) + ')</span>'
+  if (fit.tag === 'tight') return '<span class="fit-warn">' + esc(chosenVal) + ' fits but leaves only ' + gb(fit.headroom) + '</span>'
+  return '<span class="fit-ok">' + esc(chosenVal) + ' fits with ' + gb(fit.headroom) + ' to spare</span>'
+}
 
 function setScenario(sc) {
   mf.scenario = sc
@@ -1199,7 +1247,8 @@ function renderGroups(result) {
     var rows = group.models.map(function (m) {
       var meta = (m.paramsBillions ? m.paramsBillions + 'B' : '?') +
         (m.quantLabel ? ' · ' + esc(m.quantLabel) : '') +
-        ' · ' + gb(m.runtimeRamBytes) + ' runtime'
+        ' · ' + gb(m.runtimeRamBytes) + ' runtime' +
+        (m.installed ? ' · <em class="mf-inst">installed</em>' : '')
       var row = '<button class="mrow v-' + m.verdict + '" onclick="mfToggle(\\'' + esc(m.id) + '\\')">' +
         '<span class="dot"></span><span class="nm"><b>' + esc(m.label) + '</b><small>' + meta + '</small></span>' +
         (m.grade ? '<span class="grade ' + gradeClass(m.grade.letter) + '"><b>' + esc(m.grade.letter) + '</b><small>' + m.grade.score + '</small></span>' : '') +
@@ -1209,12 +1258,37 @@ function renderGroups(result) {
         var inst = mf.install[m.id]
         var pullable = (m.formats || []).indexOf('gguf') !== -1
         var targetName = rtActiveLabel()
+        var quant = mf.quants[m.id]
+        var quantBlock = ''
+        if (pullable) {
+          quantBlock = '<div class="mquants"><button class="btn small" onclick="mfQuants(&quot;' + esc(m.id) + '&quot;)">Quants…</button>'
+          if (quant && quant.state === 'ok' && quant.list.length) {
+            var selectedQuant = quant.list.find(function (q) { return (q.quant || q.filename) === quant.chosen }) ||
+              quant.list.find(function (q) { return (q.quant || q.filename) === m.quantLabel }) || quant.list[0]
+            quant.chosen = selectedQuant.quant || selectedQuant.filename
+            quantBlock += '<select aria-label="Quantization for ' + esc(m.label) + '" onchange="mfPickQuant(&quot;' + esc(m.id) + '&quot;, this)">' +
+              quant.list.map(function (q) {
+                var val = q.quant || q.filename
+                var fit = quantDiskFit(q.sizeBytes)
+                return '<option value="' + esc(val) + '"' + (quant.chosen === val ? ' selected' : '') + '>' + esc(val) + ' · ' + gb(q.sizeBytes) + (fit ? ' · ' + fit.tag : '') + '</option>'
+              }).join('') + '</select><span id="mf-quant-note-' + esc(m.id) + '" aria-live="polite">' + quantFitNote(quant) + '</span>'
+          } else if (quant && quant.state === 'err') {
+            quantBlock += '<span class="err">' + esc(quant.error || 'could not list quants') + '</span>'
+          } else if (quant && quant.state === 'busy') {
+            quantBlock += '<span class="note">listing quants…</span>'
+          }
+          quantBlock += '</div>'
+        }
+        var removeBtn = m.installed
+          ? '<button class="btn small" onclick="mfRemove(&quot;' + esc(m.id) + '&quot;,&quot;' + esc(m.installed) + '&quot;)">Remove</button>'
+          : ''
         var installBlock = '<div class="minstall">' +
           (pullable
             ? '<button onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install in ' + esc(targetName) + '</button>'
             : '<span class="note">safetensors only — convert to GGUF to install in ' + esc(targetName) + '</span>') +
+          removeBtn +
           (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '">' + esc(inst.message) + '</span>' : '') +
-          '</div>'
+          '</div>' + quantBlock
         row += '<div class="mdetail"><p>' + esc(m.reason) + '</p>' +
           renderScorecard(m.grade) +
           (hints ? '<ul>' + hints + '</ul>' : '') +
@@ -1241,12 +1315,16 @@ function mfToggle(id) {
   mf.expanded[id] = !mf.expanded[id]
   if (lastResult) renderGroups(lastResult)
 }
-async function mfInstall(id) {
+async function mfInstall(id, quant) {
   mf.install[id] = { state: 'busy', message: 'downloading…' }
   if (lastResult) renderGroups(lastResult)
+  mfStartProgress()
   try {
+    var payload = { repo: id }
+    var chosen = quant || (mf.quants[id] && mf.quants[id].chosen)
+    if (chosen) payload.quant = chosen
     var res = await fetch('/api/llamafarm/install', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: id })
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
     })
     var body = await res.json()
     var ok = res.ok && body.ok === true
@@ -1257,7 +1335,121 @@ async function mfInstall(id) {
   } catch (cause) {
     mf.install[id] = { state: 'err', message: String(cause && cause.message ? cause.message : cause) }
   }
+  mfStopProgress()
   if (lastResult) renderGroups(lastResult)
+}
+
+/* ---- live search, run-now, remove, quants, progress ---- */
+async function mfSearch() {
+  var status = document.getElementById('mf-status')
+  var query = (document.getElementById('f-search').value || '').trim()
+  if (!query) { status.innerHTML = '<span class="err">type a search term first</span>'; return }
+  status.textContent = 'searching HuggingFace for "' + query + '"…'
+  try {
+    var res = await fetch('/api/llamafarm/search', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, scenario: mf.scenario })
+    })
+    var result = await res.json()
+    if (result.error) { status.innerHTML = '<span class="err">' + esc(result.error) + '</span>'; return }
+    lastResult = result
+    renderMachine(result.machine, result.machineGrade)
+    renderGroups(result)
+    status.textContent = 'live search: ' + result.total + ' hits for "' + query + '"'
+  } catch (cause) {
+    status.innerHTML = '<span class="err">search failed</span>'
+  }
+}
+async function mfRunNow() {
+  var box = document.getElementById('mf-runnow')
+  box.innerHTML = '<div class="mf-note">choosing what runs well right now…</div>'
+  try {
+    var res = await fetch('/api/llamafarm/run-now')
+    var result = await res.json()
+    if (!result.picks || !result.picks.length) {
+      box.innerHTML = '<div class="mf-note">nothing scores green right now — free some RAM or try the TOTAL scenario.</div>'
+      return
+    }
+    box.innerHTML = '<h3>Comfortable on this PC right now</h3>' + result.picks.map(function (p) {
+      var m = p.model
+      return '<button class="mrow v-green" onclick="mfToggle(&quot;' + esc(m.id) + '&quot;)">' +
+        '<span class="dot"></span><span class="nm"><b>' + esc(m.label) + '</b><small>' + esc(p.label) +
+        ' · ' + (m.paramsBillions ? m.paramsBillions + 'B' : '?') + ' · ' + gb(m.runtimeRamBytes) + ' runtime' +
+        (m.installed ? ' · <em class="mf-inst">installed</em>' : ' · needs download') + '</small></span>' +
+        (m.grade ? '<span class="grade ' + gradeClass(m.grade.letter) + '"><b>' + esc(m.grade.letter) + '</b><small>' + m.grade.score + '</small></span>' : '') +
+        '</button>'
+    }).join('')
+  } catch (cause) {
+    box.innerHTML = '<div class="mf-note err">could not compute run-now picks</div>'
+  }
+}
+async function mfRemove(id, name) {
+  mf.install[id] = { state: 'busy', message: 'removing…' }
+  if (lastResult) renderGroups(lastResult)
+  try {
+    var res = await fetch('/api/llamafarm/remove', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: name })
+    })
+    var body = await res.json()
+    mf.install[id] = { state: body.ok ? 'ok' : 'err', message: body.message || (body.ok ? 'Removed' : 'Remove failed') }
+  } catch (cause) {
+    mf.install[id] = { state: 'err', message: String(cause && cause.message ? cause.message : cause) }
+  }
+  await mfLoad()
+}
+async function mfQuants(id) {
+  var chosen = mf.quants[id] && mf.quants[id].chosen
+  mf.quants[id] = { state: 'busy', list: [], chosen: chosen }
+  if (lastResult) renderGroups(lastResult)
+  try {
+    var res = await fetch('/api/llamafarm/quants', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: id })
+    })
+    var body = await res.json()
+    mf.quants[id] = { state: body.error ? 'err' : 'ok', list: body.quants || [], error: body.error, chosen: chosen }
+  } catch (cause) {
+    mf.quants[id] = { state: 'err', list: [], error: String(cause && cause.message ? cause.message : cause) }
+  }
+  if (lastResult) renderGroups(lastResult)
+}
+function mfPickQuant(id, select) {
+  var quant = mf.quants[id]
+  if (!quant) return
+  quant.chosen = select.value
+  // Update just the guidance so keyboard focus stays on the native select.
+  var note = document.getElementById('mf-quant-note-' + id)
+  if (note) note.innerHTML = quantFitNote(quant)
+}
+function mfStartProgress() {
+  if (mf.progressTimer) return
+  mf.progressTimer = setInterval(async function () {
+    try {
+      var res = await fetch('/api/llamafarm/progress')
+      var body = await res.json()
+      var box = document.getElementById('mf-progress')
+      var active = (body.downloads || []).filter(function (d) { return d.status === 'downloading' })
+      if (!active.length) { box.innerHTML = ''; return }
+      box.innerHTML = active.map(function (d) {
+        var indet = d.percent === null || d.percent === undefined
+        var pct = indet ? 0 : d.percent
+        var bar = indet
+          ? '<div class="mf-bar-track"><div class="mf-bar-fill indet"></div></div>'
+          : '<div class="mf-bar-track"><div class="mf-bar-fill" style="width:' + pct + '%"></div></div>'
+        var label = indet ? '<b>pulling…</b>' : '<b>' + pct + '%</b>'
+        var size = indet
+          ? (d.totalBytes ? 'target ' + gb(d.totalBytes) : '')
+          : gb(d.receivedBytes) + (d.totalBytes ? ' / ' + gb(d.totalBytes) : '')
+        return '<div class="mf-dl"><span>' + esc(d.repo) + ' → ' + esc(d.runtime) + '</span>' +
+          bar + label + '<small>' + size + '</small></div>'
+      }).join('')
+    } catch (cause) { /* polling is best-effort */ }
+  }, 700)
+}
+function mfStopProgress() {
+  if (Object.keys(mf.install).some(function (id) { return mf.install[id].state === 'busy' })) return
+  if (mf.progressTimer) { clearInterval(mf.progressTimer); mf.progressTimer = null }
+  var box = document.getElementById('mf-progress')
+  if (box) box.innerHTML = ''
 }
 
 /* ---- marketplace ---- */
@@ -1796,6 +1988,35 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
             ...(typeof raw.offload === 'number' ? { offload: raw.offload } : {}),
             ...(raw.runtime ? { runtime: raw.runtime } : {})
           })))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/llamafarm/search') {
+          const raw = await readJson<{ query?: string; scenario?: 'now' | 'total' }>(req)
+          send(res, 200, JSON.stringify(await services.llamafarmSearch({
+            query: raw.query ?? '',
+            scenario: raw.scenario === 'total' ? 'total' : 'now'
+          })))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/llamafarm/quants') {
+          const raw = await readJson<{ repo?: string }>(req)
+          send(res, 200, JSON.stringify(await services.llamafarmQuants(raw.repo ?? '')))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/llamafarm/remove') {
+          const raw = await readJson<{ repo?: string; model?: string }>(req)
+          send(res, 200, JSON.stringify(await services.llamafarmRemove({
+            ...(raw.repo ? { repo: raw.repo } : {}),
+            ...(raw.model ? { model: raw.model } : {})
+          })))
+          return
+        }
+        if (req.method === 'GET' && url.pathname === '/api/llamafarm/run-now') {
+          send(res, 200, JSON.stringify(await services.llamafarmRunNow()))
+          return
+        }
+        if (req.method === 'GET' && url.pathname === '/api/llamafarm/progress') {
+          send(res, 200, JSON.stringify(await services.llamafarmProgress()))
           return
         }
 

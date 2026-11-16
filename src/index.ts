@@ -119,6 +119,24 @@ const handlers: Record<string, ToolHandler> = {
         ...(typeof args.runtime === 'string' ? { runtime: args.runtime } : {})
       })
     ),
+  llamafarm_search: async (args) =>
+    json(
+      await services.llamafarmSearch({
+        query: typeof args.query === 'string' ? args.query : '',
+        ...(args.scenario === 'total' || args.scenario === 'now' ? { scenario: args.scenario } : {})
+      })
+    ),
+  llamafarm_quants: async (args) =>
+    json(await services.llamafarmQuants(typeof args.repo === 'string' ? args.repo : '')),
+  llamafarm_remove: async (args) =>
+    json(
+      await services.llamafarmRemove({
+        ...(typeof args.repo === 'string' ? { repo: args.repo } : {}),
+        ...(typeof args.model === 'string' ? { model: args.model } : {})
+      })
+    ),
+  llamafarm_run_now: async () => json(await services.llamafarmRunNow()),
+  llamafarm_progress: async () => json(await services.llamafarmProgress()),
 
   // local runtimes
   runtimes_detect: async (args) => json(await services.runtimesDetect(args.refresh === true)),

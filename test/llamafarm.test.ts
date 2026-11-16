@@ -9,6 +9,27 @@ import { createServices } from '../dist/services.js'
 
 const GiB = 2 ** 30
 let home = ''
+let panelScript: Promise<string> | undefined
+
+// Reuse the immutable served script; every test still gets a fresh VM and DOM.
+// Starting a terminal-owning panel for every assertion needlessly adds listeners.
+function servedPanelScript(): Promise<string> {
+  panelScript ??= (async () => {
+    const { startPanel } = await import('../dist/panel.js')
+    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
+    await services.init()
+    const panel = await startPanel(services, { port: 0 })
+    try {
+      const page = await (await fetch(`http://127.0.0.1:${panel.port}/`)).text()
+      const script = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1]
+      assert.ok(script)
+      return script
+    } finally {
+      panel.close()
+    }
+  })()
+  return panelScript
+}
 
 before(async () => {
   home = await mkdtemp(join(tmpdir(), 'toolbox-mcp-llamafarm-'))
@@ -495,19 +516,8 @@ describe('Model Farm setup panel', () => {
   }
   const setupText = 'Provider: OpenAI-compatible\nBase URL: http://127.0.0.1:11434/v1\nModel: hf.co/Qwen/Model-GGUF:Q4_K_M\nCapability: openai.chat'
 
-  async function clientFor(reply: () => Promise<Response>, writeText: (text: string) => Promise<void>) {
-    const { startPanel } = await import('../dist/panel.js')
-    const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
-    await services.init()
-    const panel = await startPanel(services, { port: 0 })
-    let page: string
-    try {
-      page = await (await fetch(`http://127.0.0.1:${panel.port}/`)).text()
-    } finally {
-      panel.close()
-    }
-    const script = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1]
-    assert.ok(script)
+  async function clientFor(reply: (init?: RequestInit) => Promise<Response>, writeText: (text: string) => Promise<void>, quants: unknown[] = []) {
+    const script = await servedPanelScript()
     // Capture writes at the DOM boundary while executing the real, complete panel script.
     const element = () => ({
       innerHTML: '', textContent: '',
@@ -520,17 +530,20 @@ describe('Model Farm setup panel', () => {
       if (!elements.has(id)) elements.set(id, element())
       return elements.get(id)!
     }
-    const client = runInNewContext(script + '\n;({ mf, mfInstall, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
+    const client = runInNewContext(script + '\n;({ mf, mfInstall, mfQuants, mfPickQuant, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
       document: {
         getElementById: get, createElement: element,
         querySelector: get, querySelectorAll: () => []
       },
       navigator: { clipboard: { writeText } },
-      fetch: (url: string) => url === '/api/llamafarm/install' ? reply() : Promise.resolve(Response.json({})),
+      fetch: (url: string, init?: RequestInit) => url === '/api/llamafarm/install' ? reply(init)
+        : Promise.resolve(Response.json(url === '/api/llamafarm/quants' ? { quants } : {})),
       // Timers are stubbed: the panel polls its activity feed while the
       // overview is visible, and a test has no reason to wait for that.
       setTimeout: () => 0,
-      clearTimeout: () => {}
+      clearTimeout: () => {},
+      setInterval: () => 1,
+      clearInterval: () => {}
     })
     client.mf.expanded[repo] = true
     client.setResult({ total: 1, fetchedAt: 1, groups: [{
@@ -539,7 +552,7 @@ describe('Model Farm setup panel', () => {
         runtimeRamBytes: GiB, downloads: 1, hfUrl: 'https://huggingface.co/' + repo, reason: 'Fits'
       }]
     }] })
-    return { client, markup: () => get('mf-cols').innerHTML }
+    return { client, markup: () => get('mf-cols').innerHTML, quantNote: () => get('mf-quant-note-' + repo).innerHTML }
   }
 
   it('shows successful setup and copies the exact displayed settings', async () => {
@@ -585,6 +598,22 @@ describe('Model Farm setup panel', () => {
     assert.doesNotMatch(markup(), /Copy setup|openai\.chat/)
   })
 
+  it('keeps progress polling until every concurrent install finishes', async () => {
+    const replies = new Map<string, (response: Response) => void>()
+    const other = 'acme/Other-GGUF'
+    const { client } = await clientFor((init) => new Promise((resolve) => {
+      replies.set(JSON.parse(String(init?.body)).repo, resolve)
+    }), async () => {})
+    const first = client.mfInstall(repo)
+    const second = client.mfInstall(other)
+    replies.get(repo)!(Response.json(installed))
+    await first
+    assert.ok(client.mf.progressTimer, 'the other install still needs polling')
+    replies.get(other)!(Response.json({ ...installed, repo: other }))
+    await second
+    assert.equal(client.mf.progressTimer, null)
+  })
+
   it('does not expose setup from an unsuccessful HTTP response', async () => {
     const { client, markup } = await clientFor(
       async () => Response.json(installed, { status: 500 }), async () => {}
@@ -606,6 +635,157 @@ describe('Model Farm setup panel', () => {
     assert.doesNotMatch(markup(), /<img/)
     await client.copy(repo)
     assert.ok(copied.includes('Model: ' + model))
+  })
+
+  it('marks each quant fit against free disk and warns on a chosen quant that will not fit', async () => {
+    const { client, markup } = await clientFor(async () => Response.json(installed), async () => {})
+    client.mf.quants[repo] = {
+      state: 'ok', chosen: 'Q8_0',
+      list: [
+        { quant: 'Q4_K_M', filename: 'm-q4_k_m.gguf', sizeBytes: 2 * GiB },
+        { quant: 'Q8_0', filename: 'm-q8_0.gguf', sizeBytes: 9 * GiB }
+      ]
+    }
+    client.setResult({
+      total: 1, fetchedAt: 1, machine: { freeDiskBytes: 5 * GiB },
+      groups: [{
+        label: 'Text generation', icon: 'T', models: [{
+          id: repo, label: 'Model', formats: ['gguf'], hints: [], verdict: 'green',
+          runtimeRamBytes: GiB, downloads: 1, hfUrl: 'https://huggingface.co/' + repo,
+          reason: 'Fits', quantLabel: 'Q4_K_M'
+        }]
+      }]
+    })
+    assert.match(markup(), /too big/)
+    assert.match(markup(), /fits/)
+    assert.match(markup(), /short/)
+  })
+
+  const pickerQuants = [
+    { quant: 'Q4_K_M', filename: 'm-q4_k_m.gguf', sizeBytes: 2 * GiB },
+    { quant: 'Q8_0', filename: 'm-q8_0.gguf', sizeBytes: 9 * GiB }
+  ]
+  const pickerResult = (quantLabel = 'Q4_K_M') => ({
+    total: 1, fetchedAt: 1, machine: { freeDiskBytes: 5 * GiB },
+    groups: [{ label: 'Text generation', icon: 'T', models: [{
+      id: repo, label: 'Model', formats: ['gguf'], hints: [], verdict: 'green',
+      runtimeRamBytes: GiB, downloads: 1, hfUrl: 'https://huggingface.co/' + repo,
+      reason: 'Fits', quantLabel
+    }] }]
+  })
+
+  it('updates disk guidance immediately when a different quant is selected', async () => {
+    const { client, quantNote } = await clientFor(async () => Response.json(installed), async () => {}, pickerQuants)
+    client.setResult(pickerResult())
+    await client.mfQuants(repo)
+    client.mfPickQuant(repo, { value: 'Q8_0' })
+    assert.match(quantNote(), /Q8_0.*short 4\.0 GB/)
+    client.mfPickQuant(repo, { value: 'Q4_K_M' })
+    assert.match(quantNote(), /Q4_K_M.*3\.0 GB to spare/)
+    assert.doesNotMatch(quantNote(), /short/)
+  })
+
+  for (const [defaultQuant, expected] of [['Q8_0', 'Q8_0'], ['unavailable', 'Q4_K_M']]) {
+    it(`aligns the visible quant and install payload for catalog default ${defaultQuant}`, async () => {
+      let payload: { quant?: string } = {}
+      const { client, markup } = await clientFor(async (init) => {
+        payload = JSON.parse(String(init?.body))
+        return Response.json(installed)
+      }, async () => {}, pickerQuants)
+      client.setResult(pickerResult(defaultQuant))
+      await client.mfQuants(repo)
+      assert.match(markup(), new RegExp('<option value="' + expected + '" selected>'))
+      await client.mfInstall(repo)
+      assert.equal(payload.quant, expected)
+    })
+  }
+
+  it('keeps a user-selected quant when refreshing the list', async () => {
+    const { client, markup } = await clientFor(async () => Response.json(installed), async () => {}, pickerQuants)
+    client.setResult(pickerResult())
+    await client.mfQuants(repo)
+    client.mfPickQuant(repo, { value: 'Q8_0' })
+    await client.mfQuants(repo)
+    assert.match(markup(), /<option value="Q8_0" selected>/)
+  })
+})
+
+describe('Model Farm run-now strip', () => {
+  async function runNowClient(picks: unknown[]) {
+    const script = await servedPanelScript()
+    const element = () => ({
+      innerHTML: '', textContent: '',
+      classList: { toggle() {}, contains() { return true } },
+      addEventListener() {},
+      appendChild(child: { innerHTML: string }) { this.innerHTML += child.innerHTML }
+    })
+    const elements = new Map<string, ReturnType<typeof element>>()
+    const get = (id: string) => {
+      if (!elements.has(id)) elements.set(id, element())
+      return elements.get(id)!
+    }
+    const client = runInNewContext(script + '\n;({ mfRunNow })', {
+      document: { getElementById: get, createElement: element, querySelector: get, querySelectorAll: () => [] },
+      navigator: { clipboard: { writeText: async () => {} } },
+      fetch: (url: string) => url === '/api/llamafarm/run-now'
+        ? Promise.resolve(Response.json({ scenario: 'now', picks }))
+        : Promise.resolve(Response.json({})),
+      setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {}
+    })
+    return { client, markup: () => get('mf-runnow').innerHTML }
+  }
+
+  it('marks an installed pick ready and a non-installed pick as needing download', async () => {
+    const ready = { task: 'text-generation', label: 'Text generation', model: {
+      id: 'acme/ready-GGUF', label: 'Ready', verdict: 'green', installed: 'ready',
+      paramsBillions: 3, runtimeRamBytes: GiB, grade: { letter: 'A', score: 90 }
+    } }
+    const download = { task: 'text-generation', label: 'Text generation', model: {
+      id: 'acme/dl-GGUF', label: 'Download', verdict: 'green', installed: null,
+      paramsBillions: 7, runtimeRamBytes: 2 * GiB, grade: { letter: 'B', score: 80 }
+    } }
+    const { client, markup } = await runNowClient([ready, download])
+    await client.mfRunNow()
+    assert.match(markup(), /installed/)
+    assert.match(markup(), /needs download/)
+  })
+})
+
+describe('Model Farm pull progress', () => {
+  it('renders an indeterminate bar for a byte-less Ollama pull and a percent bar for folder downloads', async () => {
+    const script = await servedPanelScript()
+    const element = () => ({
+      innerHTML: '', textContent: '',
+      classList: { toggle() {}, contains() { return true } },
+      addEventListener() {},
+      appendChild(child: { innerHTML: string }) { this.innerHTML += child.innerHTML }
+    })
+    const elements = new Map<string, ReturnType<typeof element>>()
+    const get = (id: string) => {
+      if (!elements.has(id)) elements.set(id, element())
+      return elements.get(id)!
+    }
+    let tick: (() => Promise<void>) | null = null
+    const client = runInNewContext(script + '\n;({ mfStartProgress })', {
+      document: { getElementById: get, createElement: element, querySelector: get, querySelectorAll: () => [] },
+      navigator: { clipboard: { writeText: async () => {} } },
+      fetch: (url: string) => url === '/api/llamafarm/progress'
+        ? Promise.resolve(Response.json({ downloads: [
+          { repo: 'acme/pull-GGUF', runtime: 'ollama', status: 'downloading', percent: null, receivedBytes: 0, totalBytes: 4 * GiB, file: null, error: null, startedAt: 1 },
+          { repo: 'acme/folder-GGUF', runtime: 'lmstudio', status: 'downloading', percent: 55, receivedBytes: 2 * GiB, totalBytes: 4 * GiB, file: null, error: null, startedAt: 2 }
+        ] }))
+        : Promise.resolve(Response.json({})),
+      setTimeout: () => 0, clearTimeout: () => {},
+      setInterval: (fn: () => Promise<void>) => { tick = fn; return 1 },
+      clearInterval: () => {}
+    })
+    client.mfStartProgress()
+    assert.ok(tick, 'progress polling was scheduled')
+    await tick!()
+    const markup = get('mf-progress').innerHTML
+    assert.match(markup, /pulling/)
+    assert.match(markup, /indet/)
+    assert.match(markup, /55%/)
   })
 })
 

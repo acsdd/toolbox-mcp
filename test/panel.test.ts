@@ -82,6 +82,28 @@ describe('panel security headers', () => {
   })
 })
 
+describe('panel widget-host pattern', () => {
+  it('injects the shared portable pattern CSS', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    assert.match(reply.body, /--wh-rail-width/)
+    assert.match(reply.body, /\.mode-full > \.player-page/)
+  })
+
+  it('puts the vertical tool rail on the right of the glued stage', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    // Stage takes the flexible first column; the rail the fixed second one.
+    assert.match(reply.body, /grid-template: 62px 1fr \/ minmax\(0, 1fr\) 232px/)
+    assert.match(reply.body, /\.sidebar \{ grid-row: 2; grid-column: 2;[^}]*border-left/)
+    // The glued stage is the shared host-screen, keeping panel spacing.
+    assert.match(reply.body, /<main class="host-screen">/)
+    assert.match(reply.body, /main\.host-screen \{ padding: 28px 30px 48px; \}/)
+    // Active nav accent sits on the rail's inner (right) edge.
+    assert.match(reply.body, /inset -2px 0 0 var\(--accent\)/)
+  })
+})
+
 describe('panel origin checks', () => {
   it('refuses a request with a foreign host header', async () => {
     const reply = await ask({ path: '/api/overview', headers: { Host: 'attacker.example.com' } })
@@ -267,6 +289,98 @@ describe('panel activity recorder', () => {
       assert.deepEqual(data.perTool.map((tool) => tool.tool).sort(), ['crypto_status', 'llamafarm_score'])
     } finally {
       attached.close()
+    }
+  })
+})
+
+describe('panel model farm feature routes', () => {
+  it('publishes the five new farm tools in the catalog', async () => {
+    const reply = await ask({ path: '/api/catalog' })
+    const data = JSON.parse(reply.body) as { tools: { name: string }[] }
+    const names = data.tools.map((tool) => tool.name)
+    for (const expected of [
+      'llamafarm_search',
+      'llamafarm_quants',
+      'llamafarm_remove',
+      'llamafarm_run_now',
+      'llamafarm_progress'
+    ]) {
+      assert.ok(names.includes(expected), `${expected} missing from catalog`)
+    }
+  })
+
+  it('searches HuggingFace through /api/llamafarm/search', async () => {
+    const reply = await ask({
+      path: '/api/llamafarm/search',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: 'qwen', scenario: 'now' })
+    })
+    assert.equal(reply.status, 200)
+    const data = JSON.parse(reply.body) as { query: string; total: number; groups: unknown[] }
+    assert.equal(data.query, 'qwen')
+    assert.equal(typeof data.total, 'number')
+    assert.ok(Array.isArray(data.groups))
+  })
+
+  it('lists quantizations through /api/llamafarm/quants', async () => {
+    const reply = await ask({
+      path: '/api/llamafarm/quants',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: 'acme/model-GGUF' })
+    })
+    assert.equal(reply.status, 200)
+    const data = JSON.parse(reply.body) as { repo: string; quants: unknown[]; error: string | null }
+    assert.equal(data.repo, 'acme/model-GGUF')
+    assert.ok(Array.isArray(data.quants))
+    assert.equal(data.error, null)
+  })
+
+  it('reports not-found when removing an uninstalled model', async () => {
+    const reply = await ask({
+      path: '/api/llamafarm/remove',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'no-such-model' })
+    })
+    assert.equal(reply.status, 200)
+    const data = JSON.parse(reply.body) as { ok: boolean; reason: string }
+    assert.equal(data.ok, false)
+    assert.equal(data.reason, 'not-found')
+  })
+
+  it('serves run-now picks through /api/llamafarm/run-now', async () => {
+    const reply = await ask({ path: '/api/llamafarm/run-now' })
+    assert.equal(reply.status, 200)
+    const data = JSON.parse(reply.body) as { scenario: string; picks: unknown[] }
+    assert.equal(data.scenario, 'now')
+    assert.ok(Array.isArray(data.picks))
+  })
+
+  it('serves download progress through /api/llamafarm/progress', async () => {
+    const reply = await ask({ path: '/api/llamafarm/progress' })
+    assert.equal(reply.status, 200)
+    const data = JSON.parse(reply.body) as { downloads: unknown[] }
+    assert.deepEqual(data.downloads, [])
+  })
+})
+
+describe('panel model farm feature UI', () => {
+  it('wires search, run-now, remove, quants and progress into the page', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    for (const hook of [
+      'mfSearch',
+      'mfRunNow',
+      'mfRemove',
+      'mfQuants',
+      'id="mf-runnow"',
+      'id="mf-progress"',
+      'Search HuggingFace',
+      'Run now'
+    ]) {
+      assert.ok(reply.body.includes(hook), `page missing ${hook}`)
     }
   })
 })
