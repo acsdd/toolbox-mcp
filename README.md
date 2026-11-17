@@ -1,5 +1,7 @@
 # toolbox-mcp
 
+[![M8ven Verified](https://m8ven.ai/badge/mcp/acsdd-toolbox-mcp-12f9lc?variant=verified&v=d19a97a36f93ae9d30c3cb51d3bfcf15)](https://m8ven.ai/mcp/acsdd-toolbox-mcp-12f9lc?s=readme)
+
 **Status:** `external_UAT` — released for acceptance testing outside the team. ![status](https://img.shields.io/badge/status-external_UAT-9cf37e?style=flat-square)
 
 **Site:** <https://acsdd.github.io/toolbox-mcp/> — The project landing page.
