@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import {
   DEFAULT_RUNTIME_ID,
@@ -11,6 +11,7 @@ import {
   downloadGguf,
   expandPath,
   findRuntimeBinary,
+  freeDiskBytes,
   installOllama,
   listRuntimeModels,
   parseVersion,
@@ -75,6 +76,13 @@ describe('paths and versions', () => {
     assert.equal(expandPath('%APPDATA%/Jan', {}, '/home/vrm'), `${join('/home/vrm', 'AppData', 'Roaming')}/Jan`)
   })
 
+  it('honors OLLAMA_MODELS without changing other runtime destinations', () => {
+    const env = { OLLAMA_MODELS: 'D:/weights/ollama' }
+    assert.equal(runtimeModelsDir(runtimeDescriptor('ollama')!, { env, homeDir: '/home/vrm' }), 'D:/weights/ollama')
+    assert.equal(runtimeModelsDir(runtimeDescriptor('lmstudio')!, { env, homeDir: '/home/vrm' }), '/home/vrm/.lmstudio/models')
+    assert.equal(runtimeModelsDir(runtimeDescriptor('ollama')!, { env: { OLLAMA_MODELS: '' }, homeDir: '/home/vrm' }), '/home/vrm/.ollama/models')
+  })
+
   it('reads a version out of CLI output', () => {
     assert.equal(parseVersion('ollama version 0.12.3'), '0.12.3')
     assert.equal(parseVersion('Version: 1.2.3-beta'), '1.2.3-beta')
@@ -91,6 +99,38 @@ describe('paths and versions', () => {
     const kobold = runtimeDescriptor('koboldcpp')
     assert.ok(kobold)
     assert.equal(runtimeModelsDir(kobold, { env: {}, homeDir: '/home/vrm' }), null)
+  })
+})
+
+describe('destination free space', () => {
+  it('uses available blocks on the nearest existing ancestor of a new models directory', async () => {
+    const parent = resolve('disk-fixture')
+    const target = join(parent, 'new', 'models')
+    const visited: string[] = []
+    const free = await freeDiskBytes(target, async (directory) => {
+      visited.push(directory)
+      if (directory !== parent) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      return { bsize: 4096, bavail: 3 }
+    })
+    assert.equal(free, 12288)
+    assert.deepEqual(visited, [target, join(parent, 'new'), parent])
+  })
+
+  it('does not substitute a parent volume when access to an existing target is denied', async () => {
+    let probes = 0
+    const free = await freeDiskBytes('models', async () => {
+      probes++
+      throw Object.assign(new Error('denied'), { code: 'EACCES' })
+    })
+    assert.equal(free, null)
+    assert.equal(probes, 1)
+  })
+
+  it('distinguishes a full drive from an unavailable disk measurement', async () => {
+    assert.equal(await freeDiskBytes('models', async () => ({ bsize: 4096, bavail: 0 })), 0)
+    for (const bavail of [-1, NaN, Infinity]) {
+      assert.equal(await freeDiskBytes('models', async () => ({ bsize: 4096, bavail })), null)
+    }
   })
 })
 
@@ -394,8 +434,8 @@ describe('weights for a runtime that cannot pull', () => {
     assert.match(file.url, /resolve\/main\/model-Q4_K_M\.gguf$/)
   })
 
-  it('falls back to the largest file when the quant is missing', async () => {
-    const file = await resolveGgufFile('owner/repo', 'Q2_K', {
+  it('refuses an unavailable requested quant instead of downloading a heavier one', async () => {
+    await assert.rejects(resolveGgufFile('owner/repo', 'Q2_K', {
       fetchImpl: tableFetch({
         'https://huggingface.co/api/models/owner/repo?blobs=true': {
           siblings: [
@@ -404,9 +444,16 @@ describe('weights for a runtime that cannot pull', () => {
           ]
         }
       })
-    })
-    assert.ok(file)
-    assert.equal(file.filename, 'big-Q8_0.gguf')
+    }), /Q2_K.*not available/i)
+  })
+
+  it('refuses a split GGUF instead of treating its first shard as a complete model', async () => {
+    await assert.rejects(resolveGgufFile('owner/split', 'Q4_K_M', {
+      fetchImpl: tableFetch({ 'https://huggingface.co/api/models/owner/split?blobs=true': { siblings: [
+        { rfilename: 'model-q4_k_m-00001-of-00002.gguf', size: 4000 },
+        { rfilename: 'model-q4_k_m-00002-of-00002.gguf', size: 4000 }
+      ] } })
+    }), /split GGUF.*not supported/i)
   })
 
   it('returns nothing when the repo has no GGUF', async () => {
@@ -418,6 +465,49 @@ describe('weights for a runtime that cannot pull', () => {
     assert.equal(file, null)
   })
 
+  it('keeps equal filenames from different repos in separate directories', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'toolbox-mcp-isolated-'))
+    try {
+      const results = []
+      for (const repoId of ['alice/model', 'bob/model']) {
+        results.push(await downloadGguf({ repoId, filename: 'model.gguf', url: 'https://example.invalid/model', sizeBytes: 11 }, root, {
+          download: async (_url, target) => { await writeFile(target, repoId.padEnd(11)); return 11 }
+        }))
+      }
+      assert.notEqual(results[0].path, results[1].path)
+      assert.equal(await readFile(results[0].path, 'utf8'), 'alice/model')
+      assert.equal(await readFile(results[1].path, 'utf8'), 'bob/model  ')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('preserves an existing model and removes staging when publication would overwrite it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'toolbox-mcp-preserve-'))
+    try {
+      await writeFile(join(root, 'model.gguf'), 'original')
+      await assert.rejects(downloadGguf({ filename: 'model.gguf', url: 'https://example.invalid/model', sizeBytes: 7 }, root, {
+        download: async (_url, target) => { await writeFile(target, 'changed'); return 7 }
+      }), /already exists|EEXIST/)
+      assert.equal(await readFile(join(root, 'model.gguf'), 'utf8'), 'original')
+      assert.deepEqual(await readdir(root), ['model.gguf'])
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  for (const failure of ['throw', 'truncated']) {
+    it(`cleans ${failure} downloads without publishing invalid weights`, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'toolbox-mcp-partial-'))
+      try {
+        await assert.rejects(downloadGguf({ filename: 'model.gguf', url: 'https://example.invalid/model', sizeBytes: 20 }, root, {
+          download: async (_url, target) => {
+            await writeFile(target, 'short')
+            if (failure === 'throw') throw new Error('disconnected')
+            return 20 // A transport's reported count must not replace the actual file size.
+          }
+        }), failure === 'throw' ? /disconnected/ : /size.*expected/i)
+        assert.deepEqual(await readdir(root), [])
+      } finally { await rm(root, { recursive: true, force: true }) }
+    })
+  }
+
   it('downloads the weights into the runtime folder', async () => {
     const home = await mkdtemp(join(tmpdir(), 'toolbox-mcp-gguf-'))
     try {
@@ -428,7 +518,7 @@ describe('weights for a runtime that cannot pull', () => {
         {
           download: async (url, target) => {
             seen.push({ url, target })
-            await writeFile(target, 'weights')
+            await writeFile(target, Buffer.alloc(12))
             return 12
           }
         }

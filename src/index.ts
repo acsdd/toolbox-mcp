@@ -8,7 +8,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { createServices } from './services.js'
 import { startPanel } from './panel.js'
-import { jsonSchemaToZodShape } from './remote.js'
+import { jsonSchemaToZodShape, proxiedToolAnnotations } from './remote.js'
 import { appVersion } from './version.js'
 import { TOOL_CATALOG } from './catalog.js'
 import { createActivity } from './activity.js'
@@ -27,6 +27,7 @@ const services = createServices({
           tool.name,
           tool.description,
           jsonSchemaToZodShape(tool.inputSchema),
+          proxiedToolAnnotations(tool.annotations),
           async (args) => (await tool.call(args as Record<string, unknown>)) as CallToolResult
         )
       )
@@ -132,7 +133,8 @@ const handlers: Record<string, ToolHandler> = {
     json(
       await services.llamafarmRemove({
         ...(typeof args.repo === 'string' ? { repo: args.repo } : {}),
-        ...(typeof args.model === 'string' ? { model: args.model } : {})
+        ...(typeof args.model === 'string' ? { model: args.model } : {}),
+        ...(typeof args.runtime === 'string' ? { runtime: args.runtime } : {})
       })
     ),
   llamafarm_run_now: async () => json(await services.llamafarmRunNow()),
@@ -197,7 +199,7 @@ const activity = createActivity(true)
 for (const spec of TOOL_CATALOG) {
   const handler = handlers[spec.name]
   if (!handler) throw new Error(`No handler for the ${spec.name} tool.`)
-  server.tool(spec.name, spec.description, spec.shape, async (args) => {
+  server.tool(spec.name, spec.description, spec.shape, spec.annotations, async (args) => {
     const started = Date.now()
     try {
       const result = await handler((args ?? {}) as ToolArgs)

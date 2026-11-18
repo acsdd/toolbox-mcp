@@ -7,11 +7,23 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
+import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 
 export interface RemoteToolDef {
   name: string
   description?: string
   inputSchema?: unknown
+  annotations?: ToolAnnotations
+}
+
+/** Preserve remote hints, defaulting unknown behavior conservatively. */
+export function proxiedToolAnnotations(annotations?: ToolAnnotations): ToolAnnotations {
+  return {
+    readOnlyHint: annotations?.readOnlyHint ?? false,
+    destructiveHint: annotations?.destructiveHint ?? true,
+    idempotentHint: annotations?.idempotentHint ?? false,
+    openWorldHint: true
+  }
 }
 
 export interface RemoteConnection {
@@ -28,6 +40,7 @@ export interface ProxiedTool {
   name: string
   description: string
   inputSchema: unknown
+  annotations?: ToolAnnotations
   call: (args: Record<string, unknown>) => Promise<unknown>
 }
 
@@ -46,7 +59,7 @@ export const connectRemote: RemoteConnect = async (endpoint) => {
       do {
         const page = await client.listTools(cursor ? { cursor } : {})
         for (const tool of page.tools) {
-          tools.push({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })
+          tools.push({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, annotations: tool.annotations })
         }
         cursor = page.nextCursor
       } while (cursor)
@@ -66,7 +79,7 @@ export function jsonSchemaToZodShape(schema: unknown): z.ZodRawShape {
   const doc = schema as { properties?: Record<string, unknown>; required?: unknown } | null
   if (!doc?.properties || typeof doc.properties !== 'object') return {}
   const required = new Set(Array.isArray(doc.required) ? doc.required : [])
-  const shape: z.ZodRawShape = {}
+  const shape: Record<string, z.ZodType> = {}
   for (const [key, raw] of Object.entries(doc.properties)) {
     const def = raw as { type?: unknown; description?: unknown; enum?: unknown }
     let field: z.ZodTypeAny
@@ -88,7 +101,7 @@ export function jsonSchemaToZodShape(schema: unknown): z.ZodRawShape {
           field = z.array(z.unknown())
           break
         case 'object':
-          field = z.record(z.unknown())
+          field = z.record(z.string(), z.unknown())
           break
         default:
           field = z.unknown()
@@ -97,5 +110,5 @@ export function jsonSchemaToZodShape(schema: unknown): z.ZodRawShape {
     if (typeof def.description === 'string') field = field.describe(def.description)
     shape[key] = required.has(key) ? field : field.optional()
   }
-  return shape
+  return shape as z.ZodRawShape
 }

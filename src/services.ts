@@ -69,6 +69,8 @@ import {
   DEFAULT_RUNTIME_ID,
   detectRuntimes,
   downloadGguf,
+  freeDiskBytes,
+  ggufDirectory,
   installOllama,
   listRuntimeModels,
   providerBaseUrl,
@@ -101,6 +103,7 @@ const CATALOG_PER_TASK = 24
 const REGISTRY_TTL_MS = 5 * 60 * 1000
 const GATEWAY_TTL_MS = 30 * 1000
 const RUNTIME_TTL_MS = 20 * 1000
+const DOWNLOAD_HISTORY_LIMIT = 20
 
 interface ServicesOptions {
   fetchImpl?: FetchLike
@@ -119,6 +122,8 @@ interface ServicesOptions {
   onRemoteRemoved?: (moduleId: string) => void
   /** Fetch used for runtime probes and HuggingFace file lookups. */
   runtimeFetchImpl?: RuntimeFetch
+  /** Fresh available bytes on a destination volume; null when unavailable. */
+  freeDiskImpl?: (directory: string) => Promise<number | null>
   /** Downloads a URL to a file (injectable for tests); may report progress. */
   downloadFileImpl?: (url: string, target: string, onProgress?: (progress: DownloadProgress) => void) => Promise<number>
 }
@@ -136,6 +141,8 @@ export interface LlamafarmScoreInput {
 export interface FarmScoredModel extends ScoredModel {
   /** Installed Ollama/runtime model name, or null when not present locally. */
   installed: string | null
+  /** Runtime owning this inventory entry; never infer deletion targets from UI state. */
+  installedRuntime: string | null
 }
 
 export interface LlamafarmGroup {
@@ -182,11 +189,12 @@ export interface LlamafarmQuantsResult {
 export interface LlamafarmRemoveInput {
   repo?: string
   model?: string
+  runtime?: string
 }
 export interface LlamafarmRemoveResult {
   ok: boolean
   removed: string | null
-  reason: 'removed' | 'not-found' | 'failed'
+  reason: 'removed' | 'not-found' | 'failed' | 'unsupported-runtime'
   message: string
   output: string
 }
@@ -343,6 +351,7 @@ export function createServices(options: ServicesOptions = {}) {
   }
   let monitor = createResourceMonitor({})
   let machine: MachineProfile | null = null
+  let modelStateVersion = 0
   let catalog: { models: CatalogModel[]; fetchedAt: number | null } | null = null
   let catalogError: string | null = null
   let registry: { modules: MarketplaceModule[]; updated: string; fetchedAt: number } | null = null
@@ -557,9 +566,19 @@ export function createServices(options: ServicesOptions = {}) {
 
   // --- llamafarm: model catalog + fit scoring --------------------------------
 
+  function invalidateModelState(): void {
+    modelStateVersion++
+    machine = null
+    runtimeReport = null
+  }
+
   async function llamafarmStatus(forceDetect = false): Promise<MachineProfile> {
     if (!machine || forceDetect) {
-      machine = await detectMachine(detectOptions)
+      const version = modelStateVersion
+      const detected = await detectMachine(detectOptions)
+      // A transfer/removal may have finished while this snapshot was in flight.
+      if (version !== modelStateVersion) return llamafarmStatus()
+      machine = detected
     }
     return machine
   }
@@ -622,15 +641,24 @@ export function createServices(options: ServicesOptions = {}) {
     return descriptor ? { id: descriptor.id, api: descriptor.api } : { id: DEFAULT_RUNTIME_ID, api: 'ollama' }
   }
 
-  /** Names the local Ollama runtime already serves, for installed-awareness. */
-  async function installedNames(): Promise<string[]> {
-    const profile = await llamafarmStatus()
-    return profile.ollama.models.map((entry) => entry.name)
+  /** Use the selected runtime's API; a downloaded-but-unloaded file is not served. */
+  async function installedNames(runtime: string): Promise<string[]> {
+    if (runtime === 'ollama') {
+      const profile = await llamafarmStatus()
+      return profile.ollama.models.map((entry) => entry.name)
+    }
+    const descriptor = runtimeDescriptor(runtime)
+    if (!descriptor) return []
+    const result = await listRuntimeModels(descriptor, runtimeOptions)
+    return result.models.map((entry) => entry.name)
   }
 
-  /** Attach the local installed name (or null) to each scored model. */
-  function markInstalled(scored: ScoredModel[], names: string[]): FarmScoredModel[] {
-    return scored.map((model) => ({ ...model, installed: matchInstalledModel(model, names) }))
+  /** Pin inventory provenance so later deletion never follows a changed selector. */
+  function markInstalled(scored: ScoredModel[], names: string[], runtime: string): FarmScoredModel[] {
+    return scored.map((model) => {
+      const installed = matchInstalledModel(model, names)
+      return { ...model, installed, installedRuntime: installed ? runtime : null }
+    })
   }
 
   /** Group scored models by pipeline task, in display order. */
@@ -654,6 +682,7 @@ export function createServices(options: ServicesOptions = {}) {
    * color marks as filters change) and wave 3 (submitted, ordered verdicts).
    */
   async function llamafarmScore(input: LlamafarmScoreInput): Promise<LlamafarmScoreResult> {
+    const runtime = activeScoreRuntime()
     const [profile, { models, fetchedAt, error }] = await Promise.all([llamafarmStatus(), llamafarmCatalog()])
     const search = input.search?.trim().toLowerCase() ?? ''
     const filtered = models.filter((model) => {
@@ -664,9 +693,9 @@ export function createServices(options: ServicesOptions = {}) {
       if (input.maxParams != null && (model.paramsBillions ?? Infinity) > input.maxParams) return false
       return true
     })
-    const scored = scoreModels({ models: filtered, machine: profile, scenario: input.scenario, runtime: activeScoreRuntime() })
+    const scored = scoreModels({ models: filtered, machine: profile, scenario: input.scenario, runtime })
     const visible = input.onlyReachable ? scored.filter((m) => m.verdict !== 'red' || m.hints.length > 0) : scored
-    const groups = groupByTask(markInstalled(visible, await installedNames()))
+    const groups = groupByTask(markInstalled(visible, await installedNames(runtime.id), runtime.id))
     return {
       machine: profile,
       machineGrade: gradeMachine(profile, input.scenario),
@@ -680,6 +709,7 @@ export function createServices(options: ServicesOptions = {}) {
 
   /** Live HuggingFace search beyond the cached catalog, graded (point 1). */
   async function llamafarmSearch(input: LlamafarmSearchInput): Promise<LlamafarmSearchResult> {
+    const runtime = activeScoreRuntime()
     const query = input.query?.trim() ?? ''
     const scenario = input.scenario ?? 'now'
     const profile = await llamafarmStatus()
@@ -699,8 +729,8 @@ export function createServices(options: ServicesOptions = {}) {
     } catch (cause) {
       return { ...base, error: cause instanceof Error ? cause.message : String(cause) }
     }
-    const scored = scoreModels({ models, machine: profile, scenario, runtime: activeScoreRuntime() })
-    const groups = groupByTask(markInstalled(scored, await installedNames()))
+    const scored = scoreModels({ models, machine: profile, scenario, runtime })
+    const groups = groupByTask(markInstalled(scored, await installedNames(runtime.id), runtime.id))
     return { ...base, groups, total: scored.length }
   }
 
@@ -717,9 +747,10 @@ export function createServices(options: ServicesOptions = {}) {
 
   /** Best green model per task for this machine right now (point 7). */
   async function llamafarmRunNow(): Promise<LlamafarmRunNowResult> {
+    const runtime = activeScoreRuntime()
     const [profile, { models }] = await Promise.all([llamafarmStatus(), llamafarmCatalog()])
-    const scored = scoreModels({ models, machine: profile, scenario: 'now', runtime: activeScoreRuntime() })
-    const groups = groupByTask(markInstalled(scored, await installedNames()))
+    const scored = scoreModels({ models, machine: profile, scenario: 'now', runtime })
+    const groups = groupByTask(markInstalled(scored, await installedNames(runtime.id), runtime.id))
     const picks: LlamafarmRunNowResult['picks'] = []
     for (const group of groups) {
       const green = group.models.filter((model) => model.verdict === 'green')
@@ -731,14 +762,30 @@ export function createServices(options: ServicesOptions = {}) {
     return { scenario: 'now', machine: profile, picks }
   }
 
-  /** Tracked folder downloads, newest last (point 4). */
+  /** Keep the latest terminal attempts without ever evicting an active transfer. */
+  function settleDownload(entry: FarmDownload, status: 'done' | 'error'): void {
+    entry.status = status
+    let terminal = 0
+    for (let index = downloads.length - 1; index >= 0; index--) {
+      if (downloads[index].status !== 'downloading' && ++terminal > DOWNLOAD_HISTORY_LIMIT) {
+        downloads.splice(index, 1)
+      }
+    }
+  }
+
+  /** Tracked downloads, newest started last (point 4). */
   async function llamafarmProgress(): Promise<LlamafarmProgressResult> {
     return { downloads: downloads.map((entry) => ({ ...entry })) }
   }
 
   /** Remove a locally installed Ollama model by repo or name (point 6). */
   async function llamafarmRemove(input: LlamafarmRemoveInput): Promise<LlamafarmRemoveResult> {
-    const names = await installedNames()
+    const runtime = input.runtime?.trim() || activeScoreRuntime().id
+    if (runtime !== 'ollama') {
+      return { ok: false, removed: null, reason: 'unsupported-runtime',
+        message: `Removal is supported only for Ollama. Manage models in ${runtimeDescriptor(runtime)?.label ?? runtime} itself.`, output: '' }
+    }
+    const names = await installedNames(runtime)
     let target: string | null = null
     if (input.model?.trim()) {
       const wanted = input.model.trim().toLowerCase()
@@ -763,12 +810,13 @@ export function createServices(options: ServicesOptions = {}) {
     if (!result.ok) {
       return { ok: false, removed: null, reason: 'failed', message: result.error ?? 'Ollama refused the removal.', output: result.output }
     }
+    invalidateModelState()
     return { ok: true, removed: target, reason: 'removed', message: `${target} was removed.`, output: result.output }
   }
 
   /** Re-detect the machine and force a catalog refetch. */
   async function llamafarmRefresh(): Promise<{ machine: MachineProfile; catalog: number }> {
-    machine = await detectMachine(detectOptions)
+    await llamafarmStatus(true)
     const { models } = await llamafarmCatalog(true)
     return { machine: await llamafarmStatus(), catalog: models.length }
   }
@@ -857,7 +905,6 @@ export function createServices(options: ServicesOptions = {}) {
     // Disk guard: refuse before pulling when the download cannot fit. Guard
     // the *requested* quant's real size, not the catalog default, so a heavier
     // quant (e.g. Q8_0 over Q4_K_M) cannot slip past the check.
-    const machine = await llamafarmStatus()
     let neededBytes = model.fileBytes
     const requested = (input.quant ?? '').trim()
     if (requested && requested.toUpperCase() !== (model.quantLabel ?? '').toUpperCase()) {
@@ -869,11 +916,6 @@ export function createServices(options: ServicesOptions = {}) {
         // Keep the catalog default size when the quant listing is unavailable.
       }
     }
-    const short = diskShortfall(machine.freeDiskBytes, neededBytes)
-    if (short !== null && short > 0) {
-      return failure('insufficient-disk', `Not enough disk for ${model.id}: ${diskShortfallLabel(short)}.`)
-    }
-
     const cli = await probeOllamaCli(execFileImpl)
     if (!cli.installed) {
       return failure('ollama-missing', 'Ollama is not installed on this machine.', {
@@ -881,6 +923,13 @@ export function createServices(options: ServicesOptions = {}) {
         modelName: plan.modelName,
         steps: plan.steps
       })
+    }
+
+    const directory = runtimeModelsDir(descriptor)!
+    const available = await (options.freeDiskImpl ?? freeDiskBytes)(directory).catch(() => null)
+    const short = diskShortfall(available, neededBytes)
+    if (short !== null && short > 0) {
+      return failure('insufficient-disk', `Not enough disk at ${directory} for ${model.id}: ${diskShortfallLabel(short)}.`)
     }
 
     // Live progress for the Ollama pull: the CLI gives no byte stream, so the
@@ -913,7 +962,7 @@ export function createServices(options: ServicesOptions = {}) {
         result = await pull(plan.reference)
       }
     } catch (cause) {
-      pullEntry.status = 'error'
+      settleDownload(pullEntry, 'error')
       pullEntry.error = cause instanceof Error ? cause.message : String(cause)
       return failure('failed', pullEntry.error, {
         reference: plan.reference,
@@ -923,7 +972,7 @@ export function createServices(options: ServicesOptions = {}) {
     }
 
     if (!result.ok) {
-      pullEntry.status = 'error'
+      settleDownload(pullEntry, 'error')
       pullEntry.error = result.error ?? 'The Ollama runtime refused the install.'
       return failure('failed', pullEntry.error, {
         reference: plan.reference,
@@ -932,9 +981,10 @@ export function createServices(options: ServicesOptions = {}) {
         steps: plan.steps
       })
     }
-    pullEntry.status = 'done'
+    settleDownload(pullEntry, 'done')
     pullEntry.percent = 100
     // Byte counts remain unknown: Ollama may have reused already-cached layers.
+    invalidateModelState()
 
     return {
       ok: true,
@@ -980,19 +1030,24 @@ export function createServices(options: ServicesOptions = {}) {
       ...extra
     })
 
-    const gguf = await resolveGgufFile(model.id, quant ?? model.quantLabel, runtimeOptions)
-    if (!gguf) {
-      return failure('not-found', `No GGUF file found for ${model.id}.`)
-    }
-
-    // Disk guard: refuse before downloading when the weights cannot fit.
-    const machine = await llamafarmStatus()
-    const short = diskShortfall(machine.freeDiskBytes, gguf.sizeBytes)
-    if (short !== null && short > 0) {
-      return failure('insufficient-disk', `Not enough disk for ${model.id}: ${diskShortfallLabel(short)}.`)
-    }
-
+    let gguf: Awaited<ReturnType<typeof resolveGgufFile>>
     const directory = runtimeModelsDir(descriptor) ?? join(homedir(), '.toolbox-mcp', 'models')
+    let destination: string
+    try {
+      gguf = await resolveGgufFile(model.id, quant ?? model.quantLabel, runtimeOptions)
+      if (!gguf) return failure('not-found', `No GGUF file found for ${model.id}.`)
+      destination = ggufDirectory(gguf, directory)
+    } catch (cause) {
+      return failure('failed', cause instanceof Error ? cause.message : String(cause))
+    }
+
+    // Probe the same namespaced destination that will receive the model.
+    const available = await (options.freeDiskImpl ?? freeDiskBytes)(destination).catch(() => null)
+    const short = diskShortfall(available, gguf.sizeBytes)
+    if (short !== null && short > 0) {
+      return failure('insufficient-disk', `Not enough disk at ${directory} for ${model.id}: ${diskShortfallLabel(short)}.`)
+    }
+
     const entry: FarmDownload = {
       repo: model.id,
       runtime: descriptor.id,
@@ -1016,13 +1071,13 @@ export function createServices(options: ServicesOptions = {}) {
           entry.percent = entry.totalBytes ? Math.min(100, Math.round((progress.receivedBytes / entry.totalBytes) * 100)) : 0
         }
       })
-      entry.status = 'done'
+      settleDownload(entry, 'done')
       entry.percent = 100
       entry.receivedBytes = downloaded.bytes
       entry.totalBytes = downloaded.bytes
       entry.file = downloaded.path
     } catch (cause) {
-      entry.status = 'error'
+      settleDownload(entry, 'error')
       entry.error = cause instanceof Error ? cause.message : String(cause)
       return failure('failed', entry.error)
     }
@@ -1043,6 +1098,7 @@ export function createServices(options: ServicesOptions = {}) {
     }
 
     const openaiBase = baseUrl ? providerBaseUrl({ api: descriptor.api, baseUrl }) : null
+    invalidateModelState()
 
     return {
       ok: true,
@@ -1050,7 +1106,7 @@ export function createServices(options: ServicesOptions = {}) {
       reference: null,
       modelName,
       reason: 'installed',
-      message: `${modelName} is in ${descriptor.label}'s model folder — ${directory}.`,
+      message: `${modelName} is in ${descriptor.label}'s model folder — ${destination}.`,
       output: '',
       steps,
       runtime: { id: descriptor.id, label: descriptor.label, baseUrl },
@@ -1250,6 +1306,7 @@ export function createServices(options: ServicesOptions = {}) {
       name: proxiedToolName(module.id, tool.name),
       description: `[${module.name}] ${tool.description ?? tool.name}`,
       inputSchema: tool.inputSchema,
+      annotations: tool.annotations,
       call: (args) => connection.callTool(tool.name, args)
     }))
     options.onRemoteTools?.(module.id, proxied)

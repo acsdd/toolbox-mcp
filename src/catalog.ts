@@ -7,7 +7,6 @@
  * services that back them.
  */
 import { z } from 'zod'
-import { zodToJsonSchema } from 'zod-to-json-schema'
 
 export type ToolGroupId =
   | 'crypto'
@@ -39,14 +38,55 @@ export const TOOL_GROUPS: ToolGroupMeta[] = [
   { id: 'widgets', label: 'Widget bundles', icon: '⬓', hint: 'Portable widget setup, exported and imported' }
 ]
 
+export interface ToolAnnotations {
+  readOnlyHint: boolean
+  destructiveHint: boolean
+  idempotentHint: boolean
+  openWorldHint: boolean
+}
+
 export interface ToolSpec {
   name: string
   group: ToolGroupId
   description: string
   shape: z.ZodRawShape
+  annotations: ToolAnnotations
 }
 
-export const TOOL_CATALOG: ToolSpec[] = [
+const READ_ONLY_TOOLS = new Set([
+  'crypto_status', 'crypto_refresh', 'crypto_series', 'gmail_status', 'gmail_check',
+  'system_stats', 'system_processes', 'llamafarm_status', 'llamafarm_catalog',
+  'llamafarm_score', 'llamafarm_refresh', 'llamafarm_grade', 'llamafarm_search',
+  'llamafarm_quants', 'llamafarm_run_now', 'llamafarm_progress', 'runtimes_detect',
+  'runtimes_models', 'gateway_status', 'gateway_requests', 'marketplace_list', 'remote_status',
+  'widgets_export'
+])
+const DESTRUCTIVE_TOOLS = new Set([
+  'gmail_disconnect', 'llamafarm_remove', 'runtimes_install', 'marketplace_uninstall', 'widgets_import'
+])
+const IDEMPOTENT_TOOLS = new Set([
+  ...READ_ONLY_TOOLS, 'crypto_set_watchlist', 'gmail_disconnect', 'runtimes_use',
+  'marketplace_install', 'marketplace_uninstall'
+])
+const OPEN_WORLD_TOOLS = new Set([
+  'crypto_refresh', 'crypto_set_watchlist', 'crypto_series', 'gmail_check', 'gmail_connect',
+  'llamafarm_status', 'llamafarm_catalog', 'llamafarm_score', 'llamafarm_refresh', 'llamafarm_grade',
+  'llamafarm_install', 'llamafarm_search', 'llamafarm_quants', 'llamafarm_remove',
+  'llamafarm_run_now', 'runtimes_detect', 'runtimes_install', 'runtimes_models',
+  'runtimes_download', 'gateway_status', 'gateway_requests', 'marketplace_list',
+  'marketplace_install', 'marketplace_uninstall', 'remote_status'
+])
+
+export function toolAnnotations(name: string): ToolAnnotations {
+  return {
+    readOnlyHint: READ_ONLY_TOOLS.has(name),
+    destructiveHint: DESTRUCTIVE_TOOLS.has(name),
+    idempotentHint: IDEMPOTENT_TOOLS.has(name),
+    openWorldHint: OPEN_WORLD_TOOLS.has(name)
+  }
+}
+
+const TOOL_SPECS: Omit<ToolSpec, 'annotations'>[] = [
   // --- crypto-watch ---------------------------------------------------------
   {
     name: 'crypto_status',
@@ -188,10 +228,11 @@ export const TOOL_CATALOG: ToolSpec[] = [
   {
     name: 'llamafarm_remove',
     group: 'llamafarm',
-    description: 'Remove a locally installed Ollama model by repo id or local name. Unknown names report not-found without touching the runtime.',
+    description: 'Remove an Ollama model by repo id or exact local name. Defaults to the active runtime; non-Ollama targets are refused. Specify runtime="ollama" to explicitly target Ollama.',
     shape: {
       repo: z.string().optional().describe('HuggingFace repo id of an installed model'),
-      model: z.string().optional().describe('Local Ollama model name, e.g. "qwen2.5-coder-7b-instruct"')
+      model: z.string().optional().describe('Exact local Ollama model name, including its tag'),
+      runtime: z.string().optional().describe('Runtime owning the model; defaults to the active one. Only Ollama removal is supported.')
     }
   },
   {
@@ -306,6 +347,11 @@ export const TOOL_CATALOG: ToolSpec[] = [
   }
 ]
 
+export const TOOL_CATALOG: ToolSpec[] = TOOL_SPECS.map((spec) => ({
+  ...spec,
+  annotations: toolAnnotations(spec.name)
+}))
+
 export interface ToolParam {
   name: string
   type: string
@@ -327,17 +373,28 @@ export interface CatalogEntry {
 
 /** The parameter list of a tool, derived from the very schema the server uses. */
 export function toolParams(spec: ToolSpec): ToolParam[] {
-  const schema = zodToJsonSchema(z.object(spec.shape)) as {
-    properties?: Record<string, { type?: string; enum?: unknown[]; description?: string }>
+  const schema = z.toJSONSchema(z.object(spec.shape)) as {
+    properties?: Record<string, {
+      type?: string
+      enum?: unknown[]
+      anyOf?: Array<{ type?: string }>
+      description?: string
+    }>
     required?: string[]
   }
   const required = new Set(schema.required ?? [])
-  return Object.entries(schema.properties ?? {}).map(([name, property]) => ({
-    name,
-    type: property.enum ? 'enum' : (property.type ?? 'any'),
-    required: required.has(name),
-    description: property.description ?? ''
-  }))
+  return Object.entries(schema.properties ?? {}).map(([name, property]) => {
+    const branchTypes = property.anyOf?.map((branch) => branch.type) ?? []
+    const unionType = branchTypes.length > 0 && branchTypes.every((type) => type === branchTypes[0])
+      ? branchTypes[0]
+      : undefined
+    return {
+      name,
+      type: property.enum ? 'enum' : (property.type ?? unionType ?? 'any'),
+      required: required.has(name),
+      description: property.description ?? ''
+    }
+  })
 }
 
 /** The whole catalog, ready for the panel. */

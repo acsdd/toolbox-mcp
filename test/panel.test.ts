@@ -115,6 +115,34 @@ describe('panel origin checks', () => {
     assert.equal(reply.status, 403)
   })
 
+  for (const origin of ['http://127.0.0.1:9999', 'http://localhost:9999', 'null']) {
+    it(`refuses mutation from origin ${origin}`, async () => {
+      const before = [...services.crypto.watchlist]
+      const reply = await ask({ path: '/api/settings/watchlist', method: 'POST',
+        headers: { Origin: origin, 'Content-Type': 'text/plain' }, body: JSON.stringify({ watchlist: ['solana'] }) })
+      assert.equal(reply.status, 403)
+      assert.deepEqual(services.crypto.watchlist, before)
+    })
+  }
+
+  it('rejects a browser cross-site request even without Origin', async () => {
+    const reply = await ask({ path: '/api/terminal/stop', method: 'POST', headers: { 'Sec-Fetch-Site': 'cross-site' } })
+    assert.equal(reply.status, 403)
+  })
+
+  it('rejects a same-site request from a different application', async () => {
+    const reply = await ask({ path: '/api/terminal/stop', method: 'POST', headers: { 'Sec-Fetch-Site': 'same-site' } })
+    assert.equal(reply.status, 403)
+  })
+
+  it('accepts same-origin JSON writes and bodyless local CLI requests', async () => {
+    const reply = await ask({ path: '/api/settings/resource', method: 'POST',
+      headers: { Origin: `http://127.0.0.1:${panel.port}`, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({ showProcesses: false }) })
+    assert.equal(reply.status, 200)
+    assert.equal((await ask({ path: '/api/terminal/stop', method: 'POST' })).status, 200)
+  })
+
   it('accepts the panel origin', async () => {
     const reply = await ask({
       path: '/api/overview',
@@ -125,6 +153,16 @@ describe('panel origin checks', () => {
 })
 
 describe('panel body handling', () => {
+  for (const contentType of ['text/plain', 'application/x-www-form-urlencoded', '']) {
+    it(`rejects a JSON mutation disguised as ${contentType || 'no content type'}`, async () => {
+      const before = [...services.crypto.watchlist]
+      const reply = await ask({ path: '/api/settings/watchlist', method: 'POST',
+        headers: contentType ? { 'Content-Type': contentType } : {}, body: JSON.stringify({ watchlist: ['solana'] }) })
+      assert.equal(reply.status, 415)
+      assert.deepEqual(services.crypto.watchlist, before)
+    })
+  }
+
   it('answers 400 for malformed JSON', async () => {
     const reply = await ask({
       path: '/api/settings/watchlist',
@@ -293,7 +331,27 @@ describe('panel activity recorder', () => {
   })
 })
 
+describe('panel terminal completion route', () => {
+  it('returns bounded shell completion candidates without executing the typed command', async () => {
+    const reply = await ask({ path: '/api/terminal/complete', method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: 'Get-Chi', cursor: 7 }) })
+    assert.equal(reply.status, 200)
+    const data = JSON.parse(reply.body) as { supported: boolean; candidates: string[]; replacementIndex: number; replacementLength: number }
+    assert.equal(typeof data.supported, 'boolean')
+    assert.ok(Array.isArray(data.candidates))
+    assert.ok(data.candidates.length <= 40)
+    assert.equal(data.replacementIndex, 0)
+    assert.equal(data.replacementLength, 7)
+  })
+})
+
 describe('panel model farm feature routes', () => {
+  it('honors the explicit runtime on a removal request', async () => {
+    const reply = await ask({ path: '/api/llamafarm/remove', method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'anything', runtime: 'lmstudio' }) })
+    assert.equal(reply.status, 200)
+    assert.equal(JSON.parse(reply.body).reason, 'unsupported-runtime')
+  })
   it('publishes the five new farm tools in the catalog', async () => {
     const reply = await ask({ path: '/api/catalog' })
     const data = JSON.parse(reply.body) as { tools: { name: string }[] }
@@ -367,6 +425,30 @@ describe('panel model farm feature routes', () => {
 })
 
 describe('panel model farm feature UI', () => {
+  it('provides inline purpose filters and visible horizontal list navigation', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    for (const hook of [
+      'id="mf-purpose-filters"',
+      'mfSetTaskFilter',
+      'id="mf-list-position"',
+      'mfScrollColumns(-1)',
+      'mfScrollColumns(1)',
+      'aria-label="Model purpose lists"'
+    ]) {
+      assert.ok(reply.body.includes(hook), `page missing ${hook}`)
+    }
+  })
+
+  it('scales panel text by ten percent and keeps purpose colors text-only', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    assert.match(reply.body, /html\s*\{[^}]*font-size:\s*110%/)
+    assert.match(reply.body, /\.mf-col h3\s*\{[^}]*font-weight:\s*600/)
+    assert.match(reply.body, /\.mf-purpose-[a-z-]+\s*\{\s*color:/)
+    assert.doesNotMatch(reply.body, /\.mf-purpose-(?:coding|art|edit|speech|transcribe|video|understand|multimodal)\s*\{[^}]*background:/)
+  })
+
   it('wires search, run-now, remove, quants and progress into the page', async () => {
     const reply = await ask({ path: '/' })
     assert.equal(reply.status, 200)
@@ -378,7 +460,9 @@ describe('panel model farm feature UI', () => {
       'id="mf-runnow"',
       'id="mf-progress"',
       'Search HuggingFace',
-      'Run now'
+      'Run now',
+      'Tab to complete',
+      '/api/terminal/complete'
     ]) {
       assert.ok(reply.body.includes(hook), `page missing ${hook}`)
     }

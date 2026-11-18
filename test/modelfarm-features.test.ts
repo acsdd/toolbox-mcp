@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import type { ExecFileLike, FetchLike } from '@toolbox/widgets'
 import { createServices } from '../dist/services.js'
@@ -201,6 +201,7 @@ describe('model farm: disk guard (point 2)', () => {
         }
       }),
       execFileImpl: gpuExec,
+      freeDiskImpl: async () => 100 * GiB,
       pullModel: async (reference: string) => {
         pulled = reference
         return { ok: true, code: 0, output: '', error: null }
@@ -211,6 +212,68 @@ describe('model farm: disk guard (point 2)', () => {
     assert.equal(result.ok, true)
     assert.match(pulled, /:Q4_K_M$/)
   })
+})
+
+describe('model farm: safe file selection', () => {
+  for (const quant of ['Q2_K', 'Q4_K_M']) {
+    it(`reports unavailable or split ${quant} without starting a download`, async () => {
+      let downloads = 0
+      const services = createServices({
+        fetchImpl: farmFetch(), execFileImpl: noExec,
+        runtimeFetchImpl: async () => okJson({ siblings: [
+          { rfilename: 'model-q4_k_m-00001-of-00002.gguf', size: 4000 },
+          { rfilename: 'model-q4_k_m-00002-of-00002.gguf', size: 4000 }
+        ] }),
+        downloadFileImpl: async () => { downloads++; return 8000 }
+      })
+      await services.init()
+      const result = await services.llamafarmInstall({ repo: QWEN.id, runtime: 'lmstudio', quant })
+      assert.equal(result.ok, false)
+      assert.equal(result.astrlink, null)
+      assert.match(result.message, quant === 'Q2_K' ? /not available/i : /split GGUF.*not supported/i)
+      assert.equal(downloads, 0)
+      assert.deepEqual((await services.llamafarmProgress()).downloads, [])
+    })
+  }
+})
+
+describe('model farm: destination disk guard', () => {
+  for (const runtime of ['ollama', 'lmstudio']) {
+    it(`rechecks ${runtime}'s destination before each transfer, not the cached machine disk`, async () => {
+      const saved = process.env.OLLAMA_MODELS
+      process.env.OLLAMA_MODELS = join(home, 'custom-ollama-models')
+      let free = 10 * GiB
+      let transfers = 0
+      const paths: string[] = []
+      const events: string[] = []
+      const services = createServices({
+        fetchImpl: farmFetch(), runtimeFetchImpl: ggufFetch(7),
+        execFileImpl: (file, args, opts, cb) => { events.push('cli'); gpuExec(file, args, opts, cb) },
+        freeDiskImpl: async (directory: string) => { paths.push(resolve(directory)); events.push('disk'); return free },
+        pullModel: async () => { transfers++; events.push('transfer'); return { ok: true, code: 0, output: '', error: null } },
+        downloadFileImpl: async (_url, target) => { transfers++; events.push('transfer'); await writeFile(target, 'weights'); return 7 }
+      })
+      try {
+        await services.init()
+        await services.llamafarmStatus()
+        assert.equal((await services.llamafarmInstall({ repo: QWEN.id, runtime })).ok, true)
+        await services.llamafarmStatus()
+        free = 0
+        const blocked = await services.llamafarmInstall({ repo: QWEN.id, runtime })
+        assert.equal(blocked.reason, 'insufficient-disk')
+        assert.equal(blocked.astrlink, null)
+        assert.equal(transfers, 1, 'no second transfer after the drive fills')
+        const expected = runtime === 'ollama' ? join(home, 'custom-ollama-models') : join(home, '.lmstudio', 'models', 'Qwen', 'Qwen2.5-Coder-7B-Instruct-GGUF')
+        assert.deepEqual(paths, [resolve(expected), resolve(expected)])
+        const transferAt = events.indexOf('transfer')
+        assert.equal(events[transferAt - 1], 'disk', 'disk probe runs after CLI/metadata work, immediately before transfer')
+        assert.equal((await services.llamafarmProgress()).downloads.length, 1, 'blocked installs do not start progress')
+      } finally {
+        if (saved === undefined) delete process.env.OLLAMA_MODELS
+        else process.env.OLLAMA_MODELS = saved
+      }
+    })
+  }
 })
 
 describe('model farm: already installed (point 3)', () => {
@@ -234,6 +297,108 @@ describe('model farm: already installed (point 3)', () => {
   })
 })
 
+describe('model farm: installed-state freshness', () => {
+  it('does not let a pre-install detection repopulate the cache with old models', async () => {
+    const names: string[] = []
+    const baseFetch = farmFetch({ ollamaNames: names })
+    let hold = false
+    let release!: () => void
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const services = createServices({
+      execFileImpl: gpuExec, freeDiskImpl: async () => 100 * GiB,
+      fetchImpl: (async (url, init) => {
+        const response = await baseFetch(url, init)
+        if (hold && String(url).endsWith('/api/tags')) {
+          hold = false
+          entered()
+          await new Promise<void>((resolve) => { release = resolve })
+        }
+        return response
+      }) as FetchLike,
+      pullModel: async (reference) => { names.push(reference); return { ok: true, code: 0, output: '', error: null } }
+    })
+    await services.init()
+    await services.llamafarmStatus()
+    hold = true
+    const old = services.llamafarmStatus(true)
+    await started
+    try {
+      assert.equal((await services.llamafarmInstall({ repo: QWEN.id, runtime: 'ollama' })).ok, true)
+    } finally { release() }
+    const profile = await old
+    assert.equal(profile.ollama.models[0]?.name, names[0])
+    assert.equal((await services.llamafarmStatus()).ollama.models[0]?.name, names[0])
+  })
+
+  it('re-reads installed models after a successful pull without refetching the catalog', async () => {
+    const names: string[] = []
+    const services = createServices({
+      fetchImpl: farmFetch({ ollamaNames: names, details: {
+        [QWEN.id]: { siblings: [{ rfilename: 'qwen-q4_k_m.gguf', lfs: { size: 0.2 * GiB } }] }
+      } }),
+      execFileImpl: gpuExec,
+      pullModel: async (reference) => {
+        names.push(reference)
+        return { ok: true, code: 0, output: '', error: null }
+      }
+    })
+    await services.init()
+    await services.llamafarmRefresh()
+    const before = await services.llamafarmScore({ scenario: 'now' })
+    assert.equal(before.groups[0].models[0].installed, null)
+    assert.equal((await services.llamafarmInstall({ repo: QWEN.id, runtime: 'ollama' })).ok, true)
+    const after = await services.llamafarmScore({ scenario: 'now' })
+    assert.equal(after.groups[0].models[0].installed, 'hf.co/' + QWEN.id + ':Q4_K_M')
+    assert.equal(after.fetchedAt, before.fetchedAt, 'catalog is not refreshed by an install')
+    assert.equal((await services.llamafarmRunNow()).picks[0].model.installed, names[0])
+    assert.equal((await services.llamafarmStatus()).ollama.models[0].name, names[0])
+  })
+
+  it('refreshes runtime inventory after a folder download without claiming an unloaded file is served', async () => {
+    let served: string[] = []
+    const repo = QWEN.id
+    const services = createServices({
+      fetchImpl: farmFetch(), execFileImpl: noExec, freeDiskImpl: async () => 100 * GiB,
+      runtimeFetchImpl: async (url) => {
+        if (url.includes('huggingface.co')) return okJson({ siblings: [{ rfilename: 'runtime-inventory-q4_k_m.gguf', size: 7 }] })
+        if (url === 'http://127.0.0.1:1234/v1/models') return okJson({ data: served.map((id) => ({ id })) })
+        if (url === 'http://127.0.0.1:1234/') return okJson('LM Studio')
+        return notFound
+      },
+      downloadFileImpl: async (_url, target) => { await writeFile(target, 'weights'); return 7 }
+    })
+    await services.init()
+    await services.runtimesDetect()
+    assert.equal((await services.llamafarmInstall({ repo, runtime: 'lmstudio' })).ok, true)
+    // The runtime may load a different file; use its API, not an optimistic installed name.
+    served = ['runtime-loaded-model']
+    const report = await services.runtimesDetect()
+    assert.deepEqual(report.runtimes.find((r) => r.id === 'lmstudio')?.models.map((m) => m.name), ['runtime-loaded-model'])
+  })
+
+  it('clears badges and prevents repeat removal after a successful removal', async () => {
+    const names = ['qwen2.5-coder-7b-instruct']
+    let removals = 0
+    const services = createServices({
+      fetchImpl: farmFetch({ ollamaNames: names }), execFileImpl: gpuExec,
+      runOllama: async () => {
+        removals++
+        names.length = 0
+        return { ok: true, code: 0, output: 'removed', error: null }
+      }
+    })
+    await services.init()
+    await services.llamafarmRefresh()
+    assert.equal((await services.llamafarmRemove({ repo: QWEN.id })).ok, true)
+    const result = await services.llamafarmSearch({ query: 'qwen' })
+    assert.equal(result.groups[0].models[0].installed, null)
+    assert.deepEqual((await services.llamafarmStatus()).ollama.models, [])
+    assert.equal((await services.llamafarmRemove({ repo: QWEN.id })).reason, 'not-found')
+    assert.equal(removals, 1)
+  })
+})
+
 describe('model farm: quant picker (point 5)', () => {
   it('lists the GGUF quants a repo offers, smallest first', async () => {
     const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
@@ -244,6 +409,38 @@ describe('model farm: quant picker (point 5)', () => {
     assert.equal(result.quants[0].quant, 'Q4_K_M')
     assert.equal(result.quants[1].quant, 'Q8_0')
     assert.ok(result.quants[0].sizeBytes < result.quants[1].sizeBytes)
+  })
+})
+
+describe('model farm: runtime-safe inventory and removal', () => {
+  it('uses the selected runtime inventory instead of Ollama and refuses unsupported removal', async () => {
+    const other = { ...QWEN, id: 'acme/other-GGUF' }
+    let calls = 0
+    const services = createServices({
+      fetchImpl: farmFetch({ ollamaNames: ['qwen2.5-coder-7b-instruct'], search: [QWEN, other], details: {
+        [other.id]: { siblings: [{ rfilename: 'other-q4_k_m.gguf', size: 0.2 * GiB }] }
+      } }), execFileImpl: noExec,
+      runtimeFetchImpl: async (url) => {
+        if (url === 'http://127.0.0.1:1234/v1/models') return okJson({ data: [{ id: 'other' }] })
+        if (url === 'http://127.0.0.1:1234/') return okJson('LM Studio')
+        return notFound
+      },
+      runOllama: async () => { calls++; return { ok: true, code: 0, output: '', error: null } }
+    })
+    await services.init()
+    await services.runtimesUse('lmstudio')
+    const models = (await services.llamafarmSearch({ query: 'model' })).groups.flatMap((g) => g.models)
+    assert.equal(models.find((m) => m.id === QWEN.id)?.installed, null)
+    assert.equal(models.find((m) => m.id === other.id)?.installed, 'other')
+    assert.equal(models.find((m) => m.id === other.id)?.installedRuntime, 'lmstudio')
+    const result = await services.llamafarmRemove({ model: 'qwen2.5-coder-7b-instruct' })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'unsupported-runtime')
+    assert.equal(calls, 0)
+    assert.equal((await services.llamafarmRemove({ model: 'qwen2.5-coder-7b-instruct', runtime: 'ollama' })).ok, true)
+    assert.equal(calls, 1, 'an explicitly targeted Ollama removal remains supported')
+    // Keep the shared test settings directory from changing other Model Farm cases.
+    await services.runtimesUse('none')
   })
 })
 
@@ -291,6 +488,7 @@ describe('model farm: what can I run now (point 7)', () => {
       execFileImpl: gpuExec
     })
     await services.init()
+    await services.llamafarmRefresh() // This case needs its own catalog, not another test's persisted cache.
     const result = await services.llamafarmRunNow()
     assert.equal(result.scenario, 'now')
     assert.ok(result.picks.length >= 1)
@@ -358,22 +556,61 @@ describe('model farm: runtime-aware fit (point 8)', () => {
   })
 })
 
+describe('model farm: bounded progress history', () => {
+  it('retains every active transfer while keeping only the latest 20 terminal entries', async () => {
+    let release!: (result: { ok: boolean; code: number; output: string; error: null }) => void
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let pulls = 0
+    const services = createServices({
+      fetchImpl: farmFetch(), execFileImpl: gpuExec, freeDiskImpl: async () => 100 * GiB,
+      pullModel: async () => {
+        const n = pulls++
+        if (n === 0) {
+          entered()
+          return new Promise((resolve) => { release = resolve })
+        }
+        if (n % 3 === 0) throw new Error('connection lost')
+        return { ok: n % 3 === 1, code: n % 3 === 1 ? 0 : 1, output: '', error: n % 3 === 1 ? null : 'failed' }
+      }
+    })
+    await services.init()
+    const active = services.llamafarmInstall({ repo: QWEN.id, runtime: 'ollama' })
+    await started
+    try {
+      for (let n = 0; n < 25; n++) await services.llamafarmInstall({ repo: QWEN.id, runtime: 'ollama' })
+      const { downloads } = await services.llamafarmProgress()
+      assert.equal(downloads.filter((d) => d.status === 'downloading').length, 1)
+      assert.equal(downloads.filter((d) => d.status !== 'downloading').length, 20)
+      assert.ok(downloads.some((d) => d.status === 'error'))
+      assert.ok(downloads.some((d) => d.status === 'done'))
+    } finally {
+      release({ ok: true, code: 0, output: '', error: null })
+      await active
+    }
+    const final = await services.llamafarmProgress()
+    assert.equal(final.downloads.length, 20)
+    assert.ok(final.downloads.every((d) => d.status !== 'downloading'))
+  })
+})
+
 describe('model farm: download progress (point 4)', () => {
   it('reports a folder download through to completion', async () => {
+    const repo = QWEN.id
     const services = createServices({
       fetchImpl: farmFetch(),
-      runtimeFetchImpl: ggufFetch(2048),
+      runtimeFetchImpl: async () => okJson({ siblings: [{ rfilename: 'progress-download-q4_k_m.gguf', lfs: { size: 2048 } }] }) as RuntimeFetchResponse,
       execFileImpl: noExec,
       downloadFileImpl: async (_url, target, onProgress) => {
         await mkdir(join(home, '.lmstudio', 'models'), { recursive: true })
-        await writeFile(target, 'weights')
+        await writeFile(target, Buffer.alloc(2048))
         onProgress?.({ receivedBytes: 1024, totalBytes: 2048 })
         return 2048
       }
     })
     await services.init()
     assert.deepEqual((await services.llamafarmProgress()).downloads, [])
-    const result = await services.llamafarmInstall({ repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF', runtime: 'lmstudio' })
+    const result = await services.llamafarmInstall({ repo, runtime: 'lmstudio' })
     assert.equal(result.ok, true)
     const { downloads } = await services.llamafarmProgress()
     const entry = downloads.find((d) => d.repo.includes('Qwen'))
@@ -390,6 +627,7 @@ describe('model farm: download progress (point 4)', () => {
     services = createServices({
       fetchImpl: farmFetch(),
       execFileImpl: gpuExec,
+      freeDiskImpl: async () => 100 * GiB,
       pullModel: async () => {
         midPull = (await services.llamafarmProgress()).downloads.find((d) => d.runtime === 'ollama') ?? null
         return { ok: true, code: 0, output: '', error: null }
@@ -417,6 +655,7 @@ describe('model farm: download progress (point 4)', () => {
         }
         const services = createServices({
           fetchImpl: farmFetch(), execFileImpl: gpuExec,
+          freeDiskImpl: async () => 100 * GiB,
           pullModel: fail, runOllama: fail
         })
         await services.init()

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import type { FetchLike } from '@toolbox/widgets'
 import { createServices } from '../dist/services.js'
-import { jsonSchemaToZodShape, proxiedToolName, type ProxiedTool, type RemoteConnect } from '../dist/remote.js'
+import { jsonSchemaToZodShape, proxiedToolAnnotations, proxiedToolName, type ProxiedTool, type RemoteConnect } from '../dist/remote.js'
 
 let home = ''
 
@@ -51,6 +51,7 @@ function fakeConnect(log: { closed: number; calls: Array<{ name: string; args: u
         {
           name: 'list_feed',
           description: 'Newest vulnerabilities',
+          annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
           inputSchema: {
             type: 'object',
             properties: { name: { type: 'string', description: 'Feed name' } },
@@ -126,6 +127,9 @@ describe('remote-server marketplace flow', () => {
     assert.equal(registered.length, 1)
     assert.equal(registered[0]?.name, 'cve_now_list_feed')
     assert.match(registered[0]?.description ?? '', /cve\.now/)
+    assert.deepEqual(registered[0]?.annotations, {
+      readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true
+    })
 
     const response = await registered[0]?.call({ name: 'critical' }) as { content: Array<{ text: string }> }
     assert.equal(response.content[0]?.text, 'remote:list_feed')

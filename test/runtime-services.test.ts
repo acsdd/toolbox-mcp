@@ -160,7 +160,7 @@ describe('runtime services', () => {
       downloadFileImpl: async (url, target) => {
         downloads.push({ url, target })
         await mkdir(join(home, '.lmstudio', 'models'), { recursive: true })
-        await writeFile(target, 'weights')
+        await writeFile(target, Buffer.alloc(2048))
         return 2048
       }
     })

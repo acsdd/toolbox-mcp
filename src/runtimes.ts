@@ -13,7 +13,8 @@
  */
 import { execFile, spawn } from 'node:child_process'
 import { createWriteStream, existsSync, statSync } from 'node:fs'
-import { mkdir, rename, rm, stat } from 'node:fs/promises'
+import { link, mkdir, rm, stat, statfs } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
@@ -345,7 +346,27 @@ export function runtimeModelsDir(descriptor: RuntimeDescriptor, options: Runtime
   if (!descriptor.modelsDir) return null
   const home = options.homeDir ?? os.homedir()
   const env = options.env ?? process.env
+  if (descriptor.id === 'ollama' && env.OLLAMA_MODELS?.trim()) return expandPath(env.OLLAMA_MODELS, env, home)
   return expandPath(descriptor.modelsDir, env, home)
+}
+
+/** Probe the destination volume, walking up only when a directory does not exist yet. */
+export async function freeDiskBytes(
+  directory: string,
+  inspect: (directory: string) => Promise<{ bsize: number; bavail: number }> = statfs
+): Promise<number | null> {
+  let current = path.resolve(directory)
+  for (;;) {
+    try {
+      const stats = await inspect(current)
+      const free = stats.bsize * stats.bavail
+      return Number.isFinite(free) && free >= 0 ? free : null
+    } catch (cause) {
+      const parent = path.dirname(current)
+      if ((cause as NodeJS.ErrnoException).code !== 'ENOENT' || parent === current) return null
+      current = parent
+    }
+  }
 }
 
 /** A version string out of CLI output, e.g. 'ollama version 0.12.3' -> '0.12.3'. */
@@ -873,14 +894,16 @@ export async function installOllama(options: RuntimeInstallOptions = {}): Promis
 // --- weights for a runtime that cannot pull ----------------------------------
 
 export interface GgufFile {
+  /** Hub identity used to isolate equal filenames from different repositories. */
+  repoId?: string
   filename: string
   url: string
   sizeBytes: number
 }
 
 /**
- * Find the GGUF file for a repo, preferring the requested quant and falling
- * back to the largest one on offer.
+ * Resolve one complete GGUF. Explicit choices never silently fall back;
+ * split GGUFs require a multi-file installer and are refused here.
  */
 export async function resolveGgufFile(
   repoId: string,
@@ -904,9 +927,14 @@ export async function resolveGgufFile(
   if (!files.length) return null
   const sizeOf = (file: (typeof files)[number]): number => Number(file.lfs?.size ?? file.size ?? 0)
   const wanted = quant?.trim().toUpperCase()
-  const exact = wanted ? files.find((file) => parseQuantLabel(file.rfilename) === wanted) : undefined
+  const exact = wanted ? files.find((file) => parseQuantLabel(file.rfilename) === wanted || file.rfilename.toUpperCase() === wanted) : undefined
+  if (wanted && !exact) throw new Error(`Quantization ${quant} is not available in ${repoId}. Choose an available quant.`)
   const chosen = exact ?? files.reduce((a, b) => (sizeOf(a) >= sizeOf(b) ? a : b))
+  if (/-\d{5}-of-\d{5}\.gguf$/i.test(chosen.rfilename)) {
+    throw new Error('Split GGUF downloads are not supported. Choose a single-file GGUF or use the runtime\'s own importer.')
+  }
   return {
+    repoId,
     filename: chosen.rfilename,
     url: `https://huggingface.co/${repoId}/resolve/main/${chosen.rfilename
       .split('/')
@@ -916,19 +944,41 @@ export async function resolveGgufFile(
   }
 }
 
-/** Download a GGUF into a directory, atomically. */
+/** Stable per-repository namespace; never accept path traversal from Hub metadata. */
+export function ggufDirectory(file: GgufFile, directory: string): string {
+  if (!file.repoId) return directory
+  const parts = file.repoId.split('/')
+  if (parts.length !== 2 || parts.some((part) => !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(part))) {
+    throw new Error('Invalid HuggingFace repository identity for the model directory.')
+  }
+  return path.join(directory, ...parts)
+}
+
+/** Publish validated weights without overwriting an existing model; always clean staging. */
 export async function downloadGguf(
   file: GgufFile,
   directory: string,
   options: RuntimeOptions & { download?: DownloadFn; onProgress?: (progress: DownloadProgress) => void } = {}
 ): Promise<{ path: string; bytes: number }> {
   const download = options.download ?? ((url: string, target: string, onProgress?: (p: DownloadProgress) => void) => downloadFile(url, target, options, onProgress))
-  await mkdir(directory, { recursive: true })
-  const target = path.join(directory, path.basename(file.filename))
-  const staging = `${target}.part`
-  const bytes = await download(file.url, staging, options.onProgress)
-  await rename(staging, target)
-  return { path: target, bytes }
+  const destination = ggufDirectory(file, directory)
+  await mkdir(destination, { recursive: true })
+  const target = path.join(destination, path.basename(file.filename))
+  if (existsSync(target)) throw new Error(`Model file already exists: ${target}. It was not replaced.`)
+  const staging = `${target}.${randomUUID()}.part`
+  try {
+    await download(file.url, staging, options.onProgress)
+    const bytes = (await stat(staging)).size
+    if (bytes === 0 || (file.sizeBytes > 0 && bytes !== file.sizeBytes)) {
+      throw new Error(`Downloaded size ${bytes} bytes; expected ${file.sizeBytes > 0 ? file.sizeBytes : 'non-empty weights'}. Model was not installed.`)
+    }
+    // A same-directory hard link atomically claims the name and fails on EEXIST,
+    // unlike rename(), which can silently replace a model installed concurrently.
+    await link(staging, target)
+    return { path: target, bytes }
+  } finally {
+    await rm(staging, { force: true })
+  }
 }
 
 // --- serving a model with the runtime that was found ---------------------------

@@ -238,6 +238,7 @@ describe('llamafarm install', () => {
     const services = createServices({
       fetchImpl: farmFetch(),
       execFileImpl: ollamaExec,
+      freeDiskImpl: async () => 100 * GiB,
       pullModel: async (reference) => {
         pulled.push(reference)
         return { ok: true, code: 0, output: 'success', error: null }
@@ -262,6 +263,7 @@ describe('llamafarm install', () => {
     const services = createServices({
       fetchImpl: farmFetch(),
       execFileImpl: ollamaExec,
+      freeDiskImpl: async () => 100 * GiB,
       pullModel: async () => ({ ok: true, code: 0, output: 'success', error: null })
     })
     await services.init()
@@ -315,6 +317,7 @@ describe('llamafarm install', () => {
     const services = createServices({
       fetchImpl: farmFetch(),
       execFileImpl: ollamaExec,
+      freeDiskImpl: async () => 100 * GiB,
       pullModel: async () => ({ ok: false, code: 1, output: 'pull failed', error: 'ollama exited with code 1' })
     })
     await services.init()
@@ -330,6 +333,7 @@ describe('llamafarm install', () => {
     const services = createServices({
       fetchImpl: farmFetch(),
       execFileImpl: ollamaExec,
+      freeDiskImpl: async () => 100 * GiB,
       runOllama: async (args) => {
         created.push(args)
         return { ok: true, code: 0, output: 'created', error: null }
@@ -357,6 +361,7 @@ describe('llamafarm install', () => {
     const services = createServices({
       fetchImpl: farmFetch(),
       execFileImpl: ollamaExec,
+      freeDiskImpl: async () => 100 * GiB,
       runOllama: async () => ({ ok: true, code: 0, output: 'created', error: null })
     })
     await services.init()
@@ -411,6 +416,7 @@ describe('panel', () => {
     const services = createServices({
       fetchImpl: farmFetch(),
       execFileImpl: gpuExec,
+      freeDiskImpl: async () => 100 * GiB,
       pullModel: async () => ({ ok: true, code: 0, output: 'success', error: null })
     })
     await services.init()
@@ -516,28 +522,41 @@ describe('Model Farm setup panel', () => {
   }
   const setupText = 'Provider: OpenAI-compatible\nBase URL: http://127.0.0.1:11434/v1\nModel: hf.co/Qwen/Model-GGUF:Q4_K_M\nCapability: openai.chat'
 
-  async function clientFor(reply: (init?: RequestInit) => Promise<Response>, writeText: (text: string) => Promise<void>, quants: unknown[] = []) {
+  async function clientFor(reply: (init?: RequestInit) => Promise<Response>, writeText: (text: string) => Promise<void>, quants: unknown[] = [], readReply?: (url: string, init?: RequestInit) => Promise<Response>) {
     const script = await servedPanelScript()
-    // Capture writes at the DOM boundary while executing the real, complete panel script.
-    const element = () => ({
-      innerHTML: '', textContent: '',
+    // Capture writes and scrolling at the DOM boundary while executing the real, complete panel script.
+    const scrollRequests: number[] = []
+    const eventHandlers = new Map<string, Map<string, (event: Record<string, unknown>) => unknown>>()
+    const element = (id = '') => ({
+      innerHTML: '', textContent: '', value: '', scrollLeft: 0, clientWidth: 500,
+      selectionStart: 0, selectionEnd: 0, focused: false,
       classList: { toggle() {}, contains() { return true } },
-      addEventListener() {},
+      addEventListener(name: string, handler: (event: Record<string, unknown>) => unknown) {
+        if (!id) return
+        if (!eventHandlers.has(id)) eventHandlers.set(id, new Map())
+        eventHandlers.get(id)!.set(name, handler)
+      },
+      focus() { this.focused = true },
+      setRangeText(text: string, start: number, end: number) {
+        this.value = this.value.slice(0, start) + text + this.value.slice(end)
+        this.selectionStart = this.selectionEnd = start + text.length
+      },
+      scrollBy(options: { left: number }) { scrollRequests.push(options.left) },
       appendChild(child: { innerHTML: string }) { this.innerHTML += child.innerHTML }
     })
     const elements = new Map<string, ReturnType<typeof element>>()
     const get = (id: string) => {
-      if (!elements.has(id)) elements.set(id, element())
+      if (!elements.has(id)) elements.set(id, element(id))
       return elements.get(id)!
     }
-    const client = runInNewContext(script + '\n;({ mf, mfInstall, mfQuants, mfPickQuant, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
+    const client = runInNewContext(script + '\n;({ mf, rt, mfLoad, mfSearch, mfInstall, mfRemove, mfRunNow, mfQuants, mfPickQuant, mfSetTaskFilter, mfScrollColumns, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
       document: {
         getElementById: get, createElement: element,
         querySelector: get, querySelectorAll: () => []
       },
       navigator: { clipboard: { writeText } },
       fetch: (url: string, init?: RequestInit) => url === '/api/llamafarm/install' ? reply(init)
-        : Promise.resolve(Response.json(url === '/api/llamafarm/quants' ? { quants } : {})),
+        : readReply ? readReply(url, init) : Promise.resolve(Response.json(url === '/api/llamafarm/quants' ? { quants } : {})),
       // Timers are stubbed: the panel polls its activity feed while the
       // overview is visible, and a test has no reason to wait for that.
       setTimeout: () => 0,
@@ -552,7 +571,204 @@ describe('Model Farm setup panel', () => {
         runtimeRamBytes: GiB, downloads: 1, hfUrl: 'https://huggingface.co/' + repo, reason: 'Fits'
       }]
     }] })
-    return { client, markup: () => get('mf-cols').innerHTML, quantNote: () => get('mf-quant-note-' + repo).innerHTML }
+    return { client, markup: () => get('mf-cols').innerHTML, quantNote: () => get('mf-quant-note-' + repo).innerHTML,
+      purposeMarkup: () => get('mf-purpose-filters').innerHTML, scrollRequests,
+      terminalInput: get('term-in'),
+      terminalKeydown: (event: Record<string, unknown>) => eventHandlers.get('term-in')?.get('keydown')?.(event),
+      picksMarkup: () => get('mf-runnow').innerHTML, status: () => get('mf-status').innerHTML }
+  }
+
+  it('filters model columns by purpose and exposes horizontal scroll controls', async () => {
+    const { client, markup, purposeMarkup, scrollRequests } = await clientFor(async () => Response.json(installed), async () => {})
+    const model = (id: string) => ({ id, label: id, formats: ['gguf'], hints: [], verdict: 'green', runtimeRamBytes: GiB, downloads: 1, hfUrl: 'https://huggingface.co/' + id })
+    client.setResult({ total: 3, groups: [
+      { task: 'text-generation', label: 'Text generation', icon: 'T', models: [model('Qwen-Coder')] },
+      { task: 'text-to-image', label: 'Text to image', icon: 'I', models: [model('Stable-Diffusion')] },
+      { task: 'image-to-image', label: 'Image to image', icon: 'E', models: [model('Photo-Editor')] }
+    ] })
+
+    assert.match(purposeMarkup(), /Chat &amp; coding/)
+    assert.match(purposeMarkup(), /Generate artwork/)
+    assert.match(purposeMarkup(), /Edit photos/)
+    client.mfSetTaskFilter('image-to-image')
+    assert.match(markup(), /Photo-Editor/)
+    assert.doesNotMatch(markup(), /Qwen-Coder|Stable-Diffusion/)
+    client.mfSetTaskFilter('')
+    assert.match(markup(), /Qwen-Coder/)
+    assert.match(markup(), /Stable-Diffusion/)
+
+    client.mfScrollColumns(1)
+    assert.equal(scrollRequests.length, 1)
+    assert.ok(scrollRequests[0] > 0)
+  })
+
+  it('keeps focus in the terminal prompt when Tab requests completion', async () => {
+    const { terminalKeydown, terminalInput } = await clientFor(async () => Response.json(installed), async () => {})
+    let prevented = false
+    await terminalKeydown!({ key: 'Tab', shiftKey: false, preventDefault() { prevented = true } })
+
+    assert.equal(prevented, true)
+    assert.equal(terminalInput.focused, true)
+  })
+
+  it('applies and cycles shell completion matches while keeping prompt focus', async () => {
+    const { terminalKeydown, terminalInput } = await clientFor(
+      async () => Response.json(installed), async () => {}, [],
+      async (url) => url === '/api/terminal/complete'
+        ? Response.json({ supported: true, candidates: ['Get-ChildItem', 'Get-ChildItemProperty'], replacementIndex: 0, replacementLength: 7 })
+        : Response.json({})
+    )
+    terminalInput.value = 'Get-Chi'
+    terminalInput.selectionStart = terminalInput.selectionEnd = terminalInput.value.length
+    const key = { key: 'Tab', shiftKey: false, preventDefault() {} }
+
+    await terminalKeydown!(key)
+    assert.equal(terminalInput.value, 'Get-ChildItem')
+    assert.equal(terminalInput.focused, true)
+    await terminalKeydown!(key)
+    assert.equal(terminalInput.value, 'Get-ChildItemProperty')
+    assert.equal(terminalInput.focused, true)
+  })
+
+  it('sends a cursor at the start of the terminal command unchanged', async () => {
+    let request: { line: string; cursor: number } | null = null
+    const { terminalKeydown, terminalInput } = await clientFor(
+      async () => Response.json(installed), async () => {}, [],
+      async (url, init) => {
+        if (url === '/api/terminal/complete') request = JSON.parse(String(init?.body))
+        return Response.json({ supported: true, candidates: ['Get-ChildItem'], replacementIndex: 0, replacementLength: 0 })
+      }
+    )
+    terminalInput.value = 'Get-ChildItem'
+    terminalInput.selectionStart = terminalInput.selectionEnd = 0
+    await terminalKeydown!({ key: 'Tab', shiftKey: false, preventDefault() {} })
+    assert.deepEqual(request, { line: 'Get-ChildItem', cursor: 0 })
+  })
+
+  for (const action of ['install', 'remove']) {
+    for (const view of ['catalog', 'search']) {
+      it(`refreshes ${view} badges and visible run-now picks after ${action}`, async () => {
+        let present = action === 'remove'
+        const model = () => ({ id: repo, label: 'Model', formats: ['gguf'], hints: [], verdict: 'green',
+          runtimeRamBytes: GiB, downloads: 1, hfUrl: 'https://huggingface.co/' + repo, reason: 'Fits',
+          installed: present ? 'model:Q4_K_M' : null })
+        const result = () => ({ total: 1, fetchedAt: 1, ...(view === 'search' ? { query: 'original query' } : {}),
+          machine: { availableRamBytes: 8 * GiB, totalRamBytes: 16 * GiB, cores: 8, gpus: [], freeDiskBytes: 10 * GiB,
+            ollama: { installed: true, models: present ? [{ name: 'model:Q4_K_M' }] : [], error: null } },
+          groups: [{ label: 'Text generation', icon: 'T', models: [model()] }] })
+        const queries: string[] = []
+        const { client, markup, picksMarkup } = await clientFor(async () => {
+          present = true
+          return Response.json(installed)
+        }, async () => {}, [], async (url, init) => {
+          if (url === '/api/llamafarm/remove') {
+            present = false
+            return Response.json({ ok: true, message: 'Removed' })
+          }
+          if (url === '/api/llamafarm/run-now') return Response.json({ picks: [{ label: 'Text generation', model: model() }] })
+          if (url === '/api/llamafarm/search') {
+            queries.push(JSON.parse(String(init?.body)).query)
+            return Response.json(result())
+          }
+          if (url === '/api/llamafarm/score') return Response.json({ ...result(), query: undefined })
+          return Response.json({})
+        })
+        client.setResult(result())
+        client.mf.quants[repo] = { state: 'ok', chosen: 'Q8_0', list: [{ quant: 'Q8_0', sizeBytes: GiB }] }
+        await client.mfRunNow()
+        if (action === 'install') await client.mfInstall(repo)
+        else await client.mfRemove(repo, 'model:Q4_K_M')
+        if (present) {
+          assert.match(markup(), /class="mf-inst"/)
+          assert.match(picksMarkup(), /class="mf-inst"/)
+          assert.match(markup(), /Copy setup/)
+        } else {
+          assert.doesNotMatch(markup(), /class="mf-inst"/)
+          assert.match(picksMarkup(), /needs download/)
+        }
+        assert.equal(client.mf.expanded[repo], true)
+        assert.equal(client.mf.quants[repo].chosen, 'Q8_0')
+        assert.deepEqual(queries, view === 'search' ? ['original query'] : [])
+      })
+    }
+  }
+
+  for (const runtime of ['ollama', 'lmstudio']) {
+    it(`offers removal only for an explicitly owned Ollama model, not ${runtime}`, async () => {
+      let payload: Record<string, unknown> = {}
+      const { client, markup } = await clientFor(async () => Response.json(installed), async () => {}, [], async (url, init) => {
+        if (url === '/api/llamafarm/remove') payload = JSON.parse(String(init?.body))
+        return Response.json({ ok: false, message: 'fixture no-op' })
+      })
+      client.rt.data = { active: runtime, runtimes: [{ id: runtime, label: runtime === 'lmstudio' ? 'LM Studio' : 'Ollama' }] }
+      client.setResult({ total: 1, groups: [{ label: 'Text generation', icon: 'T', models: [{
+        id: repo, label: 'Model', formats: ['gguf'], hints: [], verdict: 'green', downloads: 1,
+        hfUrl: 'https://huggingface.co/' + repo, runtimeRamBytes: GiB, installed: 'local-model', installedRuntime: runtime
+      }] }] })
+      if (runtime === 'ollama') {
+        assert.match(markup(), />Remove from Ollama</)
+        await client.mfRemove(repo, 'local-model', runtime)
+        assert.equal(payload.runtime, 'ollama')
+      } else {
+        assert.doesNotMatch(markup(), /onclick="mfRemove/)
+        assert.match(markup(), /Manage.*LM Studio/i)
+      }
+    })
+  }
+
+  for (const view of ['catalog', 'search']) {
+    it(`keeps the requested ${view} view when an install finishes during navigation`, async () => {
+      let finishInstall!: (response: Response) => void
+      let finishNavigation!: (response: Response) => void
+      const reads: string[] = []
+      const result = (label: string, query?: string) => ({ total: 1, query,
+        machine: { totalRamBytes: 16 * GiB, availableRamBytes: 8 * GiB, cores: 8, gpus: [], ollama: { installed: true, models: [] } },
+        groups: [{ label: 'Text generation', icon: 'T', models: [{ id: repo, label, formats: ['gguf'], hints: [], verdict: 'green', runtimeRamBytes: GiB, downloads: 1, reason: 'Fits' }] }] })
+      const { client, markup } = await clientFor(() => new Promise((resolve) => { finishInstall = resolve }), async () => {}, [], async (url, init) => {
+        if (!url.startsWith('/api/llamafarm/')) return Response.json({})
+        const query = url.endsWith('/search') ? JSON.parse(String(init?.body)).query : undefined
+        reads.push(query ?? 'catalog')
+        if (reads.length === 1) return new Promise((resolve) => { finishNavigation = resolve })
+        return Response.json(result(query === 'old query' ? 'old view' : 'new view', query))
+      })
+      client.setResult(result('old view', 'old query'))
+      const install = client.mfInstall(repo)
+      const navigation = view === 'search' ? client.mfSearch('new query') : client.mfLoad()
+      finishInstall(Response.json(installed))
+      await install
+      finishNavigation(Response.json(result('new view', view === 'search' ? 'new query' : undefined)))
+      await navigation
+      assert.match(markup(), /new view/)
+      assert.doesNotMatch(markup(), /old view/)
+      assert.deepEqual(reads, view === 'search' ? ['new query', 'new query'] : ['catalog', 'catalog'])
+    })
+  }
+
+  for (const view of ['catalog', 'search', 'run-now']) {
+    it(`keeps the newer ${view} refresh when an older response arrives last`, async () => {
+      let release!: (response: Response) => void
+      let reads = 0
+      const response = (label: string) => {
+        const model = { id: repo, label, formats: ['gguf'], hints: [], verdict: 'green', runtimeRamBytes: GiB, reason: 'Fits', downloads: 1, hfUrl: 'https://huggingface.co/' + repo }
+        return Response.json({ total: 1, query: view === 'search' ? 'query' : undefined,
+          machine: { availableRamBytes: 8 * GiB, totalRamBytes: 16 * GiB, cores: 8, gpus: [], ollama: { installed: true, models: [] } },
+          groups: [{ label: 'Text generation', icon: 'T', models: [model] }],
+          picks: [{ label: 'Text generation', model }] })
+      }
+      const { client, markup, picksMarkup } = await clientFor(async () => Response.json(installed), async () => {}, [], async (url) => {
+        if (!url.startsWith('/api/llamafarm/')) return Response.json({})
+        if (++reads === 1) return new Promise((resolve) => { release = resolve })
+        return response('newer result')
+      })
+      const refresh = () => view === 'catalog' ? client.mfLoad() : view === 'search' ? client.mfSearch('query') : client.mfRunNow()
+      const older = refresh()
+      await refresh()
+      release(response('outdated result'))
+      await older
+      const html = view === 'run-now' ? picksMarkup() : markup()
+      assert.match(html, /newer result/)
+      assert.doesNotMatch(html, /outdated result/)
+    })
   }
 
   it('shows successful setup and copies the exact displayed settings', async () => {
@@ -611,6 +827,20 @@ describe('Model Farm setup panel', () => {
     assert.ok(client.mf.progressTimer, 'the other install still needs polling')
     replies.get(other)!(Response.json({ ...installed, repo: other }))
     await second
+    assert.equal(client.mf.progressTimer, null)
+  })
+
+  it('stops progress when an overlapping removal is the last operation to finish', async () => {
+    let finishInstall!: (response: Response) => void
+    let finishRemove!: (response: Response) => void
+    const { client } = await clientFor(() => new Promise((resolve) => { finishInstall = resolve }), async () => {}, [], (url) =>
+      url === '/api/llamafarm/remove' ? new Promise((resolve) => { finishRemove = resolve }) : Promise.resolve(Response.json({})))
+    const install = client.mfInstall(repo)
+    const remove = client.mfRemove('acme/other-GGUF', 'other')
+    finishInstall(Response.json(installed))
+    await install
+    finishRemove(Response.json({ ok: true, message: 'Removed' }))
+    await remove
     assert.equal(client.mf.progressTimer, null)
   })
 
@@ -752,6 +982,79 @@ describe('Model Farm run-now strip', () => {
 })
 
 describe('Model Farm pull progress', () => {
+  async function progressClient(reply: () => Promise<Response>) {
+    const script = await servedPanelScript()
+    const element = () => ({
+      innerHTML: '', textContent: '', classList: { toggle() {}, contains() { return true } },
+      addEventListener() {}, appendChild(child: { innerHTML: string }) { this.innerHTML += child.innerHTML }
+    })
+    const elements = new Map<string, ReturnType<typeof element>>()
+    const get = (id: string) => {
+      if (!elements.has(id)) elements.set(id, element())
+      return elements.get(id)!
+    }
+    let tick!: () => Promise<void>
+    const client = runInNewContext(script + '\n;({ mf, mfStartProgress, mfStopProgress })', {
+      document: { getElementById: get, createElement: element, querySelector: get, querySelectorAll: () => [] },
+      navigator: { clipboard: { writeText: async () => {} } },
+      fetch: (url: string) => url === '/api/llamafarm/progress' ? reply() : Promise.resolve(Response.json({})),
+      setTimeout: () => 0, clearTimeout: () => {},
+      setInterval: (fn: () => Promise<void>) => { tick = fn; return 1 }, clearInterval: () => {}
+    })
+    return { client, tick: () => tick(), markup: () => get('mf-progress').innerHTML }
+  }
+  const progress = (repo: string) => Response.json({ downloads: [
+    { repo, runtime: 'ollama', status: 'downloading', percent: null, receivedBytes: 0, totalBytes: GiB, file: null, error: null, startedAt: 1 }
+  ] })
+
+  for (const restart of [false, true]) {
+    it(`ignores a late progress response after ${restart ? 'restarting' : 'stopping'} polling`, async () => {
+      let release!: (response: Response) => void
+      let calls = 0
+      const { client, tick, markup } = await progressClient(() => ++calls === 1
+        ? new Promise((resolve) => { release = resolve }) : Promise.resolve(progress('new-model')))
+      client.mfStartProgress()
+      const old = tick()
+      client.mfStopProgress()
+      if (restart) {
+        client.mfStartProgress()
+        await tick()
+        assert.match(markup(), /new-model/)
+      }
+      release(progress('old-model'))
+      await old
+      assert.doesNotMatch(markup(), /old-model/)
+      if (!restart) assert.equal(markup(), '')
+    })
+  }
+
+  it('allows only one progress request at a time and resumes after it settles', async () => {
+    let release!: (response: Response) => void
+    let calls = 0
+    const { client, tick } = await progressClient(() => {
+      calls++
+      return calls === 1 ? new Promise((resolve) => { release = resolve }) : Promise.resolve(progress('next'))
+    })
+    client.mfStartProgress()
+    const pending = tick()
+    await tick()
+    assert.equal(calls, 1)
+    release(progress('first'))
+    await pending
+    await tick()
+    assert.equal(calls, 2)
+  })
+
+  it('does not revive a completed local install while another install still polls', async () => {
+    const { client, tick, markup } = await progressClient(async () => progress('finished-model'))
+    client.mf.install['finished-model'] = { state: 'ok' }
+    client.mf.install['other-model'] = { state: 'busy' }
+    client.mfStartProgress()
+    await tick()
+    assert.doesNotMatch(markup(), /finished-model/)
+    assert.ok(client.mf.progressTimer)
+  })
+
   it('renders an indeterminate bar for a byte-less Ollama pull and a percent bar for folder downloads', async () => {
     const script = await servedPanelScript()
     const element = () => ({
