@@ -650,7 +650,7 @@ ${WIDGET_HOST_CSS}
 </div>
 
 <script>
-var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null }
+var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null }
 var lastResult = null
 
 function show(name) {
@@ -658,7 +658,7 @@ function show(name) {
   ;['overview', 'models', 'terminal', 'marketplace', 'gateway', 'settings'].forEach(function (s) {
     document.getElementById('sec-' + s).classList.toggle('hidden', s !== name)
   })
-  if (name === 'models' && !lastResult) mfLoad()
+  if (name === 'models' && !lastResult) mfFirstLoad()
   if (name === 'models' && !rt.data) rtDetect()
   if (name === 'terminal') termAutoStart()
   if (name === 'marketplace' && !mp.data) mpLoad()
@@ -1045,16 +1045,52 @@ function setScenario(sc) {
   mf.scenario = sc
   document.getElementById('sc-now').classList.toggle('on', sc === 'now')
   document.getElementById('sc-total').classList.toggle('on', sc === 'total')
+  mfSavePrefs()
   queueLoad()
 }
 function setRange() {
   mf.min = document.getElementById('f-min').value ? Number(document.getElementById('f-min').value) : null
   mf.max = document.getElementById('f-max').value ? Number(document.getElementById('f-max').value) : null
+  mfSavePrefs()
   queueLoad()
 }
 function setSearch() {
   mf.search = document.getElementById('f-search').value
   queueLoad()
+}
+/* Browsing options (scenario, purpose, size bounds, reds) survive restarts;
+   the search text and the submitted verdict stay per-visit. */
+async function mfFirstLoad() {
+  if (!mf.prefsLoaded) {
+    try {
+      await mfRestorePrefs()
+      mf.prefsLoaded = true
+    } catch (cause) { /* defaults are fine; retry on the next visit */ }
+  }
+  await mfLoad()
+}
+async function mfRestorePrefs() {
+  var res = await fetch('/api/settings')
+  if (!res.ok) throw new Error('settings unavailable')
+  var prefs = (await res.json()).modelFarm || {}
+  mf.scenario = prefs.scenario === 'total' ? 'total' : 'now'
+  document.getElementById('sc-now').classList.toggle('on', mf.scenario === 'now')
+  document.getElementById('sc-total').classList.toggle('on', mf.scenario === 'total')
+  mf.min = typeof prefs.minParams === 'number' ? prefs.minParams : null
+  mf.max = typeof prefs.maxParams === 'number' ? prefs.maxParams : null
+  document.getElementById('f-min').value = mf.min === null ? '' : String(mf.min)
+  document.getElementById('f-max').value = mf.max === null ? '' : String(mf.max)
+  mf.taskFilter = typeof prefs.taskFilter === 'string' ? prefs.taskFilter : ''
+  mf.showReds = prefs.showReds === true
+}
+function mfSavePrefs() {
+  clearTimeout(mf.prefsTimer)
+  mf.prefsTimer = setTimeout(function () {
+    fetch('/api/settings/modelfarm', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenario: mf.scenario, taskFilter: mf.taskFilter, minParams: mf.min, maxParams: mf.max, showReds: mf.showReds })
+    }).catch(function () { /* best effort; browsing must not block on a save */ })
+  }, 400)
 }
 function queueLoad() {
   clearTimeout(mf.timer)
@@ -1083,6 +1119,8 @@ async function mfLoad() {
       return
     }
     lastResult = result
+    // A remembered purpose that no longer exists in the catalog falls back to All.
+    if (mf.taskFilter && !(result.groups || []).some(function (group) { return group.task === mf.taskFilter })) mf.taskFilter = ''
     renderMachine(lastResult.machine, lastResult.machineGrade)
     renderGroups(lastResult)
   } catch (cause) {
@@ -1103,6 +1141,7 @@ async function mfRefresh() {
 }
 function toggleReds() {
   mf.showReds = !mf.showReds
+  mfSavePrefs()
   mfLoad()
 }
 function gradeClass(letter) {
@@ -1311,7 +1350,11 @@ function mfRenderPurposeFilters(result) {
 }
 function mfSetTaskFilter(task) {
   var known = lastResult && lastResult.groups && lastResult.groups.some(function (group) { return group.task === task })
-  mf.taskFilter = task && known ? task : ''
+  var next = task && known ? task : ''
+  if (next !== mf.taskFilter) {
+    mf.taskFilter = next
+    mfSavePrefs()
+  }
   if (lastResult) renderGroups(lastResult)
 }
 function mfScrollColumns(direction) {
@@ -2152,6 +2195,11 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
         if (req.method === 'POST' && url.pathname === '/api/settings/resource') {
           const raw = await readJson<{ diskPath?: unknown; showProcesses?: unknown }>(req)
           send(res, 200, JSON.stringify(await services.resourceSetSettings(raw)))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/settings/modelfarm') {
+          const raw = await readJson<unknown>(req)
+          send(res, 200, JSON.stringify(await services.modelFarmSetPrefs(raw)))
           return
         }
         if (req.method === 'GET' && url.pathname === '/api/widgets_export') {

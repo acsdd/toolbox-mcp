@@ -59,12 +59,25 @@ import {
   type TopProcess,
   type WidgetBundleEntry
 } from '@toolbox/widgets'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
-import { loadCatalogCache, loadSettings, saveCatalogCache, saveSettings, type StoredSettings } from './config.js'
-import { connectRemote, proxiedToolName, type ProxiedTool, type RemoteConnect, type RemoteConnection, type RemoteToolDef } from './remote.js'
+import { DEFAULT_MODEL_FARM_PREFS, loadCatalogCache, loadSettings, sanitizeModelFarmPrefs, saveCatalogCache, saveSettings, type ModelFarmPrefs, type StoredSettings } from './config.js'
+import { createNativeCredentialStore, type CredentialStore } from './credentials.js'
+import {
+  connectRemote,
+  DEFAULT_REMOTE_TIMEOUTS,
+  proxiedToolName,
+  RemoteTimeoutError,
+  withRemoteTimeout,
+  type ProxiedTool,
+  type RemoteConnect,
+  type RemoteConnection,
+  type RemoteTimeouts,
+  type RemoteToolDef
+} from './remote.js'
 import {
   DEFAULT_RUNTIME_ID,
   detectRuntimes,
@@ -107,6 +120,10 @@ const DOWNLOAD_HISTORY_LIMIT = 20
 
 interface ServicesOptions {
   fetchImpl?: FetchLike
+  /** Operating-system credential storage for Gmail App Passwords. */
+  credentialStore?: CredentialStore
+  /** Gmail inbox operation, injectable so credential flows are tested offline. */
+  gmailInboxImpl?: (email: string, password: string) => Promise<GmailCheckResult>
   execFileImpl?: ExecFileLike
   /** Path to the read-only astrlink CLI; defaults to the AstrLink install. */
   gatewayCliPath?: string
@@ -116,6 +133,8 @@ interface ServicesOptions {
   runOllama?: (args: string[]) => Promise<PullResult>
   /** Remote MCP connection factory (injectable for tests). */
   remoteConnect?: RemoteConnect
+  /** Bounded operation deadlines for remote MCP servers. */
+  remoteTimeouts?: Partial<RemoteTimeouts>
   /** Called when a remote server connects and its tools are ready to register. */
   onRemoteTools?: (moduleId: string, tools: ProxiedTool[]) => void
   /** Called when a remote server is uninstalled and its tools must go. */
@@ -319,18 +338,22 @@ export interface PanelSettings {
   watchlist: string[]
   diskPath: string
   showProcesses: boolean
+  modelFarm: ModelFarmPrefs
 }
 
 export function createServices(options: ServicesOptions = {}) {
   const fetchOptions = { userAgent: USER_AGENT, fetchImpl: options.fetchImpl }
+  const credentialStore = options.credentialStore ?? createNativeCredentialStore()
+  const gmailInbox = options.gmailInboxImpl ?? ((email, password) => fetchGmailInbox(email, password))
   const settings: { current: StoredSettings } = {
     current: {
-      version: 1,
+      version: 2,
       cryptoWatchlist: ['bitcoin', 'ethereum', 'solana'],
       gmail: null,
       resource: { showProcesses: true },
       marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] },
-      runtimes: { active: null }
+      runtimes: { active: null },
+      modelFarm: { ...DEFAULT_MODEL_FARM_PREFS }
     }
   }
   const crypto: CryptoState = {
@@ -360,7 +383,16 @@ export function createServices(options: ServicesOptions = {}) {
   let runtimeReport: RuntimeReport | null = null
   /** Folder downloads tracked for the progress surface (point 4). */
   const downloads: FarmDownload[] = []
-  const remotes = new Map<string, { connection: RemoteConnection; tools: RemoteToolDef[] }>()
+  const remotes = new Map<string, { module: MarketplaceModule; connection: RemoteConnection; tools: RemoteToolDef[] }>()
+  const remoteErrors = new Map<string, string>()
+  const remoteConnectOperations = new Map<string, Promise<ProxiedTool[]>>()
+  const remoteRecoveryOperations = new Map<string, Promise<void>>()
+  const remoteTimeouts: RemoteTimeouts = {
+    connectMs: options.remoteTimeouts?.connectMs ?? DEFAULT_REMOTE_TIMEOUTS.connectMs,
+    listMs: options.remoteTimeouts?.listMs ?? DEFAULT_REMOTE_TIMEOUTS.listMs,
+    callMs: options.remoteTimeouts?.callMs ?? DEFAULT_REMOTE_TIMEOUTS.callMs,
+    closeMs: options.remoteTimeouts?.closeMs ?? DEFAULT_REMOTE_TIMEOUTS.closeMs
+  }
   const remoteConnect = options.remoteConnect ?? connectRemote
   const detectOptions = { fetchImpl: options.fetchImpl, execFileImpl: options.execFileImpl }
   const execFileImpl = options.execFileImpl ?? (execFile as unknown as ExecFileLike)
@@ -370,17 +402,47 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   async function init(): Promise<void> {
-    settings.current = await loadSettings()
+    const loaded = await loadSettings()
+    settings.current = loaded.settings
     crypto.watchlist = normalizeWatchlist(settings.current.cryptoWatchlist)
     monitor = createResourceMonitor({ diskPath: settings.current.resource.diskPath })
-    gmail = {
-      configured: Boolean(settings.current.gmail),
-      email: settings.current.gmail?.email ?? '',
-      lastCheck: null,
-      unread: 0,
-      messages: [],
-      error: null
+    gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null }
+
+    if (loaded.legacyGmail) {
+      const ref = loaded.legacyGmail.credentialRef ?? randomUUID()
+      try {
+        await credentialStore.set(ref, loaded.legacyGmail.password)
+        settings.current.gmail = {
+          email: loaded.legacyGmail.email,
+          credentialRef: ref,
+          notifications: loaded.legacyGmail.notifications
+        }
+        await saveSettings(settings.current)
+      } catch {
+        settings.current.gmail = null
+        try {
+          await saveSettings(settings.current)
+        } catch {
+          throw new Error('Unable to remove the legacy Gmail password from settings. Secure migration failed; settings cleanup is required.')
+        }
+        await credentialStore.delete(ref).catch(() => {})
+        gmail.error = 'The legacy Gmail password could not be migrated securely and was removed from settings. Reconnect Gmail to continue.'
+      }
     }
+
+    const account = settings.current.gmail
+    if (account) {
+      gmail.email = account.email
+      try {
+        const password = await credentialStore.get(account.credentialRef)
+        gmail.configured = password !== null
+        gmail.error = password === null ? 'Gmail credentials are missing from secure storage. Reconnect Gmail to continue.' : null
+      } catch {
+        gmail.configured = false
+        gmail.error = 'The operating system credential store is unavailable. Unlock it or reconnect Gmail to continue.'
+      }
+    }
+
     const cached = await loadCatalogCache()
     if (cached) {
       catalog = { models: cached.models.filter(isCatalogModel), fetchedAt: cached.fetchedAt }
@@ -417,11 +479,34 @@ export function createServices(options: ServicesOptions = {}) {
 
   async function gmailConnect(input: unknown): Promise<GmailState> {
     const setup = validateGmailSetup(input)
-    const result = await fetchGmailInbox(setup.email, setup.password).catch((cause) => {
+    const result = await gmailInbox(setup.email, setup.password).catch((cause) => {
       throw new Error(friendlyGmailError(cause))
     })
-    settings.current.gmail = { ...setup, notifications: true }
-    await saveSettings(settings.current)
+    const previousAccount = settings.current.gmail
+    const credentialRef = previousAccount?.credentialRef ?? randomUUID()
+    let previousPassword: string | null = null
+    if (previousAccount) {
+      try {
+        previousPassword = await credentialStore.get(credentialRef)
+      } catch {
+        throw new Error('The operating system credential store is unavailable. Gmail was not connected; unlock the store and try again.')
+      }
+    }
+    await credentialStore.set(credentialRef, setup.password).catch(() => {
+      throw new Error('The operating system credential store is unavailable. Gmail was not connected; unlock the store and try again.')
+    })
+    const nextSettings: StoredSettings = {
+      ...settings.current,
+      gmail: { email: setup.email, credentialRef, notifications: true }
+    }
+    try {
+      await saveSettings(nextSettings)
+    } catch {
+      if (previousPassword === null) await credentialStore.delete(credentialRef).catch(() => {})
+      else await credentialStore.set(credentialRef, previousPassword).catch(() => {})
+      throw new Error('Gmail credentials were stored securely, but settings could not be saved. The connection was not completed.')
+    }
+    settings.current = nextSettings
     gmail = {
       configured: true,
       email: setup.email,
@@ -434,8 +519,18 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   async function gmailDisconnect(): Promise<GmailState> {
-    settings.current.gmail = null
-    await saveSettings(settings.current)
+    const account = settings.current.gmail
+    if (account) {
+      try {
+        await credentialStore.delete(account.credentialRef)
+      } catch {
+        gmail.error = 'The Gmail credential could not be removed from the operating system store. It remains configured.'
+        return gmail
+      }
+    }
+    const nextSettings: StoredSettings = { ...settings.current, gmail: null }
+    await saveSettings(nextSettings)
+    settings.current = nextSettings
     gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null }
     return gmail
   }
@@ -443,11 +538,27 @@ export function createServices(options: ServicesOptions = {}) {
   async function gmailCheck(): Promise<GmailState> {
     const account = settings.current.gmail
     if (!account) {
-      gmail.error = 'Gmail is not connected. Connect with an App Password first.'
+      gmail.configured = false
+      gmail.error ??= 'Gmail is not connected. Connect with an App Password first.'
       return gmail
     }
+
+    let password: string | null
     try {
-      const result = await fetchGmailInbox(account.email, account.password)
+      password = await credentialStore.get(account.credentialRef)
+    } catch {
+      gmail.configured = false
+      gmail.error = 'The operating system credential store is unavailable. Unlock it or reconnect Gmail to continue.'
+      return gmail
+    }
+    if (password === null) {
+      gmail.configured = false
+      gmail.error = 'Gmail credentials are missing from secure storage. Reconnect Gmail to continue.'
+      return gmail
+    }
+
+    try {
+      const result = await gmailInbox(account.email, password)
       gmail = {
         configured: true,
         email: account.email,
@@ -476,8 +587,19 @@ export function createServices(options: ServicesOptions = {}) {
     return {
       watchlist: [...crypto.watchlist],
       diskPath: settings.current.resource.diskPath ?? '',
-      showProcesses: settings.current.resource.showProcesses
+      showProcesses: settings.current.resource.showProcesses,
+      modelFarm: { ...settings.current.modelFarm }
     }
+  }
+
+  /**
+   * Remember the Model Farm browsing options. Input is validated field by
+   * field; unrecognized values fall back to defaults instead of being stored.
+   */
+  async function modelFarmSetPrefs(input: unknown): Promise<PanelSettings> {
+    settings.current.modelFarm = sanitizeModelFarmPrefs(input)
+    await saveSettings(settings.current)
+    return settingsSnapshot()
   }
 
   /**
@@ -551,14 +673,18 @@ export function createServices(options: ServicesOptions = {}) {
           applied.push('resource-monitor')
           break
         }
-        case 'gmail-announcer':
-          // Settings are kept, but the App Password must exist locally.
-          settings.current.gmail = null
-          await saveSettings(settings.current)
+        case 'gmail-announcer': {
+          // Bundle settings never carry credentials; any prior local credential is removed.
+          const previousCredentialRef = settings.current.gmail?.credentialRef
+          const nextSettings: StoredSettings = { ...settings.current, gmail: null }
+          await saveSettings(nextSettings)
+          settings.current = nextSettings
+          if (previousCredentialRef) await credentialStore.delete(previousCredentialRef)
           gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null }
           missingCredentials.push(entry.credentialsRef ?? 'gmail/app-password')
           applied.push('gmail-announcer')
           break
+        }
       }
     }
     return { applied, missingCredentials }
@@ -1288,37 +1414,134 @@ export function createServices(options: ServicesOptions = {}) {
     }
   }
 
-  /** Connect a remote-server module and surface its tools for registration. */
-  async function remoteConnectModule(module: MarketplaceModule): Promise<ProxiedTool[]> {
-    if (!module.endpoint) throw new Error(`"${module.name}" has no endpoint.`)
-    const existing = remotes.get(module.id)
-    if (existing) await existing.connection.close().catch(() => {})
-    const connection = await remoteConnect(module.endpoint)
-    let tools: RemoteToolDef[]
+  async function closeRemoteConnection(module: MarketplaceModule, connection: RemoteConnection): Promise<void> {
     try {
-      tools = await connection.listTools()
+      await withRemoteTimeout(connection.close(), remoteTimeouts.closeMs, `${module.name} close`)
+    } catch {
+      // Closing is best-effort; a deadline prevents cleanup from blocking the server.
+    }
+  }
+
+  async function removeRemoteConnection(moduleId: string): Promise<void> {
+    const existing = remotes.get(moduleId)
+    if (!existing) return
+    remotes.delete(moduleId)
+    options.onRemoteRemoved?.(moduleId)
+    await closeRemoteConnection(existing.module, existing.connection)
+  }
+
+  /** Connect and list with bounded deadlines, sharing concurrent reconnect attempts. */
+  async function remoteConnectModule(module: MarketplaceModule): Promise<ProxiedTool[]> {
+    const pending = remoteConnectOperations.get(module.id)
+    if (pending) return pending
+    const operation = connectRemoteModule(module)
+    remoteConnectOperations.set(module.id, operation)
+    try {
+      return await operation
+    } finally {
+      if (remoteConnectOperations.get(module.id) === operation) remoteConnectOperations.delete(module.id)
+    }
+  }
+
+  async function connectRemoteModule(module: MarketplaceModule): Promise<ProxiedTool[]> {
+    if (!module.endpoint) throw new Error(`"${module.name}" has no endpoint.`)
+    await removeRemoteConnection(module.id)
+
+    const connectionPromise = remoteConnect(module.endpoint)
+    let connectExpired = false
+    // A connect may resolve after the caller timed out. Close that late client
+    // rather than leaking a transport that is no longer registered.
+    void connectionPromise.then((lateConnection) => {
+      if (connectExpired) void closeRemoteConnection(module, lateConnection)
+    }, () => {})
+
+    let connection: RemoteConnection
+    try {
+      connection = await withRemoteTimeout(connectionPromise, remoteTimeouts.connectMs, `${module.name} connect`)
     } catch (cause) {
-      await connection.close().catch(() => {})
+      if (cause instanceof RemoteTimeoutError) connectExpired = true
+      const message = cause instanceof Error ? cause.message : String(cause)
+      remoteErrors.set(module.id, message)
       throw cause
     }
-    remotes.set(module.id, { connection, tools })
+
+    let tools: RemoteToolDef[]
+    try {
+      tools = await withRemoteTimeout(connection.listTools(), remoteTimeouts.listMs, `${module.name} list tools`)
+    } catch (cause) {
+      await closeRemoteConnection(module, connection)
+      const message = cause instanceof Error ? cause.message : String(cause)
+      remoteErrors.set(module.id, message)
+      throw cause
+    }
+
+    remotes.set(module.id, { module, connection, tools })
+    remoteErrors.delete(module.id)
     const proxied: ProxiedTool[] = tools.map((tool) => ({
       name: proxiedToolName(module.id, tool.name),
       description: `[${module.name}] ${tool.description ?? tool.name}`,
       inputSchema: tool.inputSchema,
       annotations: tool.annotations,
-      call: (args) => connection.callTool(tool.name, args)
+      call: (args) => remoteCall(module, tool.name, args)
     }))
     options.onRemoteTools?.(module.id, proxied)
     return proxied
   }
 
+  async function recoverRemote(module: MarketplaceModule): Promise<void> {
+    const pending = remoteRecoveryOperations.get(module.id)
+    if (pending) return pending
+    const operation = (async () => {
+      await removeRemoteConnection(module.id)
+      await remoteConnectModule(module)
+    })()
+    remoteRecoveryOperations.set(module.id, operation)
+    try {
+      await operation
+    } finally {
+      if (remoteRecoveryOperations.get(module.id) === operation) remoteRecoveryOperations.delete(module.id)
+    }
+  }
+
+  async function remoteCall(module: MarketplaceModule, toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    const existing = remotes.get(module.id)
+    if (!existing) {
+      try {
+        await recoverRemote(module)
+      } catch (cause) {
+        const reason = cause instanceof Error ? cause.message : String(cause)
+        remoteErrors.set(module.id, reason)
+        throw new Error(`Remote ${module.name} is unavailable and the request was not sent: ${reason}`)
+      }
+      throw new Error(`Remote ${module.name} reconnected. This request was not sent; retry only after checking that the previous result is safe to repeat.`)
+    }
+
+    try {
+      return await withRemoteTimeout(
+        existing.connection.callTool(toolName, args),
+        remoteTimeouts.callMs,
+        `${module.name} tool ${toolName}`
+      )
+    } catch (cause) {
+      const reason = cause instanceof Error ? cause.message : String(cause)
+      remoteErrors.set(module.id, reason)
+      let recoveryError: string | null = null
+      try {
+        await recoverRemote(module)
+      } catch (reconnectCause) {
+        recoveryError = reconnectCause instanceof Error ? reconnectCause.message : String(reconnectCause)
+        remoteErrors.set(module.id, recoveryError)
+      }
+      const recovery = recoveryError
+        ? `Reconnect failed: ${recoveryError}`
+        : 'The connection has been restored; check remote state before deciding to retry.'
+      throw new Error(`Remote ${module.name} tool "${toolName}" failed: ${reason} The remote may have completed it; the call was not retried. ${recovery}`)
+    }
+  }
+
   async function remoteDisconnectModule(moduleId: string): Promise<void> {
-    const existing = remotes.get(moduleId)
-    if (!existing) return
-    remotes.delete(moduleId)
-    options.onRemoteRemoved?.(moduleId)
-    await existing.connection.close().catch(() => {})
+    await removeRemoteConnection(moduleId)
+    remoteErrors.delete(moduleId)
   }
 
   /** Reconnect installed remote servers after a restart. Failures are reported, not fatal. */
@@ -1333,14 +1556,29 @@ export function createServices(options: ServicesOptions = {}) {
         const tools = await remoteConnectModule(module)
         connected.push({ id, tools: tools.length })
       } catch (cause) {
-        failed.push({ id, error: cause instanceof Error ? cause.message : String(cause) })
+        const error = cause instanceof Error ? cause.message : String(cause)
+        remoteErrors.set(id, error)
+        failed.push({ id, error })
       }
     }
     return { connected, failed }
   }
 
-  function remoteStatus(): Array<{ id: string; tools: number }> {
-    return [...remotes.entries()].map(([id, entry]) => ({ id, tools: entry.tools.length }))
+  function remoteStatus(): Array<{ id: string; tools: number; connected: boolean; error: string | null }> {
+    const ids = new Set([
+      ...settings.current.marketplace.installed.filter((id) => registry?.modules.some((module) => module.id === id && module.type === 'remote-server')),
+      ...remotes.keys(),
+      ...remoteErrors.keys()
+    ])
+    return [...ids].map((id) => {
+      const entry = remotes.get(id)
+      return {
+        id,
+        tools: entry?.tools.length ?? 0,
+        connected: Boolean(entry),
+        error: entry ? null : (remoteErrors.get(id) ?? 'Remote server is not connected.')
+      }
+    })
   }
 
   /**
@@ -1422,6 +1660,7 @@ export function createServices(options: ServicesOptions = {}) {
     resourceProcesses,
     settingsSnapshot,
     resourceSetSettings,
+    modelFarmSetPrefs,
     llamafarmStatus,
     llamafarmStatusReport,
     llamafarmCatalog,

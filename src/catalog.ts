@@ -328,7 +328,7 @@ const TOOL_SPECS: Omit<ToolSpec, 'annotations'>[] = [
   {
     name: 'remote_status',
     group: 'remote',
-    description: 'Connected remote MCP servers and how many tools each provides.',
+    description: 'Installed remote MCP servers, connection state, tool counts and the latest connection error when unavailable.',
     shape: {}
   },
 

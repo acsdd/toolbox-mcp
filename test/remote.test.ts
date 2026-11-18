@@ -43,6 +43,13 @@ function registryFetch(): FetchLike {
   return (async () => new Response(JSON.stringify(REGISTRY), { status: 200 })) as FetchLike
 }
 
+function waitAtMost<T>(promise: Promise<T>, ms = 300): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('test harness deadline')), ms))
+  ])
+}
+
 function fakeConnect(log: { closed: number; calls: Array<{ name: string; args: unknown }> }): RemoteConnect {
   return async (endpoint) => {
     assert.equal(endpoint, 'https://mcp.cve.now/mcp')
@@ -134,7 +141,7 @@ describe('remote-server marketplace flow', () => {
     const response = await registered[0]?.call({ name: 'critical' }) as { content: Array<{ text: string }> }
     assert.equal(response.content[0]?.text, 'remote:list_feed')
     assert.deepEqual(log.calls, [{ name: 'list_feed', args: { name: 'critical' } }])
-    assert.deepEqual(services.remoteStatus(), [{ id: 'cve-now', tools: 1 }])
+    assert.deepEqual(services.remoteStatus(), [{ id: 'cve-now', tools: 1, connected: true, error: null }])
   })
 
   it('uninstall closes the connection and removes the tools', async () => {
@@ -187,6 +194,7 @@ describe('remote-server marketplace flow', () => {
     assert.equal(failedRestore.connected.length, 0)
     assert.equal(failedRestore.failed[0]?.id, 'cve-now')
     assert.match(failedRestore.failed[0]?.error ?? '', /connection refused/)
+    assert.deepEqual(broken.remoteStatus(), [{ id: 'cve-now', tools: 0, connected: false, error: 'connection refused' }])
   })
 
   it('does not mark a remote installed when the connection fails', async () => {
@@ -199,6 +207,87 @@ describe('remote-server marketplace flow', () => {
     await services.init()
     await services.marketplaceUninstall('cve-now') // earlier tests persisted an install
     await assert.rejects(() => services.marketplaceInstall('cve-now'), /handshake failed/)
+    assert.ok(!services.installedWidgets().includes('cve-now'))
+  })
+
+  it('bounds a remote tool call, never replays it, then re-registers after reconnect', async () => {
+    let connects = 0
+    let calls = 0
+    let closed = 0
+    let registrations = 0
+    let registered: ProxiedTool[] = []
+    const services = createServices({
+      fetchImpl: registryFetch(),
+      remoteTimeouts: { connectMs: 100, listMs: 100, callMs: 15, closeMs: 15 },
+      remoteConnect: async () => {
+        const connectionNumber = ++connects
+        return {
+          listTools: async () => [{
+            name: 'write_record', description: 'Create a record',
+            annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+            inputSchema: { type: 'object', properties: {}, required: [] }
+          }],
+          callTool: async () => {
+            calls++
+            if (connectionNumber === 1) return new Promise(() => {})
+            return { content: [{ type: 'text', text: 'created' }] }
+          },
+          close: async () => { closed++ }
+        }
+      },
+      onRemoteTools: (_id, tools) => { registrations++; registered = tools }
+    })
+    await services.init()
+    await services.marketplaceUninstall('cve-now')
+    await services.marketplaceInstall('cve-now')
+
+    await assert.rejects(() => waitAtMost(registered[0]!.call({ value: 'once' })), /may have completed.*not retried/i)
+    assert.equal(calls, 1)
+    assert.equal(connects, 2)
+    assert.equal(closed, 1)
+    assert.equal(registrations, 2)
+    assert.deepEqual(services.remoteStatus(), [{ id: 'cve-now', tools: 1, connected: true, error: null }])
+
+    const response = await registered[0]!.call({ value: 'retry only after human decision' }) as { content: Array<{ text: string }> }
+    assert.equal(response.content[0]?.text, 'created')
+    assert.equal(calls, 2)
+  })
+
+  it('bounds remote tool-listing and closes a partially connected client', async () => {
+    let closed = 0
+    const services = createServices({
+      fetchImpl: registryFetch(),
+      remoteTimeouts: { connectMs: 100, listMs: 15, callMs: 100, closeMs: 15 },
+      remoteConnect: async () => ({
+        listTools: async () => new Promise(() => {}),
+        callTool: async () => ({}),
+        close: async () => { closed++ }
+      })
+    })
+    await services.init()
+    await services.marketplaceUninstall('cve-now')
+
+    await assert.rejects(() => waitAtMost(services.marketplaceInstall('cve-now')), /list tools timed out/i)
+    assert.equal(closed, 1)
+    assert.ok(!services.installedWidgets().includes('cve-now'))
+    assert.deepEqual(services.remoteStatus(), [{ id: 'cve-now', tools: 0, connected: false, error: 'Remote cve.now list tools timed out after 15ms.' }])
+  })
+
+  it('closes a connection that resolves after the connect deadline', async () => {
+    let finishConnect!: (connection: import('../dist/remote.js').RemoteConnection) => void
+    let closed = 0
+    const services = createServices({
+      fetchImpl: registryFetch(),
+      remoteTimeouts: { connectMs: 15, listMs: 100, callMs: 100, closeMs: 15 },
+      remoteConnect: () => new Promise((resolve) => { finishConnect = resolve })
+    })
+    await services.init()
+    await services.marketplaceUninstall('cve-now')
+
+    await assert.rejects(() => waitAtMost(services.marketplaceInstall('cve-now')), /connect timed out/i)
+    finishConnect({ listTools: async () => [], callTool: async () => ({}), close: async () => { closed++ } })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(closed, 1)
     assert.ok(!services.installedWidgets().includes('cve-now'))
   })
 })

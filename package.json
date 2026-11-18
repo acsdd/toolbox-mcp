@@ -43,6 +43,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.0",
+    "@napi-rs/keyring": "^2.1.2",
     "@toolbox/widgets": "file:../toolbox-widgets",
     "zod": "^4.6.7"
   },

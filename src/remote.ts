@@ -34,6 +34,37 @@ export interface RemoteConnection {
 
 export type RemoteConnect = (endpoint: string) => Promise<RemoteConnection>
 
+export interface RemoteTimeouts {
+  connectMs: number
+  listMs: number
+  callMs: number
+  closeMs: number
+}
+
+export const DEFAULT_REMOTE_TIMEOUTS: RemoteTimeouts = {
+  connectMs: 15_000,
+  listMs: 15_000,
+  callMs: 120_000,
+  closeMs: 1_000
+}
+
+export class RemoteTimeoutError extends Error {
+  constructor(readonly operation: string, readonly timeoutMs: number) {
+    super(`Remote ${operation} timed out after ${timeoutMs}ms.`)
+    this.name = 'RemoteTimeoutError'
+  }
+}
+
+export function withRemoteTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new RemoteTimeoutError(label, timeoutMs)), timeoutMs)
+  })
+  return Promise.race([operation, timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
 /** A tool exposed locally on behalf of a remote server. */
 export interface ProxiedTool {
   /** Namespaced local name, e.g. 'cve_now_list_feed'. */
