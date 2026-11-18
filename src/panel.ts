@@ -254,6 +254,13 @@ ${WIDGET_HOST_CSS}
   .chip b { color: var(--text); font-size: .8125rem; font-weight: 500; }
   .chip b em { color: var(--green); font-style: normal; }
 
+  .mf-recent { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 16px; }
+  .mf-recent-title { color: var(--dim); font-size: .5625rem; letter-spacing: .06em; text-transform: uppercase; margin-right: 2px; }
+  .mf-recent-chip { display: flex; flex-direction: column; gap: 2px; padding: 7px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel2); cursor: pointer; text-align: left; font: inherit; }
+  .mf-recent-chip:hover { border-color: var(--green); }
+  .mf-recent-chip b { color: var(--text); font-size: .75rem; font-weight: 500; }
+  .mf-recent-chip em { color: var(--dim); font-style: normal; font-size: .625rem; }
+
   .rt-card { margin: 0 0 18px; padding: 16px 18px; }
   .rt-card h2 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 6px; font-size: .75rem; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
   .rt-card h2 em { font-style: normal; font-size: .625rem; color: var(--dim); text-transform: none; letter-spacing: 0; }
@@ -542,6 +549,7 @@ ${WIDGET_HOST_CSS}
         <div class="mf-status" id="mf-status">warming up…</div>
       </div>
       <div class="machine" id="mf-machine"></div>
+      <div class="mf-recent hidden" id="mf-recent" aria-label="Recently installed models"></div>
       <div class="card rt-card" id="rt-card">
         <h2>Local runtimes <em id="rt-meta">detecting…</em></h2>
         <p class="rt-intro">Ollama is not the only local runtime. These are the ones found on this machine — pick one and the Model Farm installs into it.</p>
@@ -650,7 +658,7 @@ ${WIDGET_HOST_CSS}
 </div>
 
 <script>
-var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null }
+var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [] }
 var lastResult = null
 
 function show(name) {
@@ -1067,6 +1075,7 @@ async function mfFirstLoad() {
       mf.prefsLoaded = true
     } catch (cause) { /* defaults are fine; retry on the next visit */ }
   }
+  mfLoadRecent()
   await mfLoad()
 }
 async function mfRestorePrefs() {
@@ -1091,6 +1100,41 @@ function mfSavePrefs() {
       body: JSON.stringify({ scenario: mf.scenario, taskFilter: mf.taskFilter, minParams: mf.min, maxParams: mf.max, showReds: mf.showReds })
     }).catch(function () { /* best effort; browsing must not block on a save */ })
   }, 400)
+}
+function mfAgo(ts) {
+  var seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000))
+  if (seconds < 60) return 'just now'
+  var minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return minutes + 'm ago'
+  var hours = Math.floor(minutes / 60)
+  if (hours < 24) return hours + 'h ago'
+  var days = Math.floor(hours / 24)
+  if (days < 30) return days + 'd ago'
+  return new Date(ts).toLocaleDateString()
+}
+async function mfLoadRecent() {
+  var box = document.getElementById('mf-recent')
+  try {
+    var res = await fetch('/api/settings')
+    if (!res.ok) throw new Error('settings unavailable')
+    var history = (await res.json()).modelInstalls || []
+    mf.recent = history
+    if (!history.length) { box.innerHTML = ''; box.classList.add('hidden'); return }
+    box.classList.remove('hidden')
+    box.innerHTML = '<span class="mf-recent-title">Recently installed</span>' + history.map(function (entry, index) {
+      return '<button type="button" class="mf-recent-chip" onclick="mfRecentJump(' + index + ')" title="' + esc(entry.repo) + ' — search again">' +
+        '<b>' + esc(entry.label) + '</b><em>' + mfAgo(entry.installedAt) + (entry.runtime ? ' · ' + esc(entry.runtime) : '') + '</em></button>'
+    }).join('')
+  } catch (cause) {
+    box.innerHTML = ''
+    box.classList.add('hidden')
+  }
+}
+function mfRecentJump(index) {
+  var entry = mf.recent && mf.recent[index]
+  if (!entry) return
+  document.getElementById('f-search').value = entry.repo
+  mfSearch()
 }
 function queueLoad() {
   clearTimeout(mf.timer)
@@ -1490,6 +1534,7 @@ async function mfRefreshInstalled() {
   } catch (cause) {
     document.getElementById('mf-status').innerHTML = '<span class="err">Model changed, but the list could not refresh. Try Refresh.</span>'
   }
+  await mfLoadRecent()
   if (mf.runNowShown) await mfRunNow()
 }
 

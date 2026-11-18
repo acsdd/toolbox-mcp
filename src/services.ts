@@ -64,7 +64,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
-import { DEFAULT_MODEL_FARM_PREFS, cleanStaleTempFiles, loadCatalogCache, loadSettings, sanitizeModelFarmPrefs, saveCatalogCache, saveSettings, type ModelFarmPrefs, type StoredSettings } from './config.js'
+import { DEFAULT_MODEL_FARM_PREFS, cleanStaleTempFiles, loadCatalogCache, loadSettings, recordModelInstall, sanitizeModelFarmPrefs, saveCatalogCache, saveSettings, type ModelFarmPrefs, type ModelInstallRecord, type StoredSettings } from './config.js'
 import { createNativeCredentialStore, type CredentialStore } from './credentials.js'
 import {
   connectRemote,
@@ -339,6 +339,7 @@ export interface PanelSettings {
   diskPath: string
   showProcesses: boolean
   modelFarm: ModelFarmPrefs
+  modelInstalls: ModelInstallRecord[]
 }
 
 export function createServices(options: ServicesOptions = {}) {
@@ -353,7 +354,8 @@ export function createServices(options: ServicesOptions = {}) {
       resource: { showProcesses: true },
       marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] },
       runtimes: { active: null },
-      modelFarm: { ...DEFAULT_MODEL_FARM_PREFS }
+      modelFarm: { ...DEFAULT_MODEL_FARM_PREFS },
+      modelInstalls: []
     }
   }
   const crypto: CryptoState = {
@@ -589,7 +591,8 @@ export function createServices(options: ServicesOptions = {}) {
       watchlist: [...crypto.watchlist],
       diskPath: settings.current.resource.diskPath ?? '',
       showProcesses: settings.current.resource.showProcesses,
-      modelFarm: { ...settings.current.modelFarm }
+      modelFarm: { ...settings.current.modelFarm },
+      modelInstalls: settings.current.modelInstalls.map((entry) => ({ ...entry }))
     }
   }
 
@@ -601,6 +604,24 @@ export function createServices(options: ServicesOptions = {}) {
     settings.current.modelFarm = sanitizeModelFarmPrefs(input)
     await saveSettings(settings.current)
     return settingsSnapshot()
+  }
+
+  /**
+   * Remember a successful install for the panel's recently-installed strip.
+   * Failed installs return untouched; the history is capped and deduplicated
+   * by the storage layer, so reinstalling a model just moves it to the front.
+   */
+  async function recordInstall(result: LlamafarmInstallResult): Promise<LlamafarmInstallResult> {
+    if (result.ok) {
+      settings.current.modelInstalls = recordModelInstall(settings.current.modelInstalls, {
+        repo: result.repo,
+        label: result.modelName ?? result.repo,
+        runtime: result.runtime.id,
+        installedAt: Date.now()
+      })
+      await saveSettings(settings.current)
+    }
+    return result
   }
 
   /**
@@ -1113,7 +1134,7 @@ export function createServices(options: ServicesOptions = {}) {
     // Byte counts remain unknown: Ollama may have reused already-cached layers.
     invalidateModelState()
 
-    return {
+    return recordInstall({
       ok: true,
       repo: model.id,
       reference: plan.reference,
@@ -1129,7 +1150,7 @@ export function createServices(options: ServicesOptions = {}) {
         model: installedModel,
         capability: 'openai.chat'
       }
-    }
+    })
   }
 
   /**
@@ -1227,7 +1248,7 @@ export function createServices(options: ServicesOptions = {}) {
     const openaiBase = baseUrl ? providerBaseUrl({ api: descriptor.api, baseUrl }) : null
     invalidateModelState()
 
-    return {
+    return recordInstall({
       ok: true,
       repo: model.id,
       reference: null,
@@ -1241,7 +1262,7 @@ export function createServices(options: ServicesOptions = {}) {
       astrlink: openaiBase
         ? { baseUrl: openaiBase, model: modelName, capability: 'openai.chat' }
         : null
-    }
+    })
   }
 
   // --- local runtimes ---------------------------------------------------------

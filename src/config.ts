@@ -55,6 +55,51 @@ export function sanitizeModelFarmPrefs(raw: unknown): ModelFarmPrefs {
   }
 }
 
+/** One successful Model Farm install, as remembered for the panel's recent strip. */
+export interface ModelInstallRecord {
+  repo: string
+  label: string
+  runtime: string
+  installedAt: number
+}
+
+export const MAX_INSTALL_HISTORY = 12
+const INSTALL_REPO_MAX_LENGTH = 200
+const INSTALL_LABEL_MAX_LENGTH = 120
+const INSTALL_RUNTIME_MAX_LENGTH = 60
+
+/**
+ * Validate stored install history: drop malformed entries, deduplicate by
+ * repo+runtime keeping the newest, order newest-first and cap the list so
+ * settings cannot grow without bound.
+ */
+export function sanitizeModelInstalls(raw: unknown): ModelInstallRecord[] {
+  if (!Array.isArray(raw)) return []
+  const byKey = new Map<string, ModelInstallRecord>()
+  for (const entry of raw) {
+    const doc = (entry ?? {}) as { repo?: unknown; label?: unknown; runtime?: unknown; installedAt?: unknown }
+    if (typeof doc.repo !== 'string') continue
+    const repo = doc.repo.trim()
+    if (!repo || repo.length > INSTALL_REPO_MAX_LENGTH) continue
+    if (typeof doc.installedAt !== 'number' || !Number.isFinite(doc.installedAt) || doc.installedAt <= 0) continue
+    const label =
+      typeof doc.label === 'string' && doc.label.trim()
+        ? doc.label.trim().slice(0, INSTALL_LABEL_MAX_LENGTH)
+        : repo
+    const runtime = typeof doc.runtime === 'string' ? doc.runtime.trim().slice(0, INSTALL_RUNTIME_MAX_LENGTH) : ''
+    const record: ModelInstallRecord = { repo, label, runtime, installedAt: Math.floor(doc.installedAt) }
+    const key = `${repo}\u0000${runtime}`
+    const current = byKey.get(key)
+    if (!current || record.installedAt > current.installedAt) byKey.set(key, record)
+  }
+  return [...byKey.values()].sort((a, b) => b.installedAt - a.installedAt).slice(0, MAX_INSTALL_HISTORY)
+}
+
+/** Record a fresh install; reinstalling the same repo moves it to the front. */
+export function recordModelInstall(history: ModelInstallRecord[], record: ModelInstallRecord): ModelInstallRecord[] {
+  return sanitizeModelInstalls([record, ...history])
+}
+
 export interface StoredSettings {
   version: 2
   cryptoWatchlist: string[]
@@ -64,6 +109,7 @@ export interface StoredSettings {
   /** The local model runtime the Model Farm installs into; null means Ollama. */
   runtimes: { active: string | null }
   modelFarm: ModelFarmPrefs
+  modelInstalls: ModelInstallRecord[]
 }
 
 export interface LegacyGmailSettings {
@@ -85,7 +131,8 @@ const DEFAULTS: StoredSettings = {
   resource: { showProcesses: true },
   marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] },
   runtimes: { active: null },
-  modelFarm: { ...DEFAULT_MODEL_FARM_PREFS }
+  modelFarm: { ...DEFAULT_MODEL_FARM_PREFS },
+  modelInstalls: []
 }
 
 export function configDir(): string {
@@ -105,6 +152,7 @@ export async function loadSettings(): Promise<LoadedSettings> {
       marketplace?: { installed?: unknown }
       runtimes?: { active?: unknown }
       modelFarm?: unknown
+      modelInstalls?: unknown
     }
     const rawGmail = raw.gmail
     const legacyGmail = rawGmail && typeof rawGmail.email === 'string' && typeof rawGmail.password === 'string'
@@ -138,7 +186,8 @@ export async function loadSettings(): Promise<LoadedSettings> {
       runtimes: {
         active: typeof raw.runtimes?.active === 'string' ? raw.runtimes.active : null
       },
-      modelFarm: sanitizeModelFarmPrefs(raw.modelFarm)
+      modelFarm: sanitizeModelFarmPrefs(raw.modelFarm),
+      modelInstalls: sanitizeModelInstalls(raw.modelInstalls)
     }
     return { settings, legacyGmail }
   } catch (cause) {

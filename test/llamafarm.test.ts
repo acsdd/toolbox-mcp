@@ -530,7 +530,7 @@ describe('Model Farm setup panel', () => {
     const element = (id = '') => ({
       innerHTML: '', textContent: '', value: '', scrollLeft: 0, clientWidth: 500,
       selectionStart: 0, selectionEnd: 0, focused: false,
-      classList: { toggle() {}, contains() { return true } },
+      classList: { toggle() {}, contains() { return true }, add() {}, remove() {} },
       addEventListener(name: string, handler: (event: Record<string, unknown>) => unknown) {
         if (!id) return
         if (!eventHandlers.has(id)) eventHandlers.set(id, new Map())
@@ -945,7 +945,7 @@ describe('Model Farm run-now strip', () => {
     const script = await servedPanelScript()
     const element = () => ({
       innerHTML: '', textContent: '',
-      classList: { toggle() {}, contains() { return true } },
+      classList: { toggle() {}, contains() { return true }, add() {}, remove() {} },
       addEventListener() {},
       appendChild(child: { innerHTML: string }) { this.innerHTML += child.innerHTML }
     })
@@ -985,7 +985,7 @@ describe('Model Farm pull progress', () => {
   async function progressClient(reply: () => Promise<Response>) {
     const script = await servedPanelScript()
     const element = () => ({
-      innerHTML: '', textContent: '', classList: { toggle() {}, contains() { return true } },
+      innerHTML: '', textContent: '', classList: { toggle() {}, contains() { return true }, add() {}, remove() {} },
       addEventListener() {}, appendChild(child: { innerHTML: string }) { this.innerHTML += child.innerHTML }
     })
     const elements = new Map<string, ReturnType<typeof element>>()
@@ -1059,7 +1059,7 @@ describe('Model Farm pull progress', () => {
     const script = await servedPanelScript()
     const element = () => ({
       innerHTML: '', textContent: '',
-      classList: { toggle() {}, contains() { return true } },
+      classList: { toggle() {}, contains() { return true }, add() {}, remove() {} },
       addEventListener() {},
       appendChild(child: { innerHTML: string }) { this.innerHTML += child.innerHTML }
     })
