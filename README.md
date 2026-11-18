@@ -26,6 +26,7 @@ Part of the Toolbox family:
 | `llamafarm_status` / `llamafarm_catalog` / `llamafarm_score` / `llamafarm_refresh` | Model Farm: HuggingFace catalog fit-scored against this machine; `status` also returns a 0–100 PC scorecard |
 | `llamafarm_grade` | Rate this PC 0–100, and grade one model against it (weakest-link weighted) when a repo is given |
 | `llamafarm_install` | Pull a catalog model into the local runtime (Ollama by default, or the runtime you picked) |
+| `llamafarm_notes` / `llamafarm_note` | Read or save the free-form note kept per model repo (why you kept it, which quant fits); the panel shows it in the model detail |
 | `runtimes_detect` / `runtimes_install` / `runtimes_use` / `runtimes_models` / `runtimes_download` | Local model runtimes: find Ollama, LM Studio, llama.cpp, Jan, GPT4All, KoboldCpp, LocalAI, vLLM, llamafile and text-generation-webui, install Ollama, and choose which one the Model Farm installs into |
 | `marketplace_list` / `marketplace_install` / `marketplace_uninstall` | Live module marketplace (public registry, installs via the bundle validator) |
 | `remote_status` | Connected remote MCP servers and their tool counts |
@@ -87,6 +88,14 @@ model to AstrLink.
   not an import file: no credentials are included and nothing is configured in
   AstrLink automatically. Failed installs offer no setup. The same success-only
   settings are returned in the `astrlink` field of `llamafarm_install`.
+  A **Recently installed** strip above the list remembers successful installs
+  (model, runtime, how long ago); clicking a chip searches that repo again.
+  Installs started elsewhere — through an MCP tool while the panel is open —
+  show their download progress in the panel and refresh the list and the strip
+  when they finish. Each expanded model also carries a free-form **Note**
+  (why you kept it, which quant fits, observed speed), stored locally in
+  settings and shared with the `llamafarm_note` / `llamafarm_notes` tools;
+  an unsaved draft survives list refreshes until you save it.
 - **Local runtimes** — Ollama is not the only local runtime. This card scans
   the machine for **Ollama, LM Studio, llama.cpp, Jan, GPT4All, KoboldCpp,
   LocalAI, vLLM, llamafile and text-generation-webui**, and reports each one
