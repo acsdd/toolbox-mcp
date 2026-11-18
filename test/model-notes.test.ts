@@ -137,3 +137,22 @@ describe('model notes: service and panel API', () => {
     }
   })
 })
+
+describe('model notes: MCP surface', () => {
+  it('exposes note read/write tools with honest annotations and shapes', async () => {
+    const { TOOL_CATALOG, catalogEntries } = await import('../dist/catalog.js')
+    const read = TOOL_CATALOG.find((tool) => tool.name === 'llamafarm_notes')
+    const write = TOOL_CATALOG.find((tool) => tool.name === 'llamafarm_note')
+    assert.ok(read, 'llamafarm_notes is catalogued')
+    assert.ok(write, 'llamafarm_note is catalogued')
+    assert.equal(read.annotations.readOnlyHint, true)
+    assert.equal(write.annotations.readOnlyHint, false)
+    assert.equal(write.annotations.idempotentHint, true)
+    assert.equal(write.annotations.openWorldHint, false)
+    assert.equal(read.annotations.openWorldHint, false)
+    const params = catalogEntries().find((tool) => tool.name === 'llamafarm_note')?.params
+    assert.deepEqual(params?.map((param) => param.name), ['repo', 'note'])
+    assert.equal(params?.find((param) => param.name === 'repo')?.required, true)
+    assert.equal(params?.find((param) => param.name === 'note')?.required, false)
+  })
+})

@@ -139,6 +139,15 @@ const handlers: Record<string, ToolHandler> = {
     ),
   llamafarm_run_now: async () => json(await services.llamafarmRunNow()),
   llamafarm_progress: async () => json(await services.llamafarmProgress()),
+  llamafarm_notes: async () => json({ notes: (await services.settingsSnapshot()).modelNotes }),
+  llamafarm_note: async (args) => {
+    try {
+      const snapshot = await services.modelFarmSetNote({ repo: args.repo, note: args.note })
+      return json({ ok: true, notes: snapshot.modelNotes })
+    } catch (cause) {
+      return json({ ok: false, error: cause instanceof Error ? cause.message : String(cause) })
+    }
+  },
 
   // local runtimes
   runtimes_detect: async (args) => json(await services.runtimesDetect(args.refresh === true)),

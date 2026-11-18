@@ -57,7 +57,7 @@ const READ_ONLY_TOOLS = new Set([
   'crypto_status', 'crypto_refresh', 'crypto_series', 'gmail_status', 'gmail_check',
   'system_stats', 'system_processes', 'llamafarm_status', 'llamafarm_catalog',
   'llamafarm_score', 'llamafarm_refresh', 'llamafarm_grade', 'llamafarm_search',
-  'llamafarm_quants', 'llamafarm_run_now', 'llamafarm_progress', 'runtimes_detect',
+  'llamafarm_quants', 'llamafarm_run_now', 'llamafarm_progress', 'llamafarm_notes', 'runtimes_detect',
   'runtimes_models', 'gateway_status', 'gateway_requests', 'marketplace_list', 'remote_status',
   'widgets_export'
 ])
@@ -66,7 +66,7 @@ const DESTRUCTIVE_TOOLS = new Set([
 ])
 const IDEMPOTENT_TOOLS = new Set([
   ...READ_ONLY_TOOLS, 'crypto_set_watchlist', 'gmail_disconnect', 'runtimes_use',
-  'marketplace_install', 'marketplace_uninstall'
+  'marketplace_install', 'marketplace_uninstall', 'llamafarm_note'
 ])
 const OPEN_WORLD_TOOLS = new Set([
   'crypto_refresh', 'crypto_set_watchlist', 'crypto_series', 'gmail_check', 'gmail_connect',
@@ -246,6 +246,21 @@ const TOOL_SPECS: Omit<ToolSpec, 'annotations'>[] = [
     group: 'llamafarm',
     description: 'Report tracked folder downloads: status, percent, bytes received/total and the resulting file, newest last.',
     shape: {}
+  },
+  {
+    name: 'llamafarm_notes',
+    group: 'llamafarm',
+    description: 'Read the free-form notes saved per model repo in Model Farm: why a model was kept, which quant fits, observed speed.',
+    shape: {}
+  },
+  {
+    name: 'llamafarm_note',
+    group: 'llamafarm',
+    description: 'Save or delete the note for one model repo; the ops panel shows it in the model detail. An empty or omitted note deletes it.',
+    shape: {
+      repo: z.string().describe('Model repo id, e.g. "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"'),
+      note: z.string().optional().describe('Note text, at most 1000 characters; empty or omitted deletes the note')
+    }
   },
 
   // --- local runtimes --------------------------------------------------------
