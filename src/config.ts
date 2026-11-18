@@ -5,8 +5,9 @@
  * owner-only permissions. Gmail credentials are stored in the operating
  * system credential store; settings contain only a reference.
  */
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 
 /** Browsing options the Model Farm panel remembers across restarts. */
@@ -148,13 +149,43 @@ export async function loadSettings(): Promise<LoadedSettings> {
   }
 }
 
+/**
+ * Write a file atomically: serialize to a unique temp file in the same
+ * directory, flush it to disk, then rename over the target. A crash at any
+ * point leaves either the old complete file or the new complete file — never
+ * a truncated one that the fail-closed loader would reject.
+ */
+async function writeAtomic(target: string, data: string): Promise<void> {
+  const dir = dirname(target)
+  await mkdir(dir, { recursive: true })
+  const tmp = join(dir, `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`)
+  const handle = await open(tmp, 'w', 0o600)
+  try {
+    await handle.writeFile(data, 'utf8')
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+  // Windows can briefly refuse to replace a file another handle has open
+  // (a reader, antivirus, or an indexer); retry the rename a few times.
+  const retryCodes = new Set(['EPERM', 'EACCES', 'EBUSY'])
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(tmp, target)
+      return
+    } catch (cause) {
+      const code = (cause as NodeJS.ErrnoException)?.code
+      if (attempt >= 5 || !code || !retryCodes.has(code)) {
+        await rm(tmp, { force: true }).catch(() => {})
+        throw cause
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)))
+    }
+  }
+}
+
 export async function saveSettings(settings: StoredSettings): Promise<void> {
-  const target = configPath()
-  await mkdir(dirname(target), { recursive: true })
-  await writeFile(target, JSON.stringify(settings, null, 2), {
-    encoding: 'utf8',
-    mode: 0o600
-  })
+  await writeAtomic(configPath(), JSON.stringify(settings, null, 2))
 }
 
 /** On-disk cache for the llamafarm model catalog (HuggingFace data). */
@@ -178,7 +209,25 @@ export async function loadCatalogCache(): Promise<CatalogCache | null> {
 }
 
 export async function saveCatalogCache(cache: CatalogCache): Promise<void> {
-  const target = catalogCachePath()
-  await mkdir(dirname(target), { recursive: true })
-  await writeFile(target, JSON.stringify(cache), { encoding: 'utf8', mode: 0o600 })
+  await writeAtomic(catalogCachePath(), JSON.stringify(cache))
+}
+
+/**
+ * Remove the orphaned temp files a crash between write and rename can leave
+ * in the config dir. Scoped strictly to our own temp naming for the two files
+ * we write atomically, so unrelated user files are never touched.
+ */
+export async function cleanStaleTempFiles(): Promise<void> {
+  let entries: string[]
+  try {
+    entries = await readdir(configDir())
+  } catch {
+    return // no config dir yet — nothing to clean
+  }
+  const stale = entries.filter(
+    (name) =>
+      name.endsWith('.tmp') &&
+      (name.startsWith('.settings.json.') || name.startsWith('.llamafarm-cache.json.'))
+  )
+  await Promise.all(stale.map((name) => rm(join(configDir(), name), { force: true }).catch(() => {})))
 }

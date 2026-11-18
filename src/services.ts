@@ -64,7 +64,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
-import { DEFAULT_MODEL_FARM_PREFS, loadCatalogCache, loadSettings, sanitizeModelFarmPrefs, saveCatalogCache, saveSettings, type ModelFarmPrefs, type StoredSettings } from './config.js'
+import { DEFAULT_MODEL_FARM_PREFS, cleanStaleTempFiles, loadCatalogCache, loadSettings, sanitizeModelFarmPrefs, saveCatalogCache, saveSettings, type ModelFarmPrefs, type StoredSettings } from './config.js'
 import { createNativeCredentialStore, type CredentialStore } from './credentials.js'
 import {
   connectRemote,
@@ -402,6 +402,7 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   async function init(): Promise<void> {
+    await cleanStaleTempFiles()
     const loaded = await loadSettings()
     settings.current = loaded.settings
     crypto.watchlist = normalizeWatchlist(settings.current.cryptoWatchlist)
