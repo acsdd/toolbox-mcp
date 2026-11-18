@@ -549,7 +549,7 @@ describe('Model Farm setup panel', () => {
       if (!elements.has(id)) elements.set(id, element(id))
       return elements.get(id)!
     }
-    const client = runInNewContext(script + '\n;({ mf, rt, show, mfLoad, mfSearch, mfInstall, mfRemove, mfRunNow, mfQuants, mfPickQuant, mfSetTaskFilter, mfScrollColumns, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
+    const client = runInNewContext(script + '\n;({ mf, rt, show, mfLoad, mfSearch, mfInstall, mfRemove, mfRunNow, mfQuants, mfPickQuant, mfSaveNote: typeof mfSaveNote === "function" ? mfSaveNote : null, mfSetTaskFilter, mfScrollColumns, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
       document: {
         getElementById: get, createElement: element,
         querySelector: get, querySelectorAll: () => []
@@ -574,6 +574,7 @@ describe('Model Farm setup panel', () => {
     return { client, markup: () => get('mf-cols').innerHTML, quantNote: () => get('mf-quant-note-' + repo).innerHTML,
       purposeMarkup: () => get('mf-purpose-filters').innerHTML, scrollRequests,
       recentMarkup: () => get('mf-recent').innerHTML,
+      noteInput: (id: string) => get('mf-note-' + id),
       terminalInput: get('term-in'),
       terminalKeydown: (event: Record<string, unknown>) => eventHandlers.get('term-in')?.get('keydown')?.(event),
       picksMarkup: () => get('mf-runnow').innerHTML, status: () => get('mf-status').innerHTML }
@@ -990,6 +991,52 @@ describe('Model Farm setup panel', () => {
     client.show('models')
     await tick(); await tick(); await tick()
     assert.equal(client.mf.progressTimer, null)
+  })
+
+  it('shows a saved note in the model detail and flags the row', async () => {
+    const tick = () => new Promise((resolve) => setImmediate(resolve))
+    const { client, markup } = await clientFor(
+      async () => Response.json({ ok: true }),
+      async () => {},
+      [],
+      async (url) => Response.json(url === '/api/settings' ? { modelInstalls: [], modelNotes: { [repo]: 'fits in VRAM' } } : {})
+    )
+    client.show('models')
+    await tick(); await tick(); await tick()
+    assert.match(markup(), /fits in VRAM/)
+    assert.match(markup(), /mf-note-flag/)
+  })
+
+  it('saves and clears a note through the panel API, updating the row flag', async () => {
+    const tick = () => new Promise((resolve) => setImmediate(resolve))
+    const notes: Record<string, string> = {}
+    let saved: unknown = null
+    const { client, markup, noteInput } = await clientFor(
+      async () => Response.json({ ok: true }),
+      async () => {},
+      [],
+      async (url, init) => {
+        if (url === '/api/settings/model-note') {
+          saved = JSON.parse(String(init?.body))
+          const body = saved as { repo: string; note: string }
+          if (body.note.trim()) notes[body.repo] = body.note.trim()
+          else delete notes[body.repo]
+          return Response.json({ modelNotes: notes })
+        }
+        return Response.json(url === '/api/settings' ? { modelInstalls: [], modelNotes: notes } : {})
+      }
+    )
+    client.show('models')
+    await tick(); await tick(); await tick()
+    noteInput(repo).value = 'new note'
+    await client.mfSaveNote(repo)
+    assert.deepEqual(saved, { repo, note: 'new note' })
+    assert.match(markup(), /new note/)
+    assert.match(markup(), /mf-note-flag/)
+
+    noteInput(repo).value = '   '
+    await client.mfSaveNote(repo)
+    assert.doesNotMatch(markup(), /mf-note-flag/)
   })
 })
 

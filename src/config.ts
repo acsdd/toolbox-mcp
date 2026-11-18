@@ -100,6 +100,31 @@ export function recordModelInstall(history: ModelInstallRecord[], record: ModelI
   return sanitizeModelInstalls([record, ...history])
 }
 
+/** Free-form user notes per model repo, shown in the Model Farm detail view. */
+export const MAX_MODEL_NOTES = 200
+export const NOTE_REPO_MAX_LENGTH = 200
+export const NOTE_MAX_LENGTH = 1000
+
+/**
+ * Validate stored model notes: drop malformed entries, trim and truncate
+ * prose, and cap the count so settings cannot grow without bound. Built
+ * through Object.fromEntries so a repo named "__proto__" stays a plain key.
+ */
+export function sanitizeModelNotes(raw: unknown): Record<string, string> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  const entries: [string, string][] = []
+  for (const [key, value] of Object.entries(raw)) {
+    if (entries.length >= MAX_MODEL_NOTES) break
+    const repo = key.trim()
+    if (!repo || repo.length > NOTE_REPO_MAX_LENGTH) continue
+    if (typeof value !== 'string') continue
+    const note = value.trim().slice(0, NOTE_MAX_LENGTH)
+    if (!note) continue
+    entries.push([repo, note])
+  }
+  return Object.fromEntries(entries)
+}
+
 export interface StoredSettings {
   version: 2
   cryptoWatchlist: string[]
@@ -110,6 +135,7 @@ export interface StoredSettings {
   runtimes: { active: string | null }
   modelFarm: ModelFarmPrefs
   modelInstalls: ModelInstallRecord[]
+  modelNotes: Record<string, string>
 }
 
 export interface LegacyGmailSettings {
@@ -132,7 +158,8 @@ const DEFAULTS: StoredSettings = {
   marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] },
   runtimes: { active: null },
   modelFarm: { ...DEFAULT_MODEL_FARM_PREFS },
-  modelInstalls: []
+  modelInstalls: [],
+  modelNotes: {}
 }
 
 export function configDir(): string {
@@ -153,6 +180,7 @@ export async function loadSettings(): Promise<LoadedSettings> {
       runtimes?: { active?: unknown }
       modelFarm?: unknown
       modelInstalls?: unknown
+      modelNotes?: unknown
     }
     const rawGmail = raw.gmail
     const legacyGmail = rawGmail && typeof rawGmail.email === 'string' && typeof rawGmail.password === 'string'
@@ -187,7 +215,8 @@ export async function loadSettings(): Promise<LoadedSettings> {
         active: typeof raw.runtimes?.active === 'string' ? raw.runtimes.active : null
       },
       modelFarm: sanitizeModelFarmPrefs(raw.modelFarm),
-      modelInstalls: sanitizeModelInstalls(raw.modelInstalls)
+      modelInstalls: sanitizeModelInstalls(raw.modelInstalls),
+      modelNotes: sanitizeModelNotes(raw.modelNotes)
     }
     return { settings, legacyGmail }
   } catch (cause) {

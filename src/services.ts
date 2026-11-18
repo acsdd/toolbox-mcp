@@ -64,7 +64,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
-import { DEFAULT_MODEL_FARM_PREFS, cleanStaleTempFiles, loadCatalogCache, loadSettings, recordModelInstall, sanitizeModelFarmPrefs, saveCatalogCache, saveSettings, type ModelFarmPrefs, type ModelInstallRecord, type StoredSettings } from './config.js'
+import { DEFAULT_MODEL_FARM_PREFS, NOTE_MAX_LENGTH, NOTE_REPO_MAX_LENGTH, cleanStaleTempFiles, loadCatalogCache, loadSettings, recordModelInstall, sanitizeModelFarmPrefs, sanitizeModelNotes, saveCatalogCache, saveSettings, type ModelFarmPrefs, type ModelInstallRecord, type StoredSettings } from './config.js'
 import { createNativeCredentialStore, type CredentialStore } from './credentials.js'
 import {
   connectRemote,
@@ -340,6 +340,7 @@ export interface PanelSettings {
   showProcesses: boolean
   modelFarm: ModelFarmPrefs
   modelInstalls: ModelInstallRecord[]
+  modelNotes: Record<string, string>
 }
 
 export function createServices(options: ServicesOptions = {}) {
@@ -355,7 +356,8 @@ export function createServices(options: ServicesOptions = {}) {
       marketplace: { installed: ['crypto-watch', 'gmail-announcer', 'resource-monitor'] },
       runtimes: { active: null },
       modelFarm: { ...DEFAULT_MODEL_FARM_PREFS },
-      modelInstalls: []
+      modelInstalls: [],
+      modelNotes: {}
     }
   }
   const crypto: CryptoState = {
@@ -592,7 +594,8 @@ export function createServices(options: ServicesOptions = {}) {
       diskPath: settings.current.resource.diskPath ?? '',
       showProcesses: settings.current.resource.showProcesses,
       modelFarm: { ...settings.current.modelFarm },
-      modelInstalls: settings.current.modelInstalls.map((entry) => ({ ...entry }))
+      modelInstalls: settings.current.modelInstalls.map((entry) => ({ ...entry })),
+      modelNotes: { ...settings.current.modelNotes }
     }
   }
 
@@ -602,6 +605,23 @@ export function createServices(options: ServicesOptions = {}) {
    */
   async function modelFarmSetPrefs(input: unknown): Promise<PanelSettings> {
     settings.current.modelFarm = sanitizeModelFarmPrefs(input)
+    await saveSettings(settings.current)
+    return settingsSnapshot()
+  }
+
+  /**
+   * Save or delete the user's note for one model repo. An empty note removes
+   * the entry; the repo must be a non-empty string within the storage limit.
+   */
+  async function modelFarmSetNote(input: unknown): Promise<PanelSettings> {
+    const doc = (input ?? {}) as { repo?: unknown; note?: unknown }
+    const repo = typeof doc.repo === 'string' ? doc.repo.trim() : ''
+    if (!repo || repo.length > NOTE_REPO_MAX_LENGTH) throw new Error('A valid model repo is required.')
+    const note = typeof doc.note === 'string' ? doc.note.trim().slice(0, NOTE_MAX_LENGTH) : ''
+    const next = { ...settings.current.modelNotes }
+    if (note) next[repo] = note
+    else delete next[repo]
+    settings.current.modelNotes = sanitizeModelNotes(next)
     await saveSettings(settings.current)
     return settingsSnapshot()
   }
@@ -1683,6 +1703,7 @@ export function createServices(options: ServicesOptions = {}) {
     settingsSnapshot,
     resourceSetSettings,
     modelFarmSetPrefs,
+    modelFarmSetNote,
     llamafarmStatus,
     llamafarmStatusReport,
     llamafarmCatalog,

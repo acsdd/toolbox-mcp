@@ -322,6 +322,12 @@ ${WIDGET_HOST_CSS}
   .mquants .err { color: #e08b7a; }
   .mquants .fit-ok { color: var(--accent); }
   .mquants .fit-warn { color: var(--yellow); }
+  .mnote { display: grid; gap: 6px; margin: 0 0 10px; font-size: .6875rem; }
+  .mnote label { color: var(--muted); }
+  .mnote textarea { font: inherit; width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 3px; padding: 6px; resize: vertical; }
+  .mnote textarea:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  .mnote .note { color: var(--dim); }
+  .mf-note-flag { color: var(--accent-2); font-style: normal; }
   .mf-runnow { margin: 4px 0 10px; }
   .mf-runnow h3 { margin: 0 0 8px; font-size: .75rem; color: var(--accent); letter-spacing: 0.04em; }
   .mf-runnow .mrow { margin-bottom: 6px; }
@@ -658,7 +664,7 @@ ${WIDGET_HOST_CSS}
 </div>
 
 <script>
-var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [] }
+var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [], notes: {} }
 var lastResult = null
 
 function show(name) {
@@ -1117,14 +1123,19 @@ async function mfLoadRecent() {
   try {
     var res = await fetch('/api/settings')
     if (!res.ok) throw new Error('settings unavailable')
-    var history = (await res.json()).modelInstalls || []
+    var body = await res.json()
+    var history = body.modelInstalls || []
     mf.recent = history
-    if (!history.length) { box.innerHTML = ''; box.classList.add('hidden'); return }
-    box.classList.remove('hidden')
-    box.innerHTML = '<span class="mf-recent-title">Recently installed</span>' + history.map(function (entry, index) {
-      return '<button type="button" class="mf-recent-chip" onclick="mfRecentJump(' + index + ')" title="' + esc(entry.repo) + ' — search again">' +
-        '<b>' + esc(entry.label) + '</b><em>' + mfAgo(entry.installedAt) + (entry.runtime ? ' · ' + esc(entry.runtime) : '') + '</em></button>'
-    }).join('')
+    mf.notes = body.modelNotes || {}
+    if (!history.length) { box.innerHTML = ''; box.classList.add('hidden') }
+    else {
+      box.classList.remove('hidden')
+      box.innerHTML = '<span class="mf-recent-title">Recently installed</span>' + history.map(function (entry, index) {
+        return '<button type="button" class="mf-recent-chip" onclick="mfRecentJump(' + index + ')" title="' + esc(entry.repo) + ' — search again">' +
+          '<b>' + esc(entry.label) + '</b><em>' + mfAgo(entry.installedAt) + (entry.runtime ? ' · ' + esc(entry.runtime) : '') + '</em></button>'
+      }).join('')
+    }
+    if (lastResult) renderGroups(lastResult)
   } catch (cause) {
     box.innerHTML = ''
     box.classList.add('hidden')
@@ -1135,6 +1146,24 @@ function mfRecentJump(index) {
   if (!entry) return
   document.getElementById('f-search').value = entry.repo
   mfSearch()
+}
+async function mfSaveNote(id) {
+  var input = document.getElementById('mf-note-' + id)
+  var note = input ? input.value : ''
+  try {
+    var res = await fetch('/api/settings/model-note', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: id, note: note })
+    })
+    var body = await res.json()
+    if (!res.ok || body.error) throw new Error(body.error || 'save failed')
+    mf.notes = body.modelNotes || {}
+    if (lastResult) renderGroups(lastResult)
+    var status = document.getElementById('mf-note-status-' + id)
+    if (status) status.textContent = 'saved'
+  } catch (cause) {
+    var err = document.getElementById('mf-note-status-' + id)
+    if (err) err.textContent = String(cause && cause.message ? cause.message : cause)
+  }
 }
 function queueLoad() {
   clearTimeout(mf.timer)
@@ -1431,7 +1460,8 @@ function renderGroups(result) {
       var meta = (m.paramsBillions ? m.paramsBillions + 'B' : '?') +
         (m.quantLabel ? ' · ' + esc(m.quantLabel) : '') +
         ' · ' + gb(m.runtimeRamBytes) + ' runtime' +
-        (m.installed ? ' · <em class="mf-inst">installed' + (m.installedRuntime ? ' in ' + esc(rtLabel(m.installedRuntime)) : '') + '</em>' : '')
+        (m.installed ? ' · <em class="mf-inst">installed' + (m.installedRuntime ? ' in ' + esc(rtLabel(m.installedRuntime)) : '') + '</em>' : '') +
+        (mf.notes[m.id] ? ' · <em class="mf-note-flag">note</em>' : '')
       var row = '<button class="mrow v-' + m.verdict + '" onclick="mfToggle(\\'' + esc(m.id) + '\\')">' +
         '<span class="dot"></span><span class="nm"><b>' + esc(m.label) + '</b><small>' + meta + '</small></span>' +
         (m.grade ? '<span class="grade ' + gradeClass(m.grade.letter) + '"><b>' + esc(m.grade.letter) + '</b><small>' + m.grade.score + '</small></span>' : '') +
@@ -1472,10 +1502,14 @@ function renderGroups(result) {
           removeBtn +
           (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '">' + esc(inst.message) + '</span>' : '') +
           '</div>' + quantBlock
+        var noteBlock = '<div class="mnote"><label for="mf-note-' + esc(m.id) + '">Note</label>' +
+          '<textarea id="mf-note-' + esc(m.id) + '" rows="2" maxlength="1000" placeholder="quant that fits, speed, why you kept it…">' + esc(mf.notes[m.id] || '') + '</textarea>' +
+          '<div><button class="btn small" onclick="mfSaveNote(&quot;' + esc(m.id) + '&quot;)">Save note</button> ' +
+          '<span id="mf-note-status-' + esc(m.id) + '" class="note" aria-live="polite"></span></div></div>'
         row += '<div class="mdetail"><p>' + esc(m.reason) + '</p>' +
           renderScorecard(m.grade) +
           (hints ? '<ul>' + hints + '</ul>' : '') +
-          installBlock + renderAstrlinkSetup(m.id, inst) +
+          installBlock + renderAstrlinkSetup(m.id, inst) + noteBlock +
           '<a href="' + esc(m.hfUrl) + '" target="_blank" rel="noopener">huggingface.co ↗</a>' +
           '<div>' + esc(m.id) + ' · ' + m.downloads.toLocaleString() + ' downloads' + (m.license ? ' · ' + esc(m.license) : '') + '</div></div>'
       }
@@ -2266,6 +2300,16 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
         if (req.method === 'POST' && url.pathname === '/api/settings/modelfarm') {
           const raw = await readJson<unknown>(req)
           send(res, 200, JSON.stringify(await services.modelFarmSetPrefs(raw)))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/settings/model-note') {
+          const raw = await readJson<unknown>(req)
+          try {
+            send(res, 200, JSON.stringify(await services.modelFarmSetNote(raw)))
+          } catch (cause) {
+            // The repo validator is the only expected failure here.
+            send(res, 400, JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) }))
+          }
           return
         }
         if (req.method === 'GET' && url.pathname === '/api/widgets_export') {
