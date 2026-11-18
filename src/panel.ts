@@ -664,7 +664,7 @@ ${WIDGET_HOST_CSS}
 </div>
 
 <script>
-var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [], notes: {} }
+var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [], notes: {}, noteDrafts: {} }
 var lastResult = null
 
 function show(name) {
@@ -1157,6 +1157,8 @@ async function mfSaveNote(id) {
     var body = await res.json()
     if (!res.ok || body.error) throw new Error(body.error || 'save failed')
     mf.notes = body.modelNotes || {}
+    delete mf.noteDrafts[id]
+    if (input) input.value = mf.notes[id] || ''
     if (lastResult) renderGroups(lastResult)
     var status = document.getElementById('mf-note-status-' + id)
     if (status) status.textContent = 'saved'
@@ -1437,6 +1439,13 @@ function mfScrollColumns(direction) {
   else list.scrollLeft += direction * distance
 }
 function renderGroups(result) {
+  // Re-renders (refresh, outside download completing) must not wipe a note
+  // the user is still typing: keep anything that differs from the saved note.
+  document.querySelectorAll('textarea.mnote-input').forEach(function (ta) {
+    var id = ta.id.slice('mf-note-'.length)
+    if (ta.value !== (mf.notes[id] || '')) mf.noteDrafts[id] = ta.value
+    else delete mf.noteDrafts[id]
+  })
   mfRenderPurposeFilters(result)
   var status = document.getElementById('mf-status')
   if (result.error) {
@@ -1503,7 +1512,8 @@ function renderGroups(result) {
           (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '">' + esc(inst.message) + '</span>' : '') +
           '</div>' + quantBlock
         var noteBlock = '<div class="mnote"><label for="mf-note-' + esc(m.id) + '">Note</label>' +
-          '<textarea id="mf-note-' + esc(m.id) + '" rows="2" maxlength="1000" placeholder="quant that fits, speed, why you kept it…">' + esc(mf.notes[m.id] || '') + '</textarea>' +
+          '<textarea id="mf-note-' + esc(m.id) + '" class="mnote-input" rows="2" maxlength="1000" placeholder="quant that fits, speed, why you kept it…">' +
+          esc(mf.noteDrafts[m.id] !== undefined ? mf.noteDrafts[m.id] : (mf.notes[m.id] || '')) + '</textarea>' +
           '<div><button class="btn small" onclick="mfSaveNote(&quot;' + esc(m.id) + '&quot;)">Save note</button> ' +
           '<span id="mf-note-status-' + esc(m.id) + '" class="note" aria-live="polite"></span></div></div>'
         row += '<div class="mdetail"><p>' + esc(m.reason) + '</p>' +

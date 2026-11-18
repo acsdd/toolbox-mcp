@@ -528,6 +528,7 @@ describe('Model Farm setup panel', () => {
     const scrollRequests: number[] = []
     const eventHandlers = new Map<string, Map<string, (event: Record<string, unknown>) => unknown>>()
     const element = (id = '') => ({
+      id,
       innerHTML: '', textContent: '', value: '', scrollLeft: 0, clientWidth: 500,
       selectionStart: 0, selectionEnd: 0, focused: false,
       classList: { toggle() {}, contains() { return true }, add() {}, remove() {} },
@@ -552,7 +553,12 @@ describe('Model Farm setup panel', () => {
     const client = runInNewContext(script + '\n;({ mf, rt, show, mfLoad, mfSearch, mfInstall, mfRemove, mfRunNow, mfQuants, mfPickQuant, mfSaveNote: typeof mfSaveNote === "function" ? mfSaveNote : null, mfSetTaskFilter, mfScrollColumns, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
       document: {
         getElementById: get, createElement: element,
-        querySelector: get, querySelectorAll: () => []
+        querySelector: get,
+        querySelectorAll: (selector: string) => selector === 'textarea.mnote-input'
+          ? [...elements.entries()]
+            .filter(([id]) => id.startsWith('mf-note-') && !id.startsWith('mf-note-status-'))
+            .map(([, el]) => el)
+          : []
       },
       navigator: { clipboard: { writeText } },
       fetch: (url: string, init?: RequestInit) => url === '/api/llamafarm/install' ? reply(init)
@@ -1037,6 +1043,35 @@ describe('Model Farm setup panel', () => {
     noteInput(repo).value = '   '
     await client.mfSaveNote(repo)
     assert.doesNotMatch(markup(), /mf-note-flag/)
+  })
+
+  it('keeps an unsaved note draft across list re-renders until it is saved', async () => {
+    const tick = () => new Promise((resolve) => setImmediate(resolve))
+    const { client, markup, noteInput } = await clientFor(
+      async () => Response.json({ ok: true }),
+      async () => {},
+      [],
+      async (url, init) => {
+        if (url === '/api/settings/model-note') {
+          const note = (JSON.parse(String(init?.body)) as { note: string }).note.trim()
+          return Response.json({ modelNotes: note ? { [repo]: note } : {} })
+        }
+        return Response.json(url === '/api/settings' ? { modelInstalls: [], modelNotes: {} } : {})
+      }
+    )
+    client.show('models')
+    await tick(); await tick(); await tick()
+    noteInput(repo).value = 'half-typed thought'
+    // A refresh (or an outside download completing) re-renders the list.
+    client.setResult({ total: 1, fetchedAt: 1, groups: [{ label: 'Text', icon: 'T', models: [{
+      id: repo, label: 'Model', formats: ['gguf'], hints: [], verdict: 'green',
+      runtimeRamBytes: GiB, downloads: 1, hfUrl: 'https://huggingface.co/' + repo, reason: 'Fits'
+    }] }] })
+    assert.match(markup(), /half-typed thought/, 'the draft must survive the re-render')
+
+    await client.mfSaveNote(repo)
+    assert.equal(Object.keys(client.mf.noteDrafts).length, 0, 'saving clears the draft')
+    assert.match(markup(), /half-typed thought/)
   })
 })
 
