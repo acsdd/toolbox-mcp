@@ -666,7 +666,7 @@ function show(name) {
   ;['overview', 'models', 'terminal', 'marketplace', 'gateway', 'settings'].forEach(function (s) {
     document.getElementById('sec-' + s).classList.toggle('hidden', s !== name)
   })
-  if (name === 'models' && !lastResult) mfFirstLoad()
+  if (name === 'models') { if (!lastResult) mfFirstLoad(); else mfLoadRecent() }
   if (name === 'models' && !rt.data) rtDetect()
   if (name === 'terminal') termAutoStart()
   if (name === 'marketplace' && !mp.data) mpLoad()

@@ -549,7 +549,7 @@ describe('Model Farm setup panel', () => {
       if (!elements.has(id)) elements.set(id, element(id))
       return elements.get(id)!
     }
-    const client = runInNewContext(script + '\n;({ mf, rt, mfLoad, mfSearch, mfInstall, mfRemove, mfRunNow, mfQuants, mfPickQuant, mfSetTaskFilter, mfScrollColumns, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
+    const client = runInNewContext(script + '\n;({ mf, rt, show, mfLoad, mfSearch, mfInstall, mfRemove, mfRunNow, mfQuants, mfPickQuant, mfSetTaskFilter, mfScrollColumns, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
       document: {
         getElementById: get, createElement: element,
         querySelector: get, querySelectorAll: () => []
@@ -573,6 +573,7 @@ describe('Model Farm setup panel', () => {
     }] })
     return { client, markup: () => get('mf-cols').innerHTML, quantNote: () => get('mf-quant-note-' + repo).innerHTML,
       purposeMarkup: () => get('mf-purpose-filters').innerHTML, scrollRequests,
+      recentMarkup: () => get('mf-recent').innerHTML,
       terminalInput: get('term-in'),
       terminalKeydown: (event: Record<string, unknown>) => eventHandlers.get('term-in')?.get('keydown')?.(event),
       picksMarkup: () => get('mf-runnow').innerHTML, status: () => get('mf-status').innerHTML }
@@ -937,6 +938,29 @@ describe('Model Farm setup panel', () => {
     client.mfPickQuant(repo, { value: 'Q8_0' })
     await client.mfQuants(repo)
     assert.match(markup(), /<option value="Q8_0" selected>/)
+  })
+  it('refreshes the strip when Model Farm is reopened after an outside install', async () => {
+    const tick = () => new Promise((resolve) => setImmediate(resolve))
+    let history: unknown[] = [{ repo: 'a/one', label: 'one', runtime: 'ollama', installedAt: Date.now() - 60_000 }]
+    const { client, recentMarkup } = await clientFor(
+      async () => Response.json({ ok: true }),
+      async () => {},
+      [],
+      async (url) => Response.json(url === '/api/settings' ? { modelInstalls: history } : {})
+    )
+    client.show('models')
+    await tick(); await tick(); await tick()
+    assert.match(recentMarkup(), /one/)
+    assert.doesNotMatch(recentMarkup(), /two/)
+
+    // An install happened elsewhere (e.g. through an MCP tool); the open panel
+    // must pick it up when the user returns to Model Farm, not only on reload.
+    client.setResult({ total: 1, fetchedAt: 1, groups: [{ label: 'Text', icon: 'T', models: [] }] })
+    history = [...history, { repo: 'a/two', label: 'two', runtime: 'ollama', installedAt: Date.now() }]
+    client.show('overview')
+    client.show('models')
+    await tick(); await tick(); await tick()
+    assert.match(recentMarkup(), /two/)
   })
 })
 
