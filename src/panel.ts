@@ -666,7 +666,7 @@ function show(name) {
   ;['overview', 'models', 'terminal', 'marketplace', 'gateway', 'settings'].forEach(function (s) {
     document.getElementById('sec-' + s).classList.toggle('hidden', s !== name)
   })
-  if (name === 'models') { if (!lastResult) mfFirstLoad(); else mfLoadRecent() }
+  if (name === 'models') { if (!lastResult) mfFirstLoad(); else mfLoadRecent(); mfSyncProgress() }
   if (name === 'models' && !rt.data) rtDetect()
   if (name === 'terminal') termAutoStart()
   if (name === 'marketplace' && !mp.data) mpLoad()
@@ -1629,6 +1629,16 @@ function mfPickQuant(id, select) {
   var note = document.getElementById('mf-quant-note-' + id)
   if (note) note.innerHTML = quantFitNote(quant)
 }
+// Downloads can also start outside the panel (e.g. through an MCP tool);
+// opening Model Farm checks once and adopts any that are still running.
+async function mfSyncProgress() {
+  try {
+    var res = await fetch('/api/llamafarm/progress')
+    var body = await res.json()
+    if (!res.ok) return
+    if ((body.downloads || []).some(function (d) { return d.status === 'downloading' })) mfStartProgress()
+  } catch (cause) { /* best-effort */ }
+}
 function mfStartProgress() {
   if (mf.progressTimer) return
   var generation = mf.progressGeneration = (mf.progressGeneration || 0) + 1
@@ -1645,7 +1655,7 @@ function mfStartProgress() {
         var local = mf.install[d.repo]
         return d.status === 'downloading' && (!local || local.state === 'busy')
       })
-      if (!active.length) { box.innerHTML = ''; return }
+      if (!active.length) { box.innerHTML = ''; mfStopProgress(); return }
       box.innerHTML = active.map(function (d) {
         var indet = d.percent === null || d.percent === undefined
         var pct = indet ? 0 : d.percent

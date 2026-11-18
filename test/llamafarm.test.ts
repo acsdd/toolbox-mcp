@@ -962,6 +962,35 @@ describe('Model Farm setup panel', () => {
     await tick(); await tick(); await tick()
     assert.match(recentMarkup(), /two/)
   })
+
+  it('starts progress polling for downloads begun outside the panel when Model Farm opens', async () => {
+    const tick = () => new Promise((resolve) => setImmediate(resolve))
+    const { client } = await clientFor(
+      async () => Response.json({ ok: true }),
+      async () => {},
+      [],
+      async (url) => Response.json(url === '/api/llamafarm/progress'
+        ? { downloads: [{ repo: 'a/outside', runtime: 'ollama', status: 'downloading', percent: 10, receivedBytes: 1, totalBytes: 10, file: null, error: null, startedAt: 1 }] }
+        : {})
+    )
+    assert.equal(client.mf.progressTimer, null)
+    client.show('models')
+    await tick(); await tick(); await tick()
+    assert.ok(client.mf.progressTimer, 'an outside download should be polled while Model Farm is open')
+  })
+
+  it('does not start progress polling when nothing is downloading', async () => {
+    const tick = () => new Promise((resolve) => setImmediate(resolve))
+    const { client } = await clientFor(
+      async () => Response.json({ ok: true }),
+      async () => {},
+      [],
+      async (url) => Response.json(url === '/api/llamafarm/progress' ? { downloads: [] } : {})
+    )
+    client.show('models')
+    await tick(); await tick(); await tick()
+    assert.equal(client.mf.progressTimer, null)
+  })
 })
 
 describe('Model Farm run-now strip', () => {
@@ -1077,6 +1106,15 @@ describe('Model Farm pull progress', () => {
     await tick()
     assert.doesNotMatch(markup(), /finished-model/)
     assert.ok(client.mf.progressTimer)
+  })
+
+  it('stops polling once downloads finish and no local install is busy', async () => {
+    const { client, tick, markup } = await progressClient(async () => Response.json({ downloads: [] }))
+    client.mfStartProgress()
+    assert.ok(client.mf.progressTimer)
+    await tick()
+    assert.equal(client.mf.progressTimer, null, 'idle polling should stop on its own')
+    assert.equal(markup(), '')
   })
 
   it('renders an indeterminate bar for a byte-less Ollama pull and a percent bar for folder downloads', async () => {
