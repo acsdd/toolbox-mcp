@@ -1643,6 +1643,7 @@ function mfStartProgress() {
   if (mf.progressTimer) return
   var generation = mf.progressGeneration = (mf.progressGeneration || 0) + 1
   var polling = false
+  var shown = []
   mf.progressTimer = setInterval(async function () {
     if (polling || generation !== mf.progressGeneration) return
     polling = true
@@ -1655,7 +1656,17 @@ function mfStartProgress() {
         var local = mf.install[d.repo]
         return d.status === 'downloading' && (!local || local.state === 'busy')
       })
-      if (!active.length) { box.innerHTML = ''; mfStopProgress(); return }
+      if (!active.length) {
+        box.innerHTML = ''
+        // An outside download (no local install entry) just finished: the
+        // list and the recently-installed strip are stale, so refresh them.
+        var outside = shown.some(function (repo) { return !mf.install[repo] })
+        shown = []
+        mfStopProgress()
+        if (outside) mfRefreshInstalled()
+        return
+      }
+      shown = active.map(function (d) { return d.repo })
       box.innerHTML = active.map(function (d) {
         var indet = d.percent === null || d.percent === undefined
         var pct = indet ? 0 : d.percent

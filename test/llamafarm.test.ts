@@ -1047,14 +1047,15 @@ describe('Model Farm pull progress', () => {
       return elements.get(id)!
     }
     let tick!: () => Promise<void>
+    const urls: string[] = []
     const client = runInNewContext(script + '\n;({ mf, mfStartProgress, mfStopProgress })', {
       document: { getElementById: get, createElement: element, querySelector: get, querySelectorAll: () => [] },
       navigator: { clipboard: { writeText: async () => {} } },
-      fetch: (url: string) => url === '/api/llamafarm/progress' ? reply() : Promise.resolve(Response.json({})),
+      fetch: (url: string) => { urls.push(url); return url === '/api/llamafarm/progress' ? reply() : Promise.resolve(Response.json({})) },
       setTimeout: () => 0, clearTimeout: () => {},
       setInterval: (fn: () => Promise<void>) => { tick = fn; return 1 }, clearInterval: () => {}
     })
-    return { client, tick: () => tick(), markup: () => get('mf-progress').innerHTML }
+    return { client, tick: () => tick(), markup: () => get('mf-progress').innerHTML, urls }
   }
   const progress = (repo: string) => Response.json({ downloads: [
     { repo, runtime: 'ollama', status: 'downloading', percent: null, receivedBytes: 0, totalBytes: GiB, file: null, error: null, startedAt: 1 }
@@ -1115,6 +1116,31 @@ describe('Model Farm pull progress', () => {
     await tick()
     assert.equal(client.mf.progressTimer, null, 'idle polling should stop on its own')
     assert.equal(markup(), '')
+  })
+
+  it('refreshes the model surface when an outside download completes', async () => {
+    let calls = 0
+    const { client, tick, urls } = await progressClient(() => ++calls === 1
+      ? progress('a/outside') : Promise.resolve(Response.json({ downloads: [] })))
+    client.mfStartProgress()
+    await tick()
+    assert.ok(client.mf.progressTimer, 'polling continues while the download runs')
+    await tick()
+    assert.equal(client.mf.progressTimer, null)
+    assert.ok(urls.includes('/api/settings'), 'completion should refresh the recently-installed strip')
+  })
+
+  it('leaves the refresh to mfInstall when a panel-initiated download completes', async () => {
+    let calls = 0
+    const { client, tick, urls } = await progressClient(() => ++calls === 1
+      ? progress('a/local') : Promise.resolve(Response.json({ downloads: [] })))
+    client.mf.install['a/local'] = { state: 'busy' }
+    client.mfStartProgress()
+    await tick()
+    client.mf.install['a/local'] = { state: 'ok' }
+    await tick()
+    assert.equal(client.mf.progressTimer, null)
+    assert.ok(!urls.includes('/api/settings'), 'mfInstall already refreshes; no duplicate refresh')
   })
 
   it('renders an indeterminate bar for a byte-less Ollama pull and a percent bar for folder downloads', async () => {
