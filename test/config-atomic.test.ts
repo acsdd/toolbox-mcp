@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -127,10 +127,12 @@ describe('atomic write retries', () => {
     const target = join(home, 'retry.json')
     let attempts = 0
 
-    await writeAtomic(target, 'payload', async (from, to) => {
-      attempts++
-      if (attempts < 4) throw refuseWith('EPERM')
-      await rename(from, to)
+    await writeAtomic(target, 'payload', {
+      renameImpl: async (from, to) => {
+        attempts++
+        if (attempts < 4) throw refuseWith('EPERM')
+        await rename(from, to)
+      }
     })
 
     assert.equal(attempts, 4, 'the refused replace should be retried')
@@ -145,17 +147,38 @@ describe('atomic write retries', () => {
 
     await assert.rejects(
       () =>
-        writeAtomic(target, 'payload', async () => {
-          attempts++
-          throw refuseWith('EPERM')
+        writeAtomic(target, 'payload', {
+          maxAttempts: 3,
+          renameImpl: async () => {
+            attempts++
+            throw refuseWith('EPERM')
+          }
         }),
       /EPERM/
     )
 
-    assert.ok(attempts > 1, 'a refusal should be retried before giving up')
+    assert.equal(attempts, 3, 'the replace should be tried the configured number of times')
     const strays = (await readdir(home)).filter((name) => name.endsWith('.tmp'))
     assert.deepEqual(strays, [], 'the abandoned temp file must be cleaned up')
     assert.equal(existsSync(target), false, 'a failed replace must not leave a half-written target')
+  })
+
+  it('waits out a reader that is holding the settings file open', async () => {
+    const target = join(home, 'locked.json')
+    await writeFile(target, 'old', 'utf8')
+    // Windows refuses to replace a file that any handle still has open, so a
+    // reader looking at the settings at that instant makes the replace fail.
+    const reader = await open(target, 'r')
+    try {
+      const writing = writeAtomic(target, 'new')
+      // The lock outlasts a brief retry budget: the write must still land.
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      await reader.close()
+      await writing
+      assert.equal(await readFile(target, 'utf8'), 'new')
+    } finally {
+      await reader.close().catch(() => {})
+    }
   })
 
   it('does not retry a failure the operating system will not recover from', async () => {
@@ -164,9 +187,11 @@ describe('atomic write retries', () => {
 
     await assert.rejects(
       () =>
-        writeAtomic(target, 'payload', async () => {
-          attempts++
-          throw refuseWith('EXDEV')
+        writeAtomic(target, 'payload', {
+          renameImpl: async () => {
+            attempts++
+            throw refuseWith('EXDEV')
+          }
         }),
       /EXDEV/
     )

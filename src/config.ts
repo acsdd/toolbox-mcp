@@ -229,14 +229,26 @@ export async function loadSettings(): Promise<LoadedSettings> {
 
 /**
  * How many times an atomic replace is retried when the operating system
- * refuses it. Windows hosts (and CI runners) can hold a freshly written file
- * for a moment while antivirus or a reader inspects it, so the write waits
- * out that window instead of failing the save.
+ * refuses it.
+ *
+ * Windows refuses to replace a file that any handle still has open, so a
+ * reader looking at the settings at that instant makes the replace fail with
+ * EPERM. The window is short — a read handle is open for milliseconds — so
+ * the write samples the replace often and gives the lock time to clear
+ * instead of failing the save. The budget spans a few seconds, which covers a
+ * busy machine holding the file open for a long moment.
  */
-export const ATOMIC_WRITE_MAX_ATTEMPTS = 20
+export const ATOMIC_WRITE_MAX_ATTEMPTS = 400
 
 /** Errors that a later attempt can plausibly succeed past. */
 const ATOMIC_WRITE_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
+
+export interface AtomicWriteOptions {
+  /** The replace step; injectable so the retry policy can be exercised. */
+  renameImpl?: (from: string, to: string) => Promise<void>
+  /** How many replace attempts to make before giving up. */
+  maxAttempts?: number
+}
 
 /**
  * Write a file atomically: serialize to a unique temp file in the same
@@ -251,8 +263,10 @@ const ATOMIC_WRITE_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
 export async function writeAtomic(
   target: string,
   data: string,
-  renameImpl: (from: string, to: string) => Promise<void> = rename
+  options: AtomicWriteOptions = {}
 ): Promise<void> {
+  const renameImpl = options.renameImpl ?? rename
+  const maxAttempts = Math.max(1, options.maxAttempts ?? ATOMIC_WRITE_MAX_ATTEMPTS)
   const dir = dirname(target)
   await mkdir(dir, { recursive: true })
   const tmp = join(dir, `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`)
@@ -270,16 +284,16 @@ export async function writeAtomic(
     } catch (cause) {
       const code = (cause as NodeJS.ErrnoException)?.code
       if (
-        attempt >= ATOMIC_WRITE_MAX_ATTEMPTS - 1 ||
+        attempt >= maxAttempts - 1 ||
         !code ||
         !ATOMIC_WRITE_RETRY_CODES.has(code)
       ) {
         await rm(tmp, { force: true }).catch(() => {})
         throw cause
       }
-      // Short, growing pauses: the lock usually clears within a few
-      // milliseconds, and the cap keeps a stuck file from stalling the write.
-      await new Promise((resolve) => setTimeout(resolve, Math.min(100, 10 * 2 ** attempt)))
+      // The lock clears in milliseconds, so the first attempts sample it
+      // tightly; later attempts ease off so a stuck file cannot spin.
+      await new Promise((resolve) => setTimeout(resolve, attempt < 50 ? 2 : 20))
     }
   }
 }
