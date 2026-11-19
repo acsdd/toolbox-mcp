@@ -80,21 +80,36 @@ await writeFile(join(appDir, 'package.json'), JSON.stringify({
     compression: 'maximum',
     directories: { output: buildDir },
     files: ['dist/**/*.js', 'scripts/desktop.cjs', 'package.json'],
-    win: { icon: join(toolchain, 'build/icon.png'), target: [{ target: 'portable', arch: ['x64'] }] },
-    portable: { artifactName: 'ModelFarm-Portable-${version}.${ext}' }
+    win: { icon: join(toolchain, 'build/icon.png'), target: [{ target: 'portable', arch: ['x64'] }, { target: 'nsis', arch: ['x64'] }] },
+    portable: { artifactName: 'ModelFarm-Portable-${version}.${ext}' },
+    nsis: {
+      artifactName: 'ModelFarm-Setup-${version}.${ext}',
+      // An assisted installer: the user picks the folder and can add the
+      // shortcuts instead of a silent one-click install.
+      oneClick: false,
+      perMachine: false,
+      allowToChangeInstallationDirectory: true,
+      createDesktopShortcut: true,
+      createStartMenuShortcut: true
+    }
   }
 }, null, 2))
 
 console.log(`PACKAGE_STAGE=${stage}`)
 run(join(toolchain, 'node_modules/electron-builder/cli.js'), [
-  '--projectDir', appDir, '--win', 'portable', '--x64', '--publish', 'never'
+  '--projectDir', appDir, '--win', 'portable', 'nsis', '--x64', '--publish', 'never'
 ], appDir)
 
 await mkdir(output, { recursive: true })
-const artifactName = `ModelFarm-Portable-${manifest.version}.exe`
-const artifactPath = join(output, artifactName)
-// A rebuild of the same version replaces the previous artifact.
-await rm(artifactPath, { force: true })
-await copyFile(join(buildDir, artifactName), artifactPath)
-console.log(`PORTABLE_EXE=${join(output, artifactName)}`)
+// The portable app and the installer are both first-class release assets.
+for (const artifactName of [
+  `ModelFarm-Portable-${manifest.version}.exe`,
+  `ModelFarm-Setup-${manifest.version}.exe`
+]) {
+  const artifactPath = join(output, artifactName)
+  // A rebuild of the same version replaces the previous artifact.
+  await rm(artifactPath, { force: true })
+  await copyFile(join(buildDir, artifactName), artifactPath)
+  console.log(`ARTIFACT=${artifactPath}`)
+}
 console.log(`UNPACKED_APP=${join(buildDir, 'win-unpacked')}`)

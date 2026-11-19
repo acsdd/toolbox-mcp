@@ -156,6 +156,10 @@ Requires Node.js 22+. The sibling `toolbox-widgets` repo must be checked out nex
 For the complete Windows setup—including Ollama, AstrLink and MCP client
 configuration—see [Set up Toolbox MCP with AstrLink](docs/astrlink-setup.md).
 
+Just want the app and not the server? The Model Farm installer needs no
+Node.js and no administrator rights — see
+[Install Model Farm on Windows](docs/install.md).
+
 ```bash
 git clone https://github.com/acsdd/toolbox-widgets.git
 git clone https://github.com/acsdd/toolbox-mcp.git
@@ -198,18 +202,26 @@ npm run typecheck
 ## Release
 
 This repo ships two things: the MCP server itself (used from a checkout) and
-the **Model Farm** portable app — `dist/ModelFarm-Portable-<version>.exe` —
-which bundles the ops panel and the widget core into one Windows executable.
+the **Model Farm app** — one Windows executable that bundles the ops panel and
+the widget core. Every release carries two builds:
 
-### Build the portable app
+| Artifact | What it is |
+| --- | --- |
+| `dist/ModelFarm-Portable-<version>.exe` | No installer and no registry writes; its data lives in a `ModelFarm-data` folder next to the executable |
+| `dist/ModelFarm-Setup-<version>.exe` | An assisted installer: no administrator rights, you pick the folder, and it can add a Desktop and a Start-menu shortcut |
 
-The portable build borrows the Electron toolchain from the sibling desktop
+Installing, updating, rolling back and uninstalling are described in
+[docs/install.md](docs/install.md).
+
+### Build the app
+
+The build borrows the Electron toolchain from the sibling desktop
 checkout (`../toolbox-desktop`, the `toolbox-desktop` repo), so that checkout has to be
 present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.8.0.exe
+npm run portable      # → dist/ModelFarm-Portable-0.9.0.exe + dist/ModelFarm-Setup-0.9.0.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -217,6 +229,14 @@ packaged `app.asar`:
 
 ```bash
 ../toolbox-desktop/node_modules/.bin/electron scripts/smoke-portable.cjs \
+  <unpacked-app>/resources/app.asar
+```
+
+The terminal evidence in `docs/panel-terminal.png` is regenerated the same
+way — the script also measures the terminal geometry it claims to fix:
+
+```bash
+../toolbox-desktop/node_modules/.bin/electron scripts/capture-terminal.cjs \
   <unpacked-app>/resources/app.asar
 ```
 
@@ -232,10 +252,11 @@ the widget core repo, so **the widget core has to be published first**:
 
 ```bash
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.8.0
+git tag v0.9.0
 git push origin main --tags
-gh release create v0.8.0 dist/ModelFarm-Portable-0.8.0.exe \
-  --title "Model Farm 0.8.0" --notes-file release-notes.md
+gh release create v0.9.0 \
+  dist/ModelFarm-Portable-0.9.0.exe dist/ModelFarm-Setup-0.9.0.exe \
+  --title "Model Farm 0.9.0" --notes-file docs/release-notes-0.9.0.md
 ```
 
 No credential ever lands in this repository: the Gmail App Password is written to
