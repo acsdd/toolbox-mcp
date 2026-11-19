@@ -96,8 +96,8 @@ ${WIDGET_HOST_CSS}
   button { cursor: pointer; }
   button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 
-  /* Widget host: glued stage on the left, vertical tool rail on the RIGHT. */
-  .shell { display: grid; grid-template: 62px 1fr / minmax(0, 1fr) 232px; height: 100vh; }
+  /* Widget host: vertical nav rail on the left, glued stage on the right. */
+  .shell { display: grid; grid-template: 62px 1fr / 232px minmax(0, 1fr); height: 100vh; }
   .topbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 24px; padding: 0 26px; background: rgba(10, 20, 16, .92); border-bottom: 1px solid var(--border-soft); backdrop-filter: blur(8px); }
   .brand { font-size: 1.0625rem; font-weight: 600; letter-spacing: .02em; }
   .brand b { color: var(--accent); font-weight: 600; }
@@ -106,16 +106,16 @@ ${WIDGET_HOST_CSS}
   .badge { padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .625rem; }
   .badge.live { color: var(--accent); border-color: #2a4c34; background: rgba(156, 243, 126, .06); }
 
-  .sidebar { grid-row: 2; grid-column: 2; display: flex; flex-direction: column; gap: 6px; padding: 22px 16px; background: rgba(8, 17, 12, .72); border-left: 1px solid var(--border-soft); }
+  .sidebar { grid-row: 2; grid-column: 1; display: flex; flex-direction: column; gap: 6px; padding: 22px 16px; background: rgba(8, 17, 12, .72); border-right: 1px solid var(--border-soft); }
   .navbtn { display: grid; grid-template-columns: 30px 1fr auto; align-items: center; min-height: 48px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; color: #71847a; text-align: left; transition: background .12s ease, color .12s ease; }
   .navbtn i { font-style: normal; font-size: 1.0625rem; }
   .navbtn small { color: var(--dim); font-size: .5625rem; }
   .navbtn:hover { color: #a4c69f; background: #0f1d16; }
-  .navbtn.active { color: var(--accent); background: linear-gradient(270deg, #16291f, #12211a); box-shadow: inset -2px 0 0 var(--accent), var(--shadow-sm); }
+  .navbtn.active { color: var(--accent); background: linear-gradient(90deg, #16291f, #12211a); box-shadow: inset 2px 0 0 var(--accent), var(--shadow-sm); }
   .sidebar .foot { margin-top: auto; padding: 13px 14px; border: 1px solid var(--border-soft); border-radius: 7px; color: var(--dim); font-size: .5625rem; line-height: 1.9; }
   .sidebar .foot b { color: var(--muted); font-weight: 400; }
 
-  main { grid-column: 1; grid-row: 2; min-width: 0; }
+  main { grid-column: 2; grid-row: 2; min-width: 0; }
   /* The glued host stage comes from the shared pattern; keep panel spacing. */
   main.host-screen { padding: 28px 30px 48px; }
   h1 { margin: 0 0 4px; font-size: 1.5625rem; font-weight: 500; letter-spacing: -.01em; }
@@ -464,6 +464,7 @@ ${WIDGET_HOST_CSS}
   @media (max-width: 860px) {
     .shell { grid-template: 62px 1fr / 1fr; }
     .sidebar { display: none; }
+    main { grid-column: 1; }
     .mf-bar input[type="search"] { width: 100%; }
     main.host-screen { padding: 22px 18px 40px; }
   }

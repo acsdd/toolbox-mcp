@@ -92,17 +92,21 @@ describe('panel widget-host pattern', () => {
     assert.match(reply.body, /\.mode-full > \.player-page/)
   })
 
-  it('puts the vertical tool rail on the right of the glued stage', async () => {
+  it('puts the primary navigation on the left of the stage', async () => {
     const reply = await ask({ path: '/' })
     assert.equal(reply.status, 200)
-    // Stage takes the flexible first column; the rail the fixed second one.
-    assert.match(reply.body, /grid-template: 62px 1fr \/ minmax\(0, 1fr\) 232px/)
-    assert.match(reply.body, /\.sidebar \{ grid-row: 2; grid-column: 2;[^}]*border-left/)
+    // The nav rail takes the fixed first column; the stage the flexible one.
+    assert.match(reply.body, /grid-template: 62px 1fr \/ 232px minmax\(0, 1fr\)/)
+    assert.match(reply.body, /\.sidebar \{ grid-row: 2; grid-column: 1;[^}]*border-right/)
     // The glued stage is the shared host-screen, keeping panel spacing.
     assert.match(reply.body, /<main class="host-screen">/)
     assert.match(reply.body, /main\.host-screen \{ padding: 28px 30px 48px; \}/)
-    // Active nav accent sits on the rail's inner (right) edge.
-    assert.match(reply.body, /inset -2px 0 0 var\(--accent\)/)
+    // Active nav accent sits on the rail's inner (left) edge.
+    assert.match(reply.body, /inset 2px 0 0 var\(--accent\)/)
+    // The stage takes the second column, and falls back to the first when the
+    // narrow layout hides the rail.
+    assert.match(reply.body, /main \{ grid-column: 2; grid-row: 2;/)
+    assert.match(reply.body, /@media \(max-width: 860px\)[\s\S]{0,240}main \{ grid-column: 1; \}/)
   })
 })
 
