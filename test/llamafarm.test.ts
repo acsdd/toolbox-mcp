@@ -10,24 +10,31 @@ import { createServices } from '../dist/services.js'
 const GiB = 2 ** 30
 let home = ''
 let panelScript: Promise<string> | undefined
+let panelPage: Promise<string> | undefined
 
 // Reuse the immutable served script; every test still gets a fresh VM and DOM.
 // Starting a terminal-owning panel for every assertion needlessly adds listeners.
-function servedPanelScript(): Promise<string> {
-  panelScript ??= (async () => {
+function servedPanelPage(): Promise<string> {
+  panelPage ??= (async () => {
     const { startPanel } = await import('../dist/panel.js')
     const services = createServices({ fetchImpl: farmFetch(), execFileImpl: gpuExec })
     await services.init()
     const panel = await startPanel(services, { port: 0 })
     try {
-      const page = await (await fetch(`http://127.0.0.1:${panel.port}/`)).text()
-      const script = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1]
-      assert.ok(script)
-      return script
+      return await (await fetch(`http://127.0.0.1:${panel.port}/`)).text()
     } finally {
       panel.close()
     }
   })()
+  return panelPage
+}
+
+function servedPanelScript(): Promise<string> {
+  panelScript ??= servedPanelPage().then((page) => {
+    const script = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1]
+    assert.ok(script)
+    return script
+  })
   return panelScript
 }
 
@@ -527,9 +534,20 @@ describe('Model Farm setup panel', () => {
     // Capture writes and scrolling at the DOM boundary while executing the real, complete panel script.
     const scrollRequests: number[] = []
     const eventHandlers = new Map<string, Map<string, (event: Record<string, unknown>) => unknown>>()
+    // The terminal output arrives over SSE; the stub lets a test push a chunk.
+    const eventSources: { url: string; onmessage: ((event: { data: string }) => void) | null }[] = []
+    class FakeEventSource {
+      url: string
+      onmessage: ((event: { data: string }) => void) | null = null
+      constructor(url: string) {
+        this.url = url
+        eventSources.push(this)
+      }
+    }
     const element = (id = '') => ({
       id,
       innerHTML: '', textContent: '', value: '', scrollLeft: 0, clientWidth: 500,
+      scrollTop: 0, scrollHeight: 0, clientHeight: 0,
       selectionStart: 0, selectionEnd: 0, focused: false,
       classList: { toggle() {}, contains() { return true }, add() {}, remove() {} },
       addEventListener(name: string, handler: (event: Record<string, unknown>) => unknown) {
@@ -550,7 +568,7 @@ describe('Model Farm setup panel', () => {
       if (!elements.has(id)) elements.set(id, element(id))
       return elements.get(id)!
     }
-    const client = runInNewContext(script + '\n;({ mf, rt, show, mfLoad, mfSearch, mfInstall, mfRemove, mfRunNow, mfQuants, mfPickQuant, mfSaveNote: typeof mfSaveNote === "function" ? mfSaveNote : null, mfSetTaskFilter, mfScrollColumns, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
+    const client = runInNewContext(script + '\n;({ mf, rt, show, mfLoad, mfSearch, mfInstall, mfRemove, mfRunNow, mfQuants, mfPickQuant, mfSaveNote: typeof mfSaveNote === "function" ? mfSaveNote : null, mfSetTaskFilter, mfScrollColumns, termStart: termStart, copy: function(id) { return mfCopyAstrlink(id) }, setResult: function(value) { lastResult = value; renderGroups(value) } })', {
       document: {
         getElementById: get, createElement: element,
         querySelector: get,
@@ -561,6 +579,7 @@ describe('Model Farm setup panel', () => {
           : []
       },
       navigator: { clipboard: { writeText } },
+      EventSource: FakeEventSource,
       fetch: (url: string, init?: RequestInit) => url === '/api/llamafarm/install' ? reply(init)
         : readReply ? readReply(url, init) : Promise.resolve(Response.json(url === '/api/llamafarm/quants' ? { quants } : {})),
       // Timers are stubbed: the panel polls its activity feed while the
@@ -582,6 +601,8 @@ describe('Model Farm setup panel', () => {
       recentMarkup: () => get('mf-recent').innerHTML,
       noteInput: (id: string) => get('mf-note-' + id),
       terminalInput: get('term-in'),
+      terminalOutput: get('term-out'),
+      eventSources,
       terminalKeydown: (event: Record<string, unknown>) => eventHandlers.get('term-in')?.get('keydown')?.(event),
       picksMarkup: () => get('mf-runnow').innerHTML, status: () => get('mf-status').innerHTML }
   }
@@ -651,6 +672,60 @@ describe('Model Farm setup panel', () => {
     terminalInput.selectionStart = terminalInput.selectionEnd = 0
     await terminalKeydown!({ key: 'Tab', shiftKey: false, preventDefault() {} })
     assert.deepEqual(request, { line: 'Get-ChildItem', cursor: 0 })
+  })
+
+  it('keeps the terminal output inside its own scroll region', async () => {
+    const page = await servedPanelPage()
+    const terminalRule = /\.term\s*\{([^}]*)\}/.exec(page)?.[1] ?? ''
+    const outputRule = /\.term-out\s*\{([^}]*)\}/.exec(page)?.[1] ?? ''
+
+    // An auto-height flex column lets the output grow with its content and
+    // pushes the prompt below the fold, so the terminal box needs a definite
+    // height and the output region needs to be allowed to shrink.
+    assert.match(terminalRule, /height:\s*min\(/, 'the terminal box has a definite height')
+    assert.match(outputRule, /min-height:\s*0/, 'the output region can shrink')
+    assert.match(outputRule, /overflow:\s*auto/, 'the output region scrolls on its own')
+  })
+
+  it('follows new terminal output only while the user reads the tail', async () => {
+    const { client, terminalOutput, eventSources } = await clientFor(async () => Response.json(installed), async () => {})
+    await client.termStart()
+    const source = eventSources[0]
+    assert.ok(source, 'the terminal opens an output stream')
+
+    terminalOutput.scrollHeight = 5000
+    terminalOutput.clientHeight = 400
+
+    // The user scrolled up to read earlier output: new lines must not yank the view.
+    terminalOutput.scrollTop = 0
+    source.onmessage!({ data: JSON.stringify('first chunk\n') })
+    assert.equal(terminalOutput.scrollTop, 0, 'the reading position is preserved')
+
+    // Back at the tail: new output follows.
+    terminalOutput.scrollTop = 4600
+    source.onmessage!({ data: JSON.stringify('second chunk\n') })
+    assert.equal(terminalOutput.scrollTop, 5000, 'the tail follows new output')
+  })
+
+  it('keeps the prompt usable while output streams in', async () => {
+    const sent: string[] = []
+    const { client, terminalInput, terminalKeydown, eventSources } = await clientFor(
+      async () => Response.json(installed), async () => {}, [],
+      async (url, init) => {
+        if (url === '/api/terminal/input') sent.push(String(init?.body))
+        return Response.json({})
+      }
+    )
+    await client.termStart()
+    eventSources[0].onmessage!({ data: JSON.stringify('busy\n') })
+
+    terminalInput.value = 'echo hi'
+    await terminalKeydown!({ key: 'Enter', preventDefault() {} })
+
+    assert.equal(sent.length, 1, 'the command is still submitted while output streams')
+    assert.deepEqual(JSON.parse(sent[0]), { data: 'echo hi\r\n' })
+    assert.equal(terminalInput.value, '', 'the prompt is cleared for the next command')
+    assert.equal(terminalInput.focused, true, 'the prompt keeps focus')
   })
 
   for (const action of ['install', 'remove']) {

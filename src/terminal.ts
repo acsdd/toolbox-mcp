@@ -15,6 +15,8 @@ export interface TerminalState {
 const MAX_BUFFER_CHARS = 200_000
 const MAX_COMPLETION_INPUT_CHARS = 2048
 const MAX_COMPLETION_MATCHES = 40
+/** How long a completion request may wait for the shell before giving up. */
+export const COMPLETION_TIMEOUT_MS = 5000
 
 export function powerShellPromptDirectory(output: string): string | null {
   const lastLine = output.split(/\r?\n/).at(-1) ?? ''
@@ -111,7 +113,10 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
     return new Promise((resolve) => {
       execFileImpl('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript], {
         windowsHide: true,
-        timeout: 2000,
+        // A cold host (first PowerShell start, antivirus scanning, a busy
+        // machine) can take a while to answer; the tab-completion hint is
+        // worth waiting for.
+        timeout: COMPLETION_TIMEOUT_MS,
         maxBuffer: 64 * 1024,
         cwd: completionCwd
       }, (error, stdout) => {

@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { startPanel } from '../dist/panel.js'
 import { createServices } from '../dist/services.js'
+import type { Terminal } from '../dist/terminal.js'
 
 let home = ''
 let services: ReturnType<typeof createServices>
@@ -22,12 +23,13 @@ function ask(options: {
   method?: string
   headers?: Record<string, string>
   body?: string
+  port?: number
 }): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
       {
         host: '127.0.0.1',
-        port: panel.port,
+        port: options.port ?? panel.port,
         path: options.path ?? '/',
         method: options.method ?? 'GET',
         headers: options.headers
@@ -332,16 +334,65 @@ describe('panel activity recorder', () => {
 })
 
 describe('panel terminal completion route', () => {
+  /** A stand-in shell session: it records what the panel asked of it. */
+  function fakeTerminal(overrides: Partial<Terminal> = {}): { terminal: Terminal; completions: { line: string; cursor: number }[]; inputs: string[] } {
+    const completions: { line: string; cursor: number }[] = []
+    const inputs: string[] = []
+    const terminal: Terminal = {
+      start: () => ({ running: true, pid: 4242, startedAt: 0 }),
+      stop: () => ({ running: false, pid: null, startedAt: null }),
+      state: () => ({ running: false, pid: null, startedAt: null }),
+      input: (data: string) => {
+        inputs.push(data)
+        return { running: false, pid: null, startedAt: null }
+      },
+      complete: async (line: string, cursor: number) => {
+        completions.push({ line, cursor })
+        return { supported: true, candidates: ['Get-ChildItem', 'Get-ChildItemProperty'], replacementIndex: 0, replacementLength: 7 }
+      },
+      subscribe: () => () => {},
+      snapshot: () => '',
+      ...overrides
+    }
+    return { terminal, completions, inputs }
+  }
+
   it('returns bounded shell completion candidates without executing the typed command', async () => {
-    const reply = await ask({ path: '/api/terminal/complete', method: 'POST',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: 'Get-Chi', cursor: 7 }) })
-    assert.equal(reply.status, 200)
-    const data = JSON.parse(reply.body) as { supported: boolean; candidates: string[]; replacementIndex: number; replacementLength: number }
-    assert.equal(typeof data.supported, 'boolean')
-    assert.ok(Array.isArray(data.candidates))
-    assert.ok(data.candidates.length <= 40)
-    assert.equal(data.replacementIndex, 0)
-    assert.equal(data.replacementLength, 7)
+    const fake = fakeTerminal()
+    const scoped = await startPanel(services, { port: 0, terminal: fake.terminal })
+    try {
+      const reply = await ask({ port: scoped.port, path: '/api/terminal/complete', method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: 'Get-Chi', cursor: 7 }) })
+      assert.equal(reply.status, 200)
+      const data = JSON.parse(reply.body) as { supported: boolean; candidates: string[]; replacementIndex: number; replacementLength: number }
+      assert.equal(data.supported, true)
+      assert.deepEqual(data.candidates, ['Get-ChildItem', 'Get-ChildItemProperty'])
+      assert.equal(data.replacementIndex, 0)
+      assert.equal(data.replacementLength, 7)
+      // The completion request is a question about the line, never a command
+      // to run: the shell must not receive the typed text as input.
+      assert.deepEqual(fake.completions, [{ line: 'Get-Chi', cursor: 7 }])
+      assert.deepEqual(fake.inputs, [], 'the typed command must not be executed')
+    } finally {
+      scoped.close()
+    }
+  })
+
+  it('reports completion as unsupported when the host shell cannot complete', async () => {
+    const fake = fakeTerminal({
+      complete: async () => ({ supported: false, candidates: [], replacementIndex: 0, replacementLength: 0 })
+    })
+    const scoped = await startPanel(services, { port: 0, terminal: fake.terminal })
+    try {
+      const reply = await ask({ port: scoped.port, path: '/api/terminal/complete', method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: 'Get-Chi', cursor: 7 }) })
+      assert.equal(reply.status, 200)
+      const data = JSON.parse(reply.body) as { supported: boolean; candidates: string[] }
+      assert.equal(data.supported, false)
+      assert.deepEqual(data.candidates, [])
+    } finally {
+      scoped.close()
+    }
   })
 })
 

@@ -9,7 +9,7 @@ import { createServer, type Server, type ServerResponse } from 'node:http'
 import { pathToFileURL } from 'node:url'
 import { WIDGET_HOST_CSS } from '@toolbox/widgets'
 import { createServices, type Services } from './services.js'
-import { createTerminal } from './terminal.js'
+import { createTerminal, type Terminal } from './terminal.js'
 import { TOOL_GROUPS, catalogEntries } from './catalog.js'
 import { createActivity, type Activity } from './activity.js'
 import { appVersion } from './version.js'
@@ -433,16 +433,18 @@ ${WIDGET_HOST_CSS}
   .gw-log { margin-top: 14px; }
 
   /* terminal */
-  .term { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 7px; background: #050a07; overflow: hidden; }
-  .term-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: .625rem; }
+  /* The terminal box has a definite height so the output scrolls inside its
+     own region and the prompt stays pinned below it. */
+  .term { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 7px; background: #050a07; overflow: hidden; height: min(70vh, 620px); min-height: 240px; }
+  .term-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: .625rem; flex: 0 0 auto; }
   .term-head .spacer { flex: 1; }
   .term-head .btn { min-height: 30px; padding: 0 12px; font-size: .625rem; }
-  .term-out { flex: 1; height: 480px; margin: 0; padding: 14px 16px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: .75rem; line-height: 1.55; color: #b9e3b0; background: transparent; }
-  .term-line { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); }
+  .term-out { flex: 1 1 auto; min-height: 0; height: auto; margin: 0; padding: 14px 16px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: .75rem; line-height: 1.55; color: #b9e3b0; background: transparent; }
+  .term-line { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); flex: 0 0 auto; }
   .term-line span { color: var(--accent); }
   .term-line input { flex: 1; min-height: 38px; border: 0; background: transparent; color: var(--text); font-size: .75rem; }
   .term-line input:focus { outline: none; }
-  .term-completion { padding: 8px 14px; border-top: 1px solid var(--border-soft); color: var(--muted); font-size: .6875rem; }
+  .term-completion { padding: 8px 14px; border-top: 1px solid var(--border-soft); color: var(--muted); font-size: .6875rem; flex: 0 0 auto; }
   .term-completion[hidden] { display: none; }
   .term-completion b { color: var(--accent); font-weight: 500; }
   .term-completion-list { margin-left: 10px; }
@@ -674,7 +676,7 @@ function show(name) {
   })
   if (name === 'models') { if (!lastResult) mfFirstLoad(); else mfLoadRecent(); mfSyncProgress() }
   if (name === 'models' && !rt.data) rtDetect()
-  if (name === 'terminal') termAutoStart()
+  if (name === 'terminal') { termAutoStart(); termReveal() }
   if (name === 'marketplace' && !mp.data) mpLoad()
   if (name === 'gateway' && !gw.data) gwLoad()
   if (name === 'settings') setLoad()
@@ -2007,6 +2009,25 @@ var HISTORY_MAX = 200
 var termOut = document.getElementById('term-out')
 var termIn = document.getElementById('term-in')
 
+/* New output only pulls the view down while the user is reading the tail:
+   scrolling up to read earlier lines is never interrupted. */
+var TERM_FOLLOW_MARGIN = 32
+function termFollows() {
+  if (!termOut) return false
+  // A hidden panel has no height yet, so keep the tail current for the moment
+  // the user opens the Terminal again.
+  if (!termOut.clientHeight) return true
+  return termOut.scrollHeight - termOut.scrollTop - termOut.clientHeight <= TERM_FOLLOW_MARGIN
+}
+function termScrollToTail() {
+  if (termOut) termOut.scrollTop = termOut.scrollHeight
+}
+function termReveal() {
+  // The layout settles after the section becomes visible, so the tail is
+  // scrolled to once the browser has laid the panel out.
+  setTimeout(termScrollToTail, 0)
+}
+
 /* The command history survives a page reload: it lives in this browser's
    local storage, never on the server. */
 function historyLoad() {
@@ -2042,8 +2063,9 @@ async function termStart() {
   if (!es) {
     es = new EventSource('/api/terminal/events')
     es.onmessage = function (e) {
+      var follow = termFollows()
       termOut.textContent += JSON.parse(e.data)
-      termOut.scrollTop = termOut.scrollHeight
+      if (follow) termScrollToTail()
     }
   }
   termIn.focus()
@@ -2137,8 +2159,9 @@ termIn.addEventListener('keydown', async function (ev) {
       hIdx = cmdHistory.length
       historySave()
     }
+    var follow = termFollows()
     termOut.textContent += line + '\\r\\n'
-    termOut.scrollTop = termOut.scrollHeight
+    if (follow) termScrollToTail()
     await fetch('/api/terminal/input', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: line + '\\r\\n' })
     })
@@ -2228,10 +2251,15 @@ export interface PanelOptions {
    * activity card then explains that no server is feeding it.
    */
   activity?: Activity
+  /**
+   * The local shell session. Injectable so the panel can be driven by tests
+   * without spawning a real shell on the host.
+   */
+  terminal?: Terminal
 }
 
 export function startPanel(services: Services, options: PanelOptions = {}): Promise<PanelHandle> {
-  const terminal = createTerminal()
+  const terminal = options.terminal ?? createTerminal()
   const activity = options.activity ?? createActivity(false)
   let panelPort = options.port ?? PANEL_PORT
   const server: Server = createServer((req, res) => {

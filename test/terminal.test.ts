@@ -29,10 +29,12 @@ describe('terminal completion', () => {
 
   it('uses PowerShell command completion and safely encodes the typed line', async () => {
     let args: string[] = []
+    let options: { timeout?: number } = {}
     const terminal = createTerminal({
       platform: 'win32',
-      execFileImpl: ((_file: string, inputArgs: string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      execFileImpl: ((_file: string, inputArgs: string[], inputOptions: { timeout?: number }, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
         args = inputArgs
+        options = inputOptions
         callback(null, JSON.stringify({
           candidates: ['Get-ChildItem', 'Get-ChildItemProperty'],
           replacementIndex: 0,
@@ -56,6 +58,8 @@ describe('terminal completion', () => {
     assert.match(script, /CommandCompletion.*CompleteInput/)
     assert.match(script, new RegExp(Buffer.from(line, 'utf8').toString('base64')))
     assert.doesNotMatch(script, /Get-Chi'; throw 'not data/)
+    // A cold host needs a real budget before the hint is worth giving up on.
+    assert.ok((options.timeout ?? 0) >= 5000, `expected a generous completion timeout, got ${options.timeout}`)
   })
 
   it('bounds long input and the number of returned completion candidates', async () => {
