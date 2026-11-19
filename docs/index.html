@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>toolbox-mcp — acsdd</title>
-    <meta name="description" content="A local-first MCP server: 24 tools for crypto watch, Gmail, resource monitoring, Model Farm scoring and the module marketplace — over stdio, with an ops panel on the side." />
+    <meta name="description" content="A local-first MCP server: 36 tools for crypto watch, Gmail, resource monitoring, Model Farm scoring and the module marketplace — over stdio, with an ops panel on the side." />
     <link rel="icon" href="data:," />
     <style>
       :root {
@@ -59,6 +59,24 @@
         font-size: 14px;
       }
       .status img { display: block; }
+      .download { margin: 0 0 18px; }
+      .download h2 { margin-bottom: 12px; }
+      .download .buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+      .download .btn {
+        display: inline-block;
+        padding: 11px 18px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: linear-gradient(180deg, #0e1a14, var(--panel));
+        color: var(--text);
+        text-decoration: none;
+        font-weight: 600;
+        transition: border-color .18s ease, transform .18s ease;
+      }
+      .download .btn:hover { border-color: var(--accent); transform: translateY(-2px); }
+      .download .btn.primary { border-color: var(--accent); color: var(--accent); }
+      .download .note { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
+      .download .note a { color: var(--accent-2); }
       .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-bottom: 44px; }
       .card {
         display: block;
@@ -87,8 +105,16 @@
     <main class="wrap">
       <p class="kicker">acsdd / toolbox-mcp</p>
       <h1>toolbox<span>-mcp</span></h1>
-      <p class="lead">A local-first MCP server: 24 tools for crypto watch, Gmail, resource monitoring, Model Farm scoring and the module marketplace — over stdio, with an ops panel on the side.</p>
+      <p class="lead">A local-first MCP server: 36 tools for crypto watch, Gmail, resource monitoring, Model Farm scoring and the module marketplace — over stdio, with an ops panel on the side.</p>
       <p class="status"><img src="https://img.shields.io/badge/status-external_UAT-9cf37e?style=flat-square" alt="status external_UAT" /> Released for acceptance testing outside the team.</p>
+      <section class="download">
+        <h2>Download the Model Farm app</h2>
+        <div class="buttons">
+          <a class="btn primary" href="https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.1/ModelFarm-Setup-0.9.1.exe">Model Farm 0.9.1 — Installer (125 MB)</a>
+          <a class="btn" href="https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.1/ModelFarm-Portable-0.9.1.exe">Model Farm 0.9.1 — Portable (113 MB)</a>
+        </div>
+        <p class="note">Windows, no Node.js and no administrator rights. The binaries are not code-signed, so SmartScreen shows an "unverified publisher" warning on first start. Older builds: <a href="https://github.com/acsdd/toolbox-mcp/releases">all releases</a>.</p>
+      </section>
       <div class="cards">
         <a class="card" href="https://github.com/acsdd/toolbox-mcp#readme"><span class="label">Readme</span><span class="note">What the project is and how to run it</span></a>
         <a class="card" href="https://github.com/acsdd/toolbox-mcp/releases"><span class="label">Releases</span><span class="note">Tags and downloadable builds</span></a>

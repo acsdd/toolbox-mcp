@@ -8,6 +8,23 @@
 
 Local-first MCP server that exposes the shared [Toolbox widgets](https://github.com/acsdd/toolbox-widgets) — **crypto watch**, **Gmail announcer** and **resource monitor** — to any MCP client, plus a small ops panel on `http://127.0.0.1:3851`.
 
+## Download the Model Farm app
+
+The Model Farm is that server as a Windows app: the ops panel, the Model Farm,
+the Marketplace, the Terminal and the MCP tool catalogue in one window. It needs
+no Node.js and no administrator rights.
+
+| Build | What it is | Size |
+| --- | --- | --- |
+| [`ModelFarm-Setup-0.9.1.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.1/ModelFarm-Setup-0.9.1.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
+| [`ModelFarm-Portable-0.9.1.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.1/ModelFarm-Portable-0.9.1.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
+
+Install, update, roll back and uninstall are described in
+[docs/install.md](docs/install.md). Older builds are on the
+[releases page](https://github.com/acsdd/toolbox-mcp/releases). The binaries are
+not code-signed, so Windows SmartScreen shows an "unverified publisher" warning
+on first start.
+
 Part of the Toolbox family:
 
 | App | Repo |
@@ -261,6 +278,9 @@ gh release create v0.9.1 \
   dist/ModelFarm-Portable-0.9.1.exe dist/ModelFarm-Setup-0.9.1.exe \
   --title "Model Farm 0.9.1" --notes-file docs/release-notes-0.9.1.md
 ```
+
+The download links in this readme and in `docs/index.html` point at the current
+version — update them to the new tag when you cut the next release.
 
 No credential ever lands in this repository: the Gmail App Password is written to
 the operating system credential store on your machine only, and
