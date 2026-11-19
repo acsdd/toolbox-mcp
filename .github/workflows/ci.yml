@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger so release readiness can re-verify CI from a clean
+  # checkout without pushing a throwaway commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
