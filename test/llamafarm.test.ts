@@ -562,27 +562,31 @@ describe('panel', () => {
         return body.output
       }
       // The shell is a real process: it can still be starting up when the
-      // panel reports it as running. Probe it until it answers before sending
-      // the real command, otherwise the first input is lost and the test fails
-      // for reasons that have nothing to do with the code under test.
+      // panel reports it as running, and a write made before the child is
+      // ready is dropped. Probe it across the whole wait window — not just the
+      // first seconds — and keep reading output after the last probe, so a
+      // slow runner does not fail the test for reasons that have nothing to do
+      // with the code under test.
       let output = ''
-      let probes = 0
-      for (let attempt = 0; attempt < 80; attempt++) {
-        if (probes < 3 && attempt % 4 === 0) {
-          await send(`${shell} farm-ready${eol}`)
-          probes += 1
+      const waitForShell = async (command: string, timeoutMs: number): Promise<string> => {
+        const deadline = Date.now() + timeoutMs
+        let seen = ''
+        let lastProbe = 0
+        while (Date.now() < deadline) {
+          const now = Date.now()
+          if (now - lastProbe >= 1_000) {
+            await send(`${shell} ${command}${eol}`)
+            lastProbe = now
+          }
+          seen = await readOutput()
+          if (seen.includes(command)) break
+          await new Promise((resolve) => setTimeout(resolve, 250))
         }
-        output = await readOutput()
-        if (output.includes('farm-ready')) break
-        await new Promise((resolve) => setTimeout(resolve, 250))
+        return seen
       }
+      output = await waitForShell('farm-ready', 30_000)
       assert.ok(output.includes('farm-ready'), 'the shell should answer a probe')
-      await send(`${shell} farm-ok${eol}`)
-      for (let attempt = 0; attempt < 40; attempt++) {
-        output = await readOutput()
-        if (output.includes('farm-ok')) break
-        await new Promise((resolve) => setTimeout(resolve, 250))
-      }
+      output = await waitForShell('farm-ok', 15_000)
       assert.ok(output.includes('farm-ok'), 'terminal should echo command output')
       const stopped = await (await fetch(`${base}/api/terminal/stop`, { method: 'POST' })).json() as { running: boolean }
       assert.equal(stopped.running, false)
