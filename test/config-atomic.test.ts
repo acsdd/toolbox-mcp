@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
-import { cleanStaleTempFiles, saveSettings, type StoredSettings } from '../dist/config.js'
+import { cleanStaleTempFiles, saveSettings, writeAtomic, type StoredSettings } from '../dist/config.js'
 import { createServices } from '../dist/services.js'
 
 let home = ''
@@ -112,6 +113,65 @@ describe('atomic settings writes', () => {
     assert.ok(entries.includes('settings.json'), 'real settings must survive')
     assert.ok(entries.includes('notes.txt'), 'unrelated user files must survive')
     assert.equal(await readFile(join(home, 'notes.txt'), 'utf8'), 'keep me')
+  })
+})
+
+describe('atomic write retries', () => {
+  function refuseWith(code: string): NodeJS.ErrnoException {
+    const error = new Error(`${code}: operation not permitted`) as NodeJS.ErrnoException
+    error.code = code
+    return error
+  }
+
+  it('retries a replace the operating system refuses to complete', async () => {
+    const target = join(home, 'retry.json')
+    let attempts = 0
+
+    await writeAtomic(target, 'payload', async (from, to) => {
+      attempts++
+      if (attempts < 4) throw refuseWith('EPERM')
+      await rename(from, to)
+    })
+
+    assert.equal(attempts, 4, 'the refused replace should be retried')
+    assert.equal(await readFile(target, 'utf8'), 'payload')
+    const strays = (await readdir(home)).filter((name) => name.endsWith('.tmp'))
+    assert.deepEqual(strays, [])
+  })
+
+  it('gives up when the operating system keeps refusing the replace', async () => {
+    const target = join(home, 'refused.json')
+    let attempts = 0
+
+    await assert.rejects(
+      () =>
+        writeAtomic(target, 'payload', async () => {
+          attempts++
+          throw refuseWith('EPERM')
+        }),
+      /EPERM/
+    )
+
+    assert.ok(attempts > 1, 'a refusal should be retried before giving up')
+    const strays = (await readdir(home)).filter((name) => name.endsWith('.tmp'))
+    assert.deepEqual(strays, [], 'the abandoned temp file must be cleaned up')
+    assert.equal(existsSync(target), false, 'a failed replace must not leave a half-written target')
+  })
+
+  it('does not retry a failure the operating system will not recover from', async () => {
+    const target = join(home, 'cross-device.json')
+    let attempts = 0
+
+    await assert.rejects(
+      () =>
+        writeAtomic(target, 'payload', async () => {
+          attempts++
+          throw refuseWith('EXDEV')
+        }),
+      /EXDEV/
+    )
+
+    assert.equal(attempts, 1, 'an unrecoverable error should fail immediately')
   })
 })
 
