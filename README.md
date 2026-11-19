@@ -165,9 +165,12 @@ npm start          # MCP server on stdio + ops panel on 127.0.0.1:3851
 ```
 
 Settings live in `~/.toolbox-mcp/settings.json` (override with `TOOLBOX_MCP_HOME`).
-The file is owner-readable only (`0600`). **Note:** the Gmail App Password is stored
-there in plain text until OS keychain integration lands — keep the file safe, and
-never commit it. Nothing else you keep in that file is sent anywhere.
+The file is owner-readable only (`0600`) and never leaves your machine. The Gmail
+App Password is **not** in that file: it is kept in the operating system
+credential store (Windows Credential Manager, macOS Keychain, Linux Secret
+Service) and the settings file holds only a reference to it. A password left in
+an older settings file is moved into the credential store and deleted from the
+file on the next start. Nothing else you keep in that file is sent anywhere.
 
 ## Development
 
@@ -184,9 +187,11 @@ npm run typecheck
   panel) is refused with `403`.
 - The panel page loads nothing from the network and runs under a strict content
   security policy; request bodies are capped at 1 MB.
-- Credentials live in `~/.toolbox-mcp/settings.json` (`0600`), never in the
-  repository. The Gmail App Password is stored in plain text there until OS
-  keychain integration lands.
+- The Gmail App Password lives in the operating system credential store — never in
+  the repository, never in `settings.json`, which keeps only a reference to it. A
+  password left in an older settings file is migrated into the credential store
+  and removed from the file on the next start; if the store is unavailable, the
+  server refuses to connect rather than fall back to plain text.
 - Remote marketplace modules are opt-in and badged: their tool arguments leave
   this machine.
 
@@ -233,8 +238,9 @@ gh release create v0.8.0 dist/ModelFarm-Portable-0.8.0.exe \
   --title "Model Farm 0.8.0" --notes-file release-notes.md
 ```
 
-No credential ever lands in this repository: the Gmail App Password is written
-to `~/.toolbox-mcp/settings.json` on your machine only. The release artifact
+No credential ever lands in this repository: the Gmail App Password is written to
+the operating system credential store on your machine only, and
+`~/.toolbox-mcp/settings.json` keeps just a reference to it. The release artifact
 contains code, not your settings.
 
 ## License
