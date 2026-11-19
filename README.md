@@ -74,6 +74,9 @@ model to AstrLink.
   the one you picked under **Local runtimes** — Ollama by default. Ollama serves
   any GGUF straight from the Hub, so that install is a single `ollama pull
   hf.co/owner/repo:Q4_K_M` — with a GPU split it writes a Modelfile instead.
+  Ollama matches a quantization tag against the file names a repository
+  actually publishes, so a tag it cannot use installs the repository default
+  (`:latest`) and the panel names the reference that was installed.
   A runtime that takes files instead of pulls gets the GGUF downloaded into its
   own models folder, and one that serves a single model per process (llama.cpp,
   llamafile) is started with it. If the runtime is missing, the action says so
@@ -221,7 +224,7 @@ present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.9.0.exe + dist/ModelFarm-Setup-0.9.0.exe
+npm run portable      # → dist/ModelFarm-Portable-0.9.1.exe + dist/ModelFarm-Setup-0.9.1.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -252,11 +255,11 @@ the widget core repo, so **the widget core has to be published first**:
 
 ```bash
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.9.0
+git tag v0.9.1
 git push origin main --tags
-gh release create v0.9.0 \
-  dist/ModelFarm-Portable-0.9.0.exe dist/ModelFarm-Setup-0.9.0.exe \
-  --title "Model Farm 0.9.0" --notes-file docs/release-notes-0.9.0.md
+gh release create v0.9.1 \
+  dist/ModelFarm-Portable-0.9.1.exe dist/ModelFarm-Setup-0.9.1.exe \
+  --title "Model Farm 0.9.1" --notes-file docs/release-notes-0.9.1.md
 ```
 
 No credential ever lands in this repository: the Gmail App Password is written to

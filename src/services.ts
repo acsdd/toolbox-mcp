@@ -19,6 +19,8 @@ import {
   diskShortfallLabel,
   gradeMachine,
   gradeSetup,
+  isQuantTagRejection,
+  latestReference,
   listGgufQuants,
   matchInstalledModel,
   MODEL_TASKS,
@@ -107,6 +109,11 @@ function isCatalogModel(value: unknown): value is CatalogModel {
     typeof candidate.runtimeRamBytes === 'number' &&
     Array.isArray(candidate.formats)
   )
+}
+
+/** The quantization the user asked for, in a form they can read. */
+function requestedQuantLabel(model: CatalogModel, requested?: string | null): string {
+  return (requested ?? model.quantLabel ?? '').trim() || 'requested'
 }
 
 export const USER_AGENT = `toolbox-mcp/${appVersion()} (+https://github.com/acsdd/toolbox-mcp)`
@@ -1117,17 +1124,27 @@ export function createServices(options: ServicesOptions = {}) {
 
     let result
     const split = typeof input.offload === 'number' && Number.isFinite(input.offload)
-    const installedModel = split ? plan.modelName : plan.reference
+    // Ollama matches a quantization tag against the file names a repository
+    // publishes, so the tag that is actually served can differ from the one
+    // that was asked for. The reference that ends up installed is the truth.
+    let effectiveReference = plan.reference
     try {
       if (split) {
         const directory = mkdtempSync(join(tmpdir(), 'toolbox-mcp-'))
         const modelfilePath = join(directory, 'Modelfile')
-        writeFileSync(modelfilePath, buildModelfile(plan.reference, { numGpu: input.offload }), 'utf8')
         const runner = options.runOllama ?? ((args: string[]) => runOllamaCommand(args))
+        writeFileSync(modelfilePath, buildModelfile(plan.reference, { numGpu: input.offload }), 'utf8')
         result = await runner(['create', plan.modelName, '--file', modelfilePath])
+        if (!result.ok && isQuantTagRejection(result.output)) {
+          const fallback = latestReference(plan.reference)
+          writeFileSync(modelfilePath, buildModelfile(fallback, { numGpu: input.offload }), 'utf8')
+          result = await runner(['create', plan.modelName, '--file', modelfilePath])
+          effectiveReference = fallback
+        }
       } else {
         const pull = options.pullModel ?? ((reference: string) => pullIntoOllama(reference))
         result = await pull(plan.reference)
+        effectiveReference = result.reference ?? plan.reference
       }
     } catch (cause) {
       settleDownload(pullEntry, 'error')
@@ -1143,7 +1160,7 @@ export function createServices(options: ServicesOptions = {}) {
       settleDownload(pullEntry, 'error')
       pullEntry.error = result.error ?? 'The Ollama runtime refused the install.'
       return failure('failed', pullEntry.error, {
-        reference: plan.reference,
+        reference: effectiveReference,
         modelName: plan.modelName,
         output: result.output,
         steps: plan.steps
@@ -1154,20 +1171,28 @@ export function createServices(options: ServicesOptions = {}) {
     // Byte counts remain unknown: Ollama may have reused already-cached layers.
     invalidateModelState()
 
+    // Say it plainly when the served quantization is not the requested one.
+    const fallbackNote =
+      plan.quantFallback || effectiveReference !== plan.reference
+        ? ` Ollama could not use the ${requestedQuantLabel(model, input.quant)} tag for this repository, so it installed the repository default (${effectiveReference}).`
+        : ''
+
     return recordInstall({
       ok: true,
       repo: model.id,
-      reference: plan.reference,
+      reference: effectiveReference,
       modelName: plan.modelName,
       reason: 'installed',
-      message: `${installedModel} is ready to run.`,
+      message: `${split ? plan.modelName : effectiveReference} is ready to run.${fallbackNote}`,
       output: result.output,
-      steps: split ? [`ollama run ${installedModel}`] : plan.steps,
+      steps: split
+        ? [`ollama run ${plan.modelName}`]
+        : [`ollama pull ${effectiveReference}`, `ollama run ${effectiveReference}`],
       runtime: { id: descriptor.id, label: descriptor.label, baseUrl: 'http://127.0.0.1:11434' },
       file: null,
       astrlink: {
         baseUrl: 'http://127.0.0.1:11434/v1',
-        model: installedModel,
+        model: split ? plan.modelName : effectiveReference,
         capability: 'openai.chat'
       }
     })

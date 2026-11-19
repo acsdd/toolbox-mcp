@@ -393,6 +393,83 @@ describe('llamafarm install', () => {
     assert.equal(result.ok, false)
     assert.equal(result.astrlink, null)
   })
+
+  it('installs the repository default when Ollama cannot tag the quantization', async () => {
+    const pulled: string[] = []
+    const services = createServices({
+      fetchImpl: farmFetch(),
+      execFileImpl: ollamaExec,
+      freeDiskImpl: async () => 100 * GiB,
+      pullModel: async (reference) => {
+        pulled.push(reference)
+        return { ok: true, code: 0, output: 'success', error: null }
+      }
+    })
+    await services.init()
+    const result = await services.llamafarmInstall({
+      repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF',
+      quant: 'Q8'
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(pulled, ['hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:latest'])
+    assert.equal(result.reference, 'hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:latest')
+    assert.match(result.message, /repository default/i)
+  })
+
+  it('records the reference Ollama actually used', async () => {
+    const services = createServices({
+      fetchImpl: farmFetch(),
+      execFileImpl: ollamaExec,
+      freeDiskImpl: async () => 100 * GiB,
+      pullModel: async () => ({
+        ok: true,
+        code: 0,
+        output: 'success',
+        error: null,
+        reference: 'hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:latest'
+      })
+    })
+    await services.init()
+    const result = await services.llamafarmInstall({
+      repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF',
+      quant: 'Q8_0'
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.reference, 'hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:latest')
+    assert.equal(result.astrlink?.model, 'hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:latest')
+    assert.match(result.message, /repository default/i)
+  })
+
+  it('retries the split create with the repository default', async () => {
+    const created: string[][] = []
+    const services = createServices({
+      fetchImpl: farmFetch(),
+      execFileImpl: ollamaExec,
+      freeDiskImpl: async () => 100 * GiB,
+      runOllama: async (args) => {
+        created.push(args)
+        if (created.length === 1) {
+          return {
+            ok: false,
+            code: 1,
+            output:
+              'Error: pull model manifest: 400: {"error":"The specified tag is not available in the repository."}',
+            error: 'tag rejected'
+          }
+        }
+        return { ok: true, code: 0, output: 'created', error: null }
+      }
+    })
+    await services.init()
+    const result = await services.llamafarmInstall({
+      repo: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF',
+      offload: 20
+    })
+    assert.equal(result.ok, true)
+    assert.equal(created.length, 2)
+    assert.equal(result.reference, 'hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:latest')
+    assert.match(result.message, /repository default/i)
+  })
 })
 
 describe('panel', () => {

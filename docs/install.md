@@ -9,12 +9,13 @@ run, and how to update, roll back or remove it. It also explains where the
 | | What it is | How you get it | What it needs |
 | --- | --- | --- | --- |
 | **Model Farm app** | A Windows app with one window: the ops panel, the Model Farm, the Marketplace, the Terminal and the MCP tool catalogue | Download the installer or the portable executable from the [release page](https://github.com/acsdd/toolbox-mcp/releases) | Nothing. No Node.js, no administrator rights |
-| **Toolbox MCP server** | The MCP server itself. It speaks MCP over stdio for your MCP client and serves the same panel on `http://127.0.0.1:3851` | A source checkout of this repository | Node.js 22+, and the sibling `toolbox-widgets` checkout |
+| **Toolbox MCP server** | The MCP server itself. It speaks MCP over stdio for your MCP client and serves the same panel on `http://127.0.0.1:3851` | Either the **installed app** — it ships its own Node runtime — or a source checkout of this repository | The installed app: nothing extra. A source checkout: Node.js 22+ and the sibling `toolbox-widgets` checkout |
 
 The app and the server share the same panel and the same tools. Pick the app
 if you want the panel, the Model Farm and the Terminal as a desktop program;
 pick the server if you want the tools inside an MCP client such as Claude
-Desktop or Cursor.
+Desktop or Cursor. The installed app can do both — see
+[Use the MCP tools from an MCP client](#use-the-mcp-tools-from-an-mcp-client).
 
 ## Install the app
 
@@ -113,7 +114,42 @@ in Credential Manager yourself.
 
 ## Use the MCP tools from an MCP client
 
-The MCP server runs from a source checkout — see
+### From the installed app (no Node.js needed)
+
+The installed app ships its own Node runtime, so your client can launch the
+packaged MCP server straight from the install folder:
+
+```json
+{
+  "mcpServers": {
+    "toolbox": {
+      "command": "C:\\Users\\you\\AppData\\Local\\Programs\\Model Farm\\Model Farm.exe",
+      "args": [
+        "C:\\Users\\you\\AppData\\Local\\Programs\\Model Farm\\resources\\app.asar\\dist\\index.js"
+      ],
+      "env": { "ELECTRON_RUN_AS_NODE": "1" }
+    }
+  }
+}
+```
+
+`ELECTRON_RUN_AS_NODE` makes the app executable behave as a plain Node
+runtime, so the server starts on stdio without opening a window. The server
+also serves its own panel; set `TOOLBOX_MCP_PORT` when `3851` is already
+taken, and `TOOLBOX_MCP_HOME` when you want the settings somewhere else than
+`%APPDATA%\Model Farm\settings`.
+
+Check the journey yourself at any time:
+
+```bash
+node scripts/verify-install.cjs
+```
+
+It performs the same handshake a client performs and prints the tool count.
+
+### From a source checkout
+
+The MCP server also runs from a source checkout — see
 [Set up Toolbox MCP with AstrLink](astrlink-setup.md) for the complete
 Windows setup including Ollama and AstrLink. In short:
 
