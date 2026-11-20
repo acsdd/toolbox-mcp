@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { writeChecksums } from './checksums.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const toolchain = resolve(process.argv[2] ?? join(root, '../toolbox-desktop'))
@@ -102,6 +103,7 @@ run(join(toolchain, 'node_modules/electron-builder/cli.js'), [
 
 await mkdir(output, { recursive: true })
 // The portable app and the installer are both first-class release assets.
+const artifacts = []
 for (const artifactName of [
   `ModelFarm-Portable-${manifest.version}.exe`,
   `ModelFarm-Setup-${manifest.version}.exe`
@@ -110,6 +112,9 @@ for (const artifactName of [
   // A rebuild of the same version replaces the previous artifact.
   await rm(artifactPath, { force: true })
   await copyFile(join(buildDir, artifactName), artifactPath)
+  artifacts.push(artifactPath)
   console.log(`ARTIFACT=${artifactPath}`)
 }
+// Published next to the executables so `sha256sum -c` works from the release page.
+console.log(`CHECKSUMS=${await writeChecksums(artifacts, output)}`)
 console.log(`UNPACKED_APP=${join(buildDir, 'win-unpacked')}`)
