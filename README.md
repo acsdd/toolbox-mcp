@@ -79,7 +79,11 @@ model to AstrLink.
   calls as they land, with outcome and duration. The four shared widgets sit
   below as real UI: a price table, a mail list, resource meters and a widget
   bundle summary. The whole page is served by the server itself — nothing is
-  fetched from the network.
+  fetched from the network. Every section has an address (`#models`,
+  `#terminal`, `#marketplace`, `#gateway`, `#settings`): a link opens that
+  section directly, and the address bar follows the rail. An address for a
+  section that is not available — the gateway before its widget is installed —
+  falls back to Overview and is rewritten to match.
 - **Model Farm** — top HuggingFace models per skill (Text Generation, Text to Image,
   Text to Speech, …) as columns, color-marked against this machine:
   green = runs now, yellow = runs if you free resources, red = doesn't fit.
@@ -125,7 +129,10 @@ model to AstrLink.
   started them, and the panel says so). Each expanded model also carries a free-form **Note**
   (why you kept it, which quant fits, observed speed), stored locally in
   settings and shared with the `llamafarm_note` / `llamafarm_notes` tools;
-  an unsaved draft survives list refreshes until you save it.
+  an unsaved draft survives list refreshes until you save it. Size bounds and
+  purpose chips narrow the catalog; **Reset filters** returns to the whole
+  list in one click, and an empty result offers to search HuggingFace for the
+  same words right where you are.
 - **Local runtimes** — Ollama is not the only local runtime. This card scans
   the machine for **Ollama, LM Studio, llama.cpp, Jan, GPT4All, KoboldCpp,
   LocalAI, vLLM, llamafile and text-generation-webui**, and reports each one
@@ -141,7 +148,10 @@ model to AstrLink.
   so you end up with a fresh version rather than a stale one. Runtimes with
   their own installer get a **get it** link instead.
 - **Terminal** — a local PowerShell session streamed to the browser. It runs
-  with your user rights; the panel never binds beyond 127.0.0.1.
+  with your user rights; the panel never binds beyond 127.0.0.1. **Clear view**
+  drops the on-page scrollback without touching the session or its history,
+  and the scrollback is capped so a long-running shell cannot grow the page
+  without bound.
 - **Marketplace** — VS Code-style storefront for shared Toolbox modules.
   The listing populates live from the public
   [`registry.json`](https://github.com/acsdd/toolbox-widgets/blob/main/registry.json)

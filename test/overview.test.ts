@@ -15,6 +15,7 @@ interface Element {
   value: string
   classList: { toggle(): void; contains(): boolean }
   addEventListener(): void
+  focus(): void
   appendChild(child: { innerHTML: string }): void
 }
 
@@ -58,6 +59,7 @@ function mount(responses: Record<string, unknown> = {}) {
     value: '',
     classList: { toggle() {}, contains() { return false } },
     addEventListener() {},
+    focus() {},
     appendChild(child: { innerHTML: string }) { this.innerHTML += child.innerHTML }
   })
   const get = (id: string) => {
@@ -69,8 +71,9 @@ function mount(responses: Record<string, unknown> = {}) {
     if (key in responses) return Promise.resolve(Response.json(responses[key]))
     return Promise.resolve(Response.json({}))
   }
+  const history = { urls: [] as string[], replaceState(_state: unknown, _title: unknown, url: string) { this.urls.push(url) } }
   const client = runInNewContext(
-    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools })',
+    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters })',
     {
       document: {
         getElementById: get,
@@ -81,7 +84,9 @@ function mount(responses: Record<string, unknown> = {}) {
       navigator: { clipboard: { writeText: async () => {} } },
       fetch: fetchStub,
       setTimeout: () => 0,
-      clearTimeout: () => {}
+      clearTimeout: () => {},
+      location: { hash: '' },
+      history
     }
   ) as {
     ov: { tools: unknown[]; groups: unknown[]; group: string; query: string }
@@ -89,8 +94,12 @@ function mount(responses: Record<string, unknown> = {}) {
     pick: (id: string) => void
     clear: () => void
     render: () => void
+    section: (hash: string) => string
+    setHash: (name: string) => void
+    termClear: () => void
+    reset: () => void
   }
-  return { client, get, elements }
+  return { client, get, elements, history }
 }
 
 const TOOLS = [
@@ -190,5 +199,37 @@ describe('overview tool surface', () => {
     assert.match(markup, /email/)
     assert.match(markup, /required/)
     assert.match(markup, /Gmail address/)
+  })
+})
+
+describe('panel sections and filters', () => {
+  it('turns a section name into a linkable address', () => {
+    const { client, history } = mount()
+    assert.equal(client.section('#models'), 'models')
+    assert.equal(client.section('#terminal'), 'terminal')
+    assert.equal(client.section('#settings'), 'settings')
+    assert.equal(client.section('#elsewhere'), 'overview')
+    assert.equal(client.section(''), 'overview')
+    client.setHash('marketplace')
+    assert.deepEqual(history.urls, ['#marketplace'])
+  })
+
+  it('clears only the terminal scrollback', () => {
+    const { client, get } = mount()
+    get('term-out').textContent = 'PS C:\\> echo hi\nhi'
+    client.termClear()
+    assert.equal(get('term-out').textContent, '')
+  })
+
+  it('resets every model filter back to the whole catalog', () => {
+    const { client, get } = mount()
+    get('f-search').value = 'llama'
+    get('f-min').value = '33'
+    get('f-max').value = '7'
+    client.reset()
+    assert.equal(get('f-search').value, '')
+    assert.equal(get('f-min').value, '')
+    assert.equal(get('f-max').value, '')
+    assert.equal(get('mf-status').innerHTML, 'scoring…')
   })
 })

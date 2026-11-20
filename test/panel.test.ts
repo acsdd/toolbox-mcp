@@ -585,4 +585,46 @@ describe('panel model farm feature UI', () => {
     assert.ok(reply.body.includes('MB/s') && reply.body.includes('left'), 'page missing download rate or time estimate')
     assert.ok(reply.body.includes('private, loopback and local addresses are refused'), 'page missing the remote endpoint policy note')
   })
+
+  it('names the size bounds, the module category and the gateway status', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    assert.match(reply.body, /id="f-min"[^>]*aria-label="Minimum parameters \(billions\)"/)
+    assert.match(reply.body, /id="f-max"[^>]*aria-label="Maximum parameters \(billions\)"/)
+    assert.match(reply.body, /id="mp-category"[^>]*aria-label="Module category"/)
+    assert.match(reply.body, /id="gw-filter"[^>]*aria-label="Request status"/)
+  })
+
+  it('offers a reset for the model filters and a clear view for the terminal', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    for (const hook of [
+      'onclick="mfResetFilters()">Reset filters</button>',
+      'onclick="termClear()">Clear view</button>',
+      'function mfResetFilters()',
+      'function termClear()',
+      'var TERM_MAX_CHARS = 200000'
+    ]) {
+      assert.ok(reply.body.includes(hook), `page missing ${hook}`)
+    }
+    // The scrollback is trimmed from the front as output accumulates, so a
+    // long-running shell cannot grow the page without bound.
+    assert.match(reply.body, /slice\(-TERM_MAX_CHARS\)/)
+  })
+
+  it('gives every section an address and follows the rail in the URL', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    for (const hook of [
+      "var SECTIONS = ['overview', 'models', 'terminal', 'marketplace', 'gateway', 'settings']",
+      'function sectionFromHash(hash)',
+      'function setSectionHash(name)',
+      'function resolveSection(hash)',
+      "history.replaceState(null, '', '#' + name)",
+      "addEventListener('hashchange'",
+      'setSectionHash(b.dataset.nav)'
+    ]) {
+      assert.ok(reply.body.includes(hook), `page missing ${hook}`)
+    }
+  })
 })

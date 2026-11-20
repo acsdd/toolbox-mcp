@@ -554,17 +554,18 @@ ${WIDGET_HOST_CSS}
           <button id="sc-now" class="on" aria-pressed="true" onclick="setScenario('now')">NOW</button>
           <button id="sc-total" aria-pressed="false" onclick="setScenario('total')">TOTAL</button>
         </div>
-        <label>min <select id="f-min" onchange="setRange()">
+        <label>min <select id="f-min" aria-label="Minimum parameters (billions)" onchange="setRange()">
           <option value="">any</option><option value="1">1B+</option><option value="3">3B+</option>
           <option value="7">7B+</option><option value="13">13B+</option><option value="33">33B+</option><option value="70">70B+</option>
         </select></label>
-        <label>max <select id="f-max" onchange="setRange()">
+        <label>max <select id="f-max" aria-label="Maximum parameters (billions)" onchange="setRange()">
           <option value="">any</option><option value="3">3B</option><option value="7">7B</option>
           <option value="13">13B</option><option value="33">33B</option><option value="70">70B</option>
         </select></label>
         <input type="search" id="f-search" aria-label="Search models" placeholder="search models…" oninput="setSearch()" />
         <div class="mf-purpose-filters" id="mf-purpose-filters" aria-label="Filter models by purpose"></div>
         <button class="btn primary" onclick="mfSubmit()">Submit filter</button>
+        <button class="btn" onclick="mfResetFilters()">Reset filters</button>
         <button class="btn" onclick="mfSearch()">Search HuggingFace</button>
         <button class="btn" onclick="mfRunNow()">Run now</button>
         <button class="btn" onclick="mfRefresh()">Refresh catalog</button>
@@ -601,6 +602,7 @@ ${WIDGET_HOST_CSS}
         <div class="term-head">
           <span id="term-state">not started</span>
           <div class="spacer"></div>
+          <button class="btn" onclick="termClear()">Clear view</button>
           <button class="btn" onclick="termStart()">Start</button>
           <button class="btn" onclick="termStop()">Stop</button>
         </div>
@@ -617,7 +619,7 @@ ${WIDGET_HOST_CSS}
       <p class="sub">Shared Toolbox modules, live from the family registry. Search filters as you type.</p>
       <div class="mf-bar">
         <input type="search" id="mp-search" aria-label="Search modules" placeholder="search modules…" oninput="mpSetSearch()" />
-        <label>category <select id="mp-category" onchange="mpSetCategory()"><option value="">all</option></select></label>
+        <label>category <select id="mp-category" aria-label="Module category" onchange="mpSetCategory()"><option value="">all</option></select></label>
         <button class="btn" onclick="mpRefresh()">Refresh registry</button>
         <div class="mf-status" id="mp-status">loading registry…</div>
       </div>
@@ -632,7 +634,7 @@ ${WIDGET_HOST_CSS}
       <p class="sub">Read-only view of the local API gateway: providers, routing, capture posture and recent traffic. Metadata only — no prompt bodies, no setting changes. <a href="https://docs.astrsk.ai/en/How-to-connect-providers" target="_blank" rel="noopener">AstrLink setup guide ↗</a></p>
       <div class="mf-bar">
         <button class="btn primary" onclick="gwLoad(true)">Refresh</button>
-        <label>status <select id="gw-filter" onchange="gwLoadRequests()">
+        <label>status <select id="gw-filter" aria-label="Request status" onchange="gwLoadRequests()">
           <option value="">all</option><option value="succeeded">succeeded</option><option value="failed">failed</option>
           <option value="blocked">blocked</option><option value="cancelled">cancelled</option>
         </select></label>
@@ -684,6 +686,8 @@ var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, su
 var lastResult = null
 
 function show(name) {
+  // The gateway section only exists while its module is installed.
+  if (name === 'gateway' && document.querySelector('[data-nav="gateway"]').classList.contains('hidden')) name = 'overview'
   document.querySelectorAll('.navbtn').forEach(function (b) {
     const active = b.dataset.nav === name
     b.classList.toggle('active', active)
@@ -709,7 +713,40 @@ function focusSection(name) {
   heading.setAttribute('tabindex', '-1')
   heading.focus({ preventScroll: true })
 }
-document.querySelectorAll('.navbtn').forEach(function (b) { b.onclick = function () { show(b.dataset.nav); focusSection(b.dataset.nav) } })
+var SECTIONS = ['overview', 'models', 'terminal', 'marketplace', 'gateway', 'settings']
+/* Every section has an address: #models opens the Model Farm directly, and
+   the address bar follows the rail, so a reload lands where you were. */
+function sectionFromHash(hash) {
+  var name = String(hash || '').replace(/^#/, '')
+  return SECTIONS.indexOf(name) === -1 ? 'overview' : name
+}
+function setSectionHash(name) {
+  if (typeof history === 'undefined' || !history.replaceState) return
+  try { history.replaceState(null, '', '#' + name) } catch (cause) { /* no history API */ }
+}
+/* The gateway only exists once its widget is installed; an address for it
+   falls back to the Overview instead of landing on a section that is not there. */
+function resolveSection(hash) {
+  var name = sectionFromHash(hash)
+  var nav = document.querySelector('[data-nav="gateway"]')
+  if (name === 'gateway' && nav && nav.classList.contains('hidden')) return 'overview'
+  return name
+}
+document.querySelectorAll('.navbtn').forEach(function (b) {
+  b.onclick = function () {
+    show(b.dataset.nav)
+    focusSection(b.dataset.nav)
+    setSectionHash(b.dataset.nav)
+  }
+})
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('hashchange', function () {
+    if (typeof location === 'undefined') return
+    var next = resolveSection(location.hash)
+    show(next)
+    if (location.hash && '#' + next !== location.hash) setSectionHash(next)
+  })
+}
 
 /* ---- overview: the MCP feature surface ---- */
 var ov = { catalog: null, tools: [], groups: [], group: '', query: '', activity: null, timer: null }
@@ -1002,6 +1039,10 @@ async function bootOverview() {
   var gwInstalled = installed.indexOf('astrlink-gateway') !== -1
   document.querySelector('[data-nav="gateway"]').classList.toggle('hidden', !gwInstalled)
   if (!gwInstalled && !document.getElementById('sec-gateway').classList.contains('hidden')) show('overview')
+  var requested = typeof location !== 'undefined' ? location.hash : ''
+  var start = resolveSection(requested)
+  if (start !== 'overview' || (requested && requested !== '#' + start)) setSectionHash(start)
+  if (start !== 'overview') show(start)
   loadBundle().catch(function () {})
 }
 /** The activity feed polls gently so it stays live without hammering the panel. */
@@ -1252,6 +1293,22 @@ async function mfSubmit() {
   mf.submitted = true
   mf.showReds = false
   await mfLoad()
+}
+/* Back to the whole catalog in one go: search text, both size bounds, the
+   purpose filter and the submitted verdict are cleared together. */
+function mfResetFilters() {
+  mf.search = ''
+  mf.min = null
+  mf.max = null
+  mf.taskFilter = ''
+  mf.submitted = false
+  mf.showReds = false
+  var search = document.getElementById('f-search')
+  if (search) search.value = ''
+  document.getElementById('f-min').value = ''
+  document.getElementById('f-max').value = ''
+  mfSavePrefs()
+  mfLoad()
 }
 async function mfRefresh() {
   var status = document.getElementById('mf-status')
@@ -1584,7 +1641,14 @@ function renderGroups(result) {
     cols.appendChild(col)
   })
   if (!groups.length) {
-    cols.innerHTML = '<div class="mf-note">' + (mf.taskFilter ? 'No models in this purpose match the current filters.' : 'nothing matches the current filters.') + '</div>'
+    var empty = mf.taskFilter
+      ? 'No models in this purpose match the current filters.'
+      : 'Nothing in the catalog matches the current filters.'
+    var findLive = mf.search
+      ? ' <button onclick="mfSearch()">Search HuggingFace for “' + esc(mf.search) + '”</button>'
+      : ''
+    cols.innerHTML = '<div class="mf-note">' + empty + findLive +
+      ' <button onclick="mfResetFilters()">Reset filters</button></div>'
   }
 }
 function mfToggle(id) {
@@ -1650,7 +1714,7 @@ async function mfSearch(savedQuery) {
     lastResult = result
     renderMachine(result.machine, result.machineGrade)
     renderGroups(result)
-    status.textContent = 'live search: ' + result.total + ' hits for "' + query + '"'
+    status.textContent = 'live search: ' + result.total + ' hit' + (result.total === 1 ? '' : 's') + ' for "' + query + '"'
   } catch (cause) {
     if (request === mf.listRequest) status.innerHTML = '<span class="err">search failed</span>'
   }
@@ -2112,6 +2176,9 @@ var termIn = document.getElementById('term-in')
 /* New output only pulls the view down while the user is reading the tail:
    scrolling up to read earlier lines is never interrupted. */
 var TERM_FOLLOW_MARGIN = 32
+/* A long session must not grow the page without bound: only the recent
+   scrollback is kept, the session itself is untouched. */
+var TERM_MAX_CHARS = 200000
 function termFollows() {
   if (!termOut) return false
   // A hidden panel has no height yet, so keep the tail current for the moment
@@ -2164,7 +2231,7 @@ async function termStart() {
     es = new EventSource('/api/terminal/events')
     es.onmessage = function (e) {
       var follow = termFollows()
-      termOut.textContent += JSON.parse(e.data)
+      termOut.textContent = (termOut.textContent + JSON.parse(e.data)).slice(-TERM_MAX_CHARS)
       if (follow) termScrollToTail()
     }
   }
@@ -2173,6 +2240,12 @@ async function termStart() {
 async function termStop() {
   var res = await fetch('/api/terminal/stop', { method: 'POST' })
   termRenderState(await res.json())
+}
+/* Clearing the view keeps the session and the command history; only the
+   scrollback on this page is dropped. */
+function termClear() {
+  if (termOut) termOut.textContent = ''
+  termIn.focus()
 }
 function termAutoStart() {
   if (!termStarted) termStart()
