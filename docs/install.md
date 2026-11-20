@@ -139,10 +139,11 @@ also serves its own panel; set `TOOLBOX_MCP_PORT` when `3851` is already
 taken, and `TOOLBOX_MCP_HOME` when you want the settings somewhere else than
 `%APPDATA%\Model Farm\settings`.
 
-Check the journey yourself at any time:
+Check the journey yourself at any time (with no path it checks the default
+install folder):
 
 ```bash
-node scripts/verify-install.cjs
+npm run verify:install -- "C:\Users\you\AppData\Local\Programs\Model Farm"
 ```
 
 It performs the same handshake a client performs and prints the tool count.

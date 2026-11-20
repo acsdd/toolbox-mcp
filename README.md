@@ -45,6 +45,9 @@ Part of the Toolbox family:
 | `llamafarm_status` / `llamafarm_catalog` / `llamafarm_score` / `llamafarm_refresh` | Model Farm: HuggingFace catalog fit-scored against this machine; `status` also returns a 0–100 PC scorecard |
 | `llamafarm_grade` | Rate this PC 0–100, and grade one model against it (weakest-link weighted) when a repo is given |
 | `llamafarm_install` | Pull a catalog model into the local runtime (Ollama by default, or the runtime you picked) |
+| `llamafarm_search` / `llamafarm_quants` | Search HuggingFace live beyond the cached catalog, and list every GGUF quantization of a repo — smallest first, with real file sizes — before installing |
+| `llamafarm_remove` | Remove an installed Ollama model by repo id or exact local name |
+| `llamafarm_run_now` / `llamafarm_progress` | Best green model per task right now; status, percent and bytes of tracked folder downloads |
 | `llamafarm_cancel` | Stop an in-progress GGUF download started by the panel or a tool (Ollama-owned pulls are stopped in their terminal) |
 | `llamafarm_notes` / `llamafarm_note` | Read or save the free-form note kept per model repo (why you kept it, which quant fits); the panel shows it in the model detail |
 | `runtimes_detect` / `runtimes_install` / `runtimes_use` / `runtimes_models` / `runtimes_download` | Local model runtimes: find Ollama, LM Studio, llama.cpp, Jan, GPT4All, KoboldCpp, LocalAI, vLLM, llamafile and text-generation-webui, install Ollama, and choose which one the Model Farm installs into |
@@ -69,7 +72,8 @@ model to AstrLink.
   count the MCP tools, the recorded tool calls and the failures, and the
   **MCP tool surface** lists every tool the server exposes — grouped by
   feature (Crypto watch, Gmail announcer, Resource monitor, Model Farm,
-  AstrLink gateway, Marketplace, Remote servers, Widget bundles), searchable
+  Local runtimes, AstrLink gateway, Marketplace, Remote servers, Widget bundles),
+  searchable
   by name or purpose and filterable by group, with each tool's parameter
   schema shown as chips. A **Live activity** feed on the right lists the tool
   calls as they land, with outcome and duration. The four shared widgets sit
@@ -304,8 +308,8 @@ the widget core repo, so **the widget core has to be published first**:
    and `docs/index.html`, then push `main`, tag and release:
 
 ```bash
+npm run portable
 npm run release:notes -- --to HEAD --out release-notes.md
-sha256sum dist/ModelFarm-Portable-0.9.8.exe dist/ModelFarm-Setup-0.9.8.exe > dist/SHA256SUMS.txt
 git tag v0.9.8
 git push origin main --tags
 gh release create v0.9.8 \
@@ -313,8 +317,10 @@ gh release create v0.9.8 \
   --title "Model Farm 0.9.8" --notes-file docs/release-notes-0.9.8.md
 ```
 
-The release notes repeat the hashes, and `SHA256SUMS.txt` makes verification
-scriptable with `sha256sum -c`.
+`npm run portable` writes `dist/SHA256SUMS.txt` itself, so the checksum file in
+the release always matches the executables it was built with. The release notes
+repeat the hashes, and the checksum file makes verification scriptable with
+`sha256sum -c`.
 
 The download links in this readme and in `docs/index.html` point at the current
 version — update them to the new tag when you cut the next release.
