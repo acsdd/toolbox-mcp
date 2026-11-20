@@ -13,7 +13,7 @@ import fs from 'node:fs'
 const installDir = process.argv[2] ?? join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Model Farm')
 const exe = join(installDir, 'Model Farm.exe')
 const entry = join(installDir, 'resources', 'app.asar', 'dist', 'index.js')
-const home = join(tmpdir(), 'modelfarm-mcp-journey')
+const home = fs.mkdtempSync(join(tmpdir(), 'modelfarm-mcp-journey-'))
 
 /** Reserve a free loopback port so the probe never touches the live panel. */
 const freePort = () =>
@@ -49,6 +49,19 @@ const call = async (name, args) => {
 const show = (label, value) => {
   const trimmed = JSON.stringify(value)
   console.log(`${label}=${trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed}`)
+}
+
+// The journey removes the model when it is done. Refuse to start if this repo
+// is already installed, so a probe can never delete a model the user pulled.
+const before = await call('llamafarm_status', {})
+const existing = (before.ollama?.models ?? [])
+  .map((model) => model.name)
+  .filter((name) => name.includes('phonon-31m-en'))
+if (existing.length > 0) {
+  console.error(`already installed: ${existing.join(', ')} — remove it or pick another repo first`)
+  await transport.close()
+  fs.rmSync(home, { recursive: true, force: true })
+  process.exit(1)
 }
 
 const search = await call('llamafarm_search', { query: 'phonon-31m-en', scenario: 'now' })
