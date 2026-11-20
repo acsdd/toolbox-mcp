@@ -222,6 +222,7 @@ panel port:
 npm run verify:install -- <dir>     # MCP handshake, tool surface, panel catalogue
 npm run verify:secondary -- <dir>   # runtime detection, switching, removal guards
 npm run verify:lmstudio -- <dir>    # real GGUF download into LM Studio, then cleanup
+npm run verify:journey -- <dir>     # Ollama search, quants, install, progress, remove
 ```
 
 Without an argument each probe uses the default install folder
@@ -229,7 +230,9 @@ Without an argument each probe uses the default install folder
 you are testing the artifacts before they are installed.
 
 The LM Studio probe downloads one ~55 MB model, refuses to run if that model is
-already in the folder, and deletes only the files it created.
+already in the folder, and deletes only the files it created. The Ollama probe
+does the same for `gradium/phonon-31m-en`, and fails before touching anything
+if that repository is already installed.
 
 ## Security
 
