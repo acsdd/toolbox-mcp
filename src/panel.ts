@@ -525,7 +525,7 @@ ${WIDGET_HOST_CSS}
           <h2>MCP tool surface <em id="ov-tool-count" aria-live="polite"></em></h2>
           <div class="tool-search">
             <input type="search" id="ov-tool-search" aria-label="Search MCP tools" placeholder="search tools by name, group or purpose…" oninput="ovFilterTools()" autocomplete="off" spellcheck="false" />
-            <button class="btn small" onclick="ovFilterTools()">Filter</button>
+            <button class="btn small" onclick="ovClearFilter()">Clear</button>
           </div>
           <div class="grp-chips" id="ov-groups" role="group" aria-label="Filter tools by group"></div>
           <div id="ov-tools"></div>
@@ -616,7 +616,7 @@ ${WIDGET_HOST_CSS}
       <h1>Marketplace</h1>
       <p class="sub">Shared Toolbox modules, live from the family registry. Search filters as you type.</p>
       <div class="mf-bar">
-        <input type="search" id="mp-search" placeholder="search modules…" oninput="mpSetSearch()" />
+        <input type="search" id="mp-search" aria-label="Search modules" placeholder="search modules…" oninput="mpSetSearch()" />
         <label>category <select id="mp-category" onchange="mpSetCategory()"><option value="">all</option></select></label>
         <button class="btn" onclick="mpRefresh()">Refresh registry</button>
         <div class="mf-status" id="mp-status">loading registry…</div>
@@ -655,7 +655,7 @@ ${WIDGET_HOST_CSS}
           <h2>Crypto watchlist</h2>
           <div class="set-body">
             <p class="set-hint">Coin ids from CoinGecko, comma separated. Up to 8.</p>
-            <input class="set-input" id="set-watchlist" type="text" spellcheck="false" placeholder="bitcoin, ethereum, solana" />
+            <input class="set-input" id="set-watchlist" type="text" spellcheck="false" aria-label="Crypto watchlist coin ids" placeholder="bitcoin, ethereum, solana" />
             <div class="set-actions">
               <button class="btn primary" onclick="setSaveWatchlist()">Save watchlist</button>
               <span class="set-msg" id="set-watchlist-msg" role="status"></span>
@@ -666,7 +666,7 @@ ${WIDGET_HOST_CSS}
           <h2>Resource monitor</h2>
           <div class="set-body">
             <p class="set-hint">Disk to report. Leave empty to follow the system disk.</p>
-            <input class="set-input" id="set-diskpath" type="text" spellcheck="false" placeholder="C:\\" />
+            <input class="set-input" id="set-diskpath" type="text" spellcheck="false" aria-label="Disk path for the resource monitor" placeholder="C:\\" />
             <label class="set-check"><input type="checkbox" id="set-processes" /> <span>Show the process list</span></label>
             <div class="set-actions">
               <button class="btn primary" onclick="setSaveResource()">Save monitor settings</button>
@@ -792,6 +792,18 @@ function renderGroupChips() {
 }
 function ovPickGroup(id) {
   ov.group = id
+  renderGroupChips()
+  renderTools()
+}
+/* One control puts the whole surface back: group, search text and focus. */
+function ovClearFilter() {
+  ov.group = ''
+  ov.query = ''
+  var input = document.getElementById('ov-tool-search')
+  if (input) {
+    input.value = ''
+    if (typeof input.focus === 'function') input.focus()
+  }
   renderGroupChips()
   renderTools()
 }

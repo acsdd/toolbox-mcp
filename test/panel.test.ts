@@ -153,6 +153,16 @@ describe('panel accessibility', () => {
     // The match count is announced as the filter changes.
     assert.match(reply.body, /id="ov-tool-count" aria-live="polite"/)
   })
+
+  it('labels the remaining fields and gives the tool filter a working clear control', async () => {
+    const reply = await ask({ path: '/' })
+    // The button next to the search now resets instead of re-running the filter.
+    assert.match(reply.body, /onclick="ovClearFilter\(\)">Clear<\/button>/)
+    assert.match(reply.body, /function ovClearFilter\(\)/)
+    assert.match(reply.body, /id="mp-search" aria-label="Search modules"/)
+    assert.match(reply.body, /id="set-watchlist" type="text" spellcheck="false" aria-label="Crypto watchlist coin ids"/)
+    assert.match(reply.body, /id="set-diskpath" type="text" spellcheck="false" aria-label="Disk path for the resource monitor"/)
+  })
 })
 
 describe('panel origin checks', () => {

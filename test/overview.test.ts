@@ -70,7 +70,7 @@ function mount(responses: Record<string, unknown> = {}) {
     return Promise.resolve(Response.json({}))
   }
   const client = runInNewContext(
-    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, render: renderTools })',
+    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools })',
     {
       document: {
         getElementById: get,
@@ -87,6 +87,7 @@ function mount(responses: Record<string, unknown> = {}) {
     ov: { tools: unknown[]; groups: unknown[]; group: string; query: string }
     filter: () => void
     pick: (id: string) => void
+    clear: () => void
     render: () => void
   }
   return { client, get, elements }
@@ -154,6 +155,20 @@ describe('overview tool surface', () => {
     const markup = get('ov-tools').innerHTML
     assert.match(markup, /crypto_status/)
     assert.doesNotMatch(markup, /gmail_check/)
+  })
+
+  it('clears the search text and the picked group together', () => {
+    const { client, get } = mount()
+    client.ov.tools = TOOLS
+    client.ov.groups = GROUPS
+    get('ov-tool-search').value = 'gmail'
+    client.filter()
+    client.pick('gmail')
+    client.clear()
+    assert.equal(client.ov.query, '')
+    assert.equal(client.ov.group, '')
+    assert.equal(get('ov-tool-search').value, '')
+    assert.equal(get('ov-tool-count').textContent, '4 of 4')
   })
 
   it('says so when nothing matches', () => {
