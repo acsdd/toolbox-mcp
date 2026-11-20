@@ -13,7 +13,7 @@
         --border: #1f3a2d;
         --border-soft: #16281f;
         --text: #dde5df;
-        --muted: #6d7f74;
+        --muted: #82958a;
         --accent: #9cf37e;
         --accent-2: #5fd7c0;
       }
@@ -75,6 +75,10 @@
       }
       .download .btn:hover { border-color: var(--accent); transform: translateY(-2px); }
       .download .btn.primary { border-color: var(--accent); color: var(--accent); }
+      :is(.download .btn, .card, ul.family a, footer a):focus-visible {
+        outline: 2px solid var(--accent-2);
+        outline-offset: 3px;
+      }
       .download .note { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
       .download .note a { color: var(--accent-2); }
       .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-bottom: 44px; }
