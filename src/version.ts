@@ -9,7 +9,12 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const FALLBACK_VERSION = '0.6.1'
+/**
+ * Only reachable when package.json cannot be read at all (a broken package).
+ * It deliberately carries no release number, so a broken build never claims
+ * to be a version it is not.
+ */
+const FALLBACK_VERSION = '0.0.0-unknown'
 
 let cached: string | null = null
 

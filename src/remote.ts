@@ -10,6 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
+import { appVersion } from './version.js'
 
 export interface RemoteToolDef {
   name: string
@@ -191,10 +192,15 @@ export async function assertRemoteEndpointAllowed(endpoint: string, policy: Remo
   return url
 }
 
+/** Identity this server presents to remote MCP servers; one source of truth. */
+export function remoteClientInfo(): { name: string; version: string } {
+  return { name: 'toolbox-mcp', version: appVersion() }
+}
+
 /** Default factory: a real MCP client over streamable HTTP, public HTTPS only. */
 export const connectRemote: RemoteConnect = async (endpoint) => {
   const url = await assertRemoteEndpointAllowed(endpoint)
-  const client = new Client({ name: 'toolbox-mcp', version: '0.5.0' })
+  const client = new Client(remoteClientInfo())
   await client.connect(new StreamableHTTPClientTransport(url))
   return {
     listTools: async () => {
