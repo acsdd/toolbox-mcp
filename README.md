@@ -23,7 +23,9 @@ Install, update, roll back and uninstall are described in
 [docs/install.md](docs/install.md). Older builds are on the
 [releases page](https://github.com/acsdd/toolbox-mcp/releases). The binaries are
 not code-signed, so Windows SmartScreen shows an "unverified publisher" warning
-on first start.
+on first start. Each release ships
+[`SHA256SUMS.txt`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.8/SHA256SUMS.txt)
+so a download can be checked with `sha256sum -c SHA256SUMS.txt`.
 
 Part of the Toolbox family:
 
