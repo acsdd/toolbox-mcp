@@ -313,6 +313,8 @@ ${WIDGET_HOST_CSS}
   .minstall button { font: inherit; color: #0b1510; background: var(--accent); border: 0; border-radius: 3px; padding: 7px 12px; cursor: pointer; }
   .minstall button:disabled { opacity: 0.55; cursor: progress; }
   .minstall button:hover:not(:disabled) { filter: brightness(1.08); }
+  .minstall select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 6px 8px; min-height: 30px; }
+  .minstall .mf-target-wrap { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: .6875rem; }
   .minstall .ok { color: var(--accent); }
   .minstall .err { color: #e08b7a; }
   .minstall .note { color: var(--dim); }
@@ -682,7 +684,7 @@ ${WIDGET_HOST_CSS}
 </div>
 
 <script>
-var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, dlSamples: {}, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [], notes: {}, noteDrafts: {} }
+var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, dlSamples: {}, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [], notes: {}, noteDrafts: {}, installTarget: null }
 var lastResult = null
 
 function show(name) {
@@ -1436,6 +1438,9 @@ async function rtDetect() {
     return
   }
   rtRender()
+  // The cards name the runtime they install into, so refresh them once the
+  // detection lands. Notes in progress survive the re-render.
+  if (lastResult) renderGroups(lastResult)
 }
 function rtRender() {
   var meta = document.getElementById('rt-meta')
@@ -1462,12 +1467,22 @@ function rtLabel(id) {
   var found = rt.data && rt.data.runtimes && rt.data.runtimes.filter(function (r) { return r.id === id })[0]
   return found ? found.label : (id === 'ollama' ? 'Ollama' : id)
 }
-/** The runtime the Model Farm installs into right now. */
-function rtActiveLabel() {
-  if (!rt.data || !rt.data.runtimes) return 'Ollama'
-  var id = rt.data.active ? rt.data.active : 'ollama'
-  var found = rt.data.runtimes.filter(function (r) { return r.id === id })[0]
-  return found ? found.label : 'Ollama'
+/** Runtimes a model can be installed into: the ones found here, plus the active one. */
+function rtInstallTargets() {
+  var all = rt.data && rt.data.runtimes ? rt.data.runtimes : []
+  var found = all.filter(function (r) { return r.installed || r.running || (rt.data && rt.data.active === r.id) })
+  if (!found.length) return [{ id: 'ollama', label: 'Ollama' }]
+  return found.map(function (r) { return { id: r.id, label: r.label } })
+}
+/** The chosen install runtime, checked against what is actually there. */
+function rtInstallTarget() {
+  var targets = rtInstallTargets()
+  var wanted = mf.installTarget
+  var known = function (id) { return targets.some(function (t) { return t.id === id }) }
+  if (wanted && known(wanted)) return wanted
+  var active = rt.data && rt.data.active
+  if (active && known(active)) return active
+  return targets[0].id
 }
 async function rtUse(id) {
   var log = document.getElementById('rt-log')
@@ -1582,7 +1597,17 @@ function renderGroups(result) {
         var hints = m.hints.map(function (h) { return '<li>' + esc(h) + '</li>' }).join('')
         var inst = mf.install[m.id]
         var pullable = (m.formats || []).indexOf('gguf') !== -1
-        var targetName = rtActiveLabel()
+        var targets = rtInstallTargets()
+        var targetId = rtInstallTarget()
+        var targetName = rtLabel(targetId)
+        // More than one runtime is installed here, so let the user pick the
+        // target right where they start the download.
+        var targetPicker = targets.length > 1
+          ? '<label class="mf-target-wrap">Install in <select class="mf-target" aria-label="Runtime to install ' + esc(m.label) + ' into" onchange="mfPickTarget(this)">' +
+            targets.map(function (t) {
+              return '<option value="' + esc(t.id) + '"' + (t.id === targetId ? ' selected' : '') + '>' + esc(t.label) + '</option>'
+            }).join('') + '</select></label>'
+          : ''
         var quant = mf.quants[m.id]
         var quantBlock = ''
         if (pullable) {
@@ -1609,8 +1634,9 @@ function renderGroups(result) {
           : (m.installed && m.installedRuntime ? '<span class="note">Manage models in ' + esc(rtLabel(m.installedRuntime)) + '.</span>' : '')
         var installBlock = '<div class="minstall">' +
           (pullable
-            ? '<button onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install in ' + esc(targetName) + '</button>'
-            : '<span class="note">safetensors only — convert to GGUF to install in ' + esc(targetName) + '</span>') +
+            ? targetPicker +
+              '<button class="mf-install" onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install' + (targets.length > 1 ? '' : ' in ' + esc(targetName)) + '</button>'
+            : '<span class="note mf-target-note">safetensors only — convert to GGUF to install in ' + esc(targetName) + '</span>') +
           (pullable && inst && inst.state === 'err'
             ? '<button class="btn small" onclick="mfInstall(\\'' + esc(m.id) + '\\')">Retry install</button>'
             : '') +
@@ -1655,12 +1681,22 @@ function mfToggle(id) {
   mf.expanded[id] = !mf.expanded[id]
   if (lastResult) renderGroups(lastResult)
 }
+function mfPickTarget(select) {
+  mf.installTarget = select.value
+  // Retarget every card without a re-render, so focus stays on this select.
+  document.querySelectorAll('select.mf-target').forEach(function (s) { if (s !== select) s.value = select.value })
+  var name = rtLabel(select.value)
+  document.querySelectorAll('.mf-target-note').forEach(function (n) {
+    n.textContent = 'safetensors only — convert to GGUF to install in ' + name
+  })
+}
 async function mfInstall(id, quant) {
-  mf.install[id] = { state: 'busy', message: 'downloading…' }
+  var target = rtInstallTarget()
+  mf.install[id] = { state: 'busy', message: 'downloading into ' + rtLabel(target) + '…' }
   if (lastResult) renderGroups(lastResult)
   mfStartProgress()
   try {
-    var payload = { repo: id }
+    var payload = { repo: id, runtime: target }
     var chosen = quant || (mf.quants[id] && mf.quants[id].chosen)
     if (chosen) payload.quant = chosen
     var res = await fetch('/api/llamafarm/install', {

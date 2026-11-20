@@ -73,7 +73,7 @@ function mount(responses: Record<string, unknown> = {}) {
   }
   const history = { urls: [] as string[], replaceState(_state: unknown, _title: unknown, url: string) { this.urls.push(url) } }
   const client = runInNewContext(
-    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters })',
+    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget })',
     {
       document: {
         getElementById: get,
@@ -98,6 +98,11 @@ function mount(responses: Record<string, unknown> = {}) {
     setHash: (name: string) => void
     termClear: () => void
     reset: () => void
+    rt: { data: null | { active?: string | null; runtimes?: Array<Record<string, unknown>> } }
+    mfState: { installTarget: string | null }
+    targets: () => Array<{ id: string; label: string }>
+    target: () => string
+    pickTarget: (select: { value: string }) => void
   }
   return { client, get, elements, history }
 }
@@ -231,5 +236,60 @@ describe('panel sections and filters', () => {
     assert.equal(get('f-min').value, '')
     assert.equal(get('f-max').value, '')
     assert.equal(get('mf-status').innerHTML, 'scoring…')
+  })
+})
+
+describe('model farm install target', () => {
+  it('offers the runtimes found here and defaults to the active one', () => {
+    const { client } = mount()
+    client.rt.data = {
+      active: 'lmstudio',
+      runtimes: [
+        { id: 'ollama', label: 'Ollama', installed: true, running: true },
+        { id: 'lmstudio', label: 'LM Studio', installed: true, running: false },
+        { id: 'jan', label: 'Jan', installed: false, running: false }
+      ]
+    }
+    // The VM has its own prototypes, so compare the shape, not the realm.
+    assert.deepEqual(JSON.parse(JSON.stringify(client.targets())), [
+      { id: 'ollama', label: 'Ollama' },
+      { id: 'lmstudio', label: 'LM Studio' }
+    ])
+    assert.equal(client.target(), 'lmstudio')
+  })
+
+  it('keeps an explicit pick while it is still found', () => {
+    const { client } = mount()
+    client.rt.data = {
+      active: 'ollama',
+      runtimes: [
+        { id: 'ollama', label: 'Ollama', installed: true, running: true },
+        { id: 'lmstudio', label: 'LM Studio', installed: true, running: false }
+      ]
+    }
+    client.mfState.installTarget = 'lmstudio'
+    assert.equal(client.target(), 'lmstudio')
+    client.pickTarget({ value: 'ollama' })
+    assert.equal(client.mfState.installTarget, 'ollama')
+    assert.equal(client.target(), 'ollama')
+  })
+
+  it('falls back to the active runtime when a pick disappears', () => {
+    const { client } = mount()
+    client.rt.data = {
+      active: 'ollama',
+      runtimes: [
+        { id: 'ollama', label: 'Ollama', installed: true, running: true },
+        { id: 'lmstudio', label: 'LM Studio', installed: false, running: false }
+      ]
+    }
+    client.mfState.installTarget = 'lmstudio'
+    assert.equal(client.target(), 'ollama')
+  })
+
+  it('stays on Ollama before detection has run', () => {
+    const { client } = mount()
+    assert.deepEqual(JSON.parse(JSON.stringify(client.targets())), [{ id: 'ollama', label: 'Ollama' }])
+    assert.equal(client.target(), 'ollama')
   })
 })

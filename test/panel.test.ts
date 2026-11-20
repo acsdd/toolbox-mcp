@@ -612,6 +612,25 @@ describe('panel model farm feature UI', () => {
     assert.match(reply.body, /slice\(-TERM_MAX_CHARS\)/)
   })
 
+  it('lets the install pick a runtime when more than one is found', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    for (const hook of [
+      'function rtInstallTargets()',
+      'function rtInstallTarget()',
+      'function mfPickTarget(select)',
+      'class="mf-target"',
+      'aria-label="Runtime to install ',
+      'onchange="mfPickTarget(this)"',
+      "var payload = { repo: id, runtime: target }"
+    ]) {
+      assert.ok(reply.body.includes(hook), `page missing ${hook}`)
+    }
+    // One runtime keeps the plain "Install in <label>" button; the picker only
+    // appears when there is a choice to make.
+    assert.match(reply.body, /targets\.length > 1 \? '' : ' in '/)
+  })
+
   it('gives every section an address and follows the rail in the URL', async () => {
     const reply = await ask({ path: '/' })
     assert.equal(reply.status, 200)
