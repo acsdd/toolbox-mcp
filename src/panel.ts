@@ -671,7 +671,7 @@ ${WIDGET_HOST_CSS}
 </div>
 
 <script>
-var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [], notes: {}, noteDrafts: {} }
+var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, dlSamples: {}, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [], notes: {}, noteDrafts: {} }
 var lastResult = null
 
 function show(name) {
@@ -1515,6 +1515,9 @@ function renderGroups(result) {
           (pullable
             ? '<button onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install in ' + esc(targetName) + '</button>'
             : '<span class="note">safetensors only — convert to GGUF to install in ' + esc(targetName) + '</span>') +
+          (pullable && inst && inst.state === 'err'
+            ? '<button class="btn small" onclick="mfInstall(\\'' + esc(m.id) + '\\')">Retry install</button>'
+            : '') +
           removeBtn +
           (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '">' + esc(inst.message) + '</span>' : '') +
           '</div>' + quantBlock
@@ -1680,6 +1683,33 @@ function mfPickQuant(id, select) {
   var note = document.getElementById('mf-quant-note-' + id)
   if (note) note.innerHTML = quantFitNote(quant)
 }
+function mfRate(bytesPerSecond) {
+  if (!isFinite(bytesPerSecond) || bytesPerSecond <= 0) return ''
+  var mb = bytesPerSecond / (1024 * 1024)
+  return (mb >= 10 ? mb.toFixed(0) : mb.toFixed(1)) + ' MB/s'
+}
+function mfEta(seconds) {
+  if (!isFinite(seconds) || seconds <= 0) return ''
+  if (seconds < 60) return Math.ceil(seconds) + 's left'
+  var minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return minutes + 'm ' + Math.ceil(seconds % 60) + 's left'
+  return Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm left'
+}
+// Turn consecutive progress polls into a download rate and a time estimate.
+function mfTrackRate(d) {
+  var now = Date.now()
+  var last = mf.dlSamples[d.repo]
+  var parts = ''
+  if (last && now > last.at && d.receivedBytes >= last.bytes) {
+    var rate = (d.receivedBytes - last.bytes) / ((now - last.at) / 1000)
+    if (rate > 0) {
+      parts = mfRate(rate)
+      if (d.totalBytes > d.receivedBytes) parts += ' · ' + mfEta((d.totalBytes - d.receivedBytes) / rate)
+    }
+  }
+  mf.dlSamples[d.repo] = { bytes: d.receivedBytes, at: now }
+  return parts
+}
 // Downloads can also start outside the panel (e.g. through an MCP tool);
 // opening Model Farm checks once and adopts any that are still running.
 async function mfSyncProgress() {
@@ -1713,11 +1743,15 @@ function mfStartProgress() {
         // list and the recently-installed strip are stale, so refresh them.
         var outside = shown.some(function (repo) { return !mf.install[repo] })
         shown = []
+        mf.dlSamples = {}
         mfStopProgress()
         if (outside) mfRefreshInstalled()
         return
       }
       shown = active.map(function (d) { return d.repo })
+      Object.keys(mf.dlSamples).forEach(function (repo) {
+        if (shown.indexOf(repo) === -1) delete mf.dlSamples[repo]
+      })
       box.innerHTML = active.map(function (d) {
         var indet = d.percent === null || d.percent === undefined
         var pct = indet ? 0 : d.percent
@@ -1728,6 +1762,8 @@ function mfStartProgress() {
         var size = indet
           ? (d.totalBytes ? 'target ' + gb(d.totalBytes) : '')
           : gb(d.receivedBytes) + (d.totalBytes ? ' / ' + gb(d.totalBytes) : '')
+        var rate = indet ? '' : mfTrackRate(d)
+        if (rate) size += ' · ' + rate
         return '<div class="mf-dl"><span>' + esc(d.repo) + ' → ' + esc(d.runtime) + '</span>' +
           bar + label + '<small>' + size + '</small>' +
           '<button class="mf-cancel-btn" type="button" data-repo="' + esc(d.repo) + '" onclick="mfCancel(this)">cancel</button></div>'
@@ -1845,7 +1881,7 @@ function mpRenderDetail() {
     '<div class="mp-tags">' + tags + '</div>' +
     '<div class="mp-actions">' + action + (m.installed && !m.builtIn ? '<span class="mp-state installed">INSTALLED</span>' : '') + '</div>' +
     (mp.note ? '<p class="mp-note">' + esc(mp.note) + '</p>' : '') +
-    (m.endpoint ? '<p class="mp-note">remote endpoint: ' + esc(m.endpoint) + '<br />tool arguments leave this machine</p>' : '') +
+    (m.endpoint ? '<p class="mp-note">remote endpoint: ' + esc(m.endpoint) + '<br />public HTTPS only — private, loopback and local addresses are refused<br />tool arguments leave this machine</p>' : '') +
     (m.credentialsRequired ? '<p class="mp-note">requires credentials after install</p>' : '') +
     (m.homepage ? '<a href="' + esc(m.homepage) + '" target="_blank" rel="noopener">homepage ↗</a>' : '')
 }

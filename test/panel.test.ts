@@ -522,4 +522,12 @@ describe('panel model farm feature UI', () => {
       assert.ok(reply.body.includes(hook), `page missing ${hook}`)
     }
   })
+
+  it('offers a retry after a failed install and shows download rate and time left', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    assert.ok(reply.body.includes('Retry install'), 'page missing the failed-install retry')
+    assert.ok(reply.body.includes('MB/s') && reply.body.includes('left'), 'page missing download rate or time estimate')
+    assert.ok(reply.body.includes('private, loopback and local addresses are refused'), 'page missing the remote endpoint policy note')
+  })
 })
