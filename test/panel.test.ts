@@ -103,10 +103,43 @@ describe('panel widget-host pattern', () => {
     assert.match(reply.body, /main\.host-screen \{ padding: 28px 30px 48px; \}/)
     // Active nav accent sits on the rail's inner (left) edge.
     assert.match(reply.body, /inset 2px 0 0 var\(--accent\)/)
-    // The stage takes the second column, and falls back to the first when the
-    // narrow layout hides the rail.
+    // The stage takes the second column, and on narrow screens the rail
+    // folds into a strip above it instead of disappearing.
     assert.match(reply.body, /main \{ grid-column: 2; grid-row: 2;/)
-    assert.match(reply.body, /@media \(max-width: 860px\)[\s\S]{0,240}main \{ grid-column: 1; \}/)
+    const narrow = reply.body.slice(reply.body.indexOf('@media (max-width: 860px)'))
+    assert.match(narrow, /\.sidebar \{[^}]*flex-direction: row/)
+    assert.match(narrow, /\.sidebar nav \{ flex-direction: row;/)
+    assert.match(narrow, /main \{ grid-column: 1; grid-row: 3; \}/)
+    assert.doesNotMatch(narrow, /\.sidebar \{ display: none/)
+  })
+})
+
+describe('panel accessibility', () => {
+  it('marks the rail as navigation and the active section as current', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    assert.match(reply.body, /<nav aria-label="Panel sections">/)
+    assert.match(reply.body, /data-nav="overview" aria-current="page"/)
+    // Rail glyphs and ordering numbers are decoration, not names.
+    assert.match(reply.body, /data-nav="models"><i aria-hidden="true">/)
+    assert.match(reply.body, /<small aria-hidden="true">02<\/small>/)
+    // Switching sections keeps aria-current in step with the accent state.
+    assert.match(reply.body, /if \(active\) b\.setAttribute\('aria-current', 'page'\)/)
+    // The new section's heading takes focus so a screen reader announces it.
+    assert.match(reply.body, /heading\.focus\(\{ preventScroll: true \}\)/)
+    // Links get the same visible ring as controls; the browser default is
+    // near-black and disappears against the dark panel.
+    assert.match(reply.body, /a:focus-visible \{ outline: 1px solid var\(--accent\); outline-offset: 2px; \}/)
+  })
+
+  it('labels search fields and keeps toggle state on the scenario buttons', async () => {
+    const reply = await ask({ path: '/' })
+    assert.match(reply.body, /id="ov-tool-search" aria-label="Search MCP tools"/)
+    assert.match(reply.body, /id="f-search" aria-label="Search models"/)
+    assert.match(reply.body, /id="term-in"[^>]*aria-label="Terminal command"/)
+    assert.match(reply.body, /id="sc-now" class="on" aria-pressed="true"/)
+    assert.match(reply.body, /id="sc-total" aria-pressed="false"/)
+    assert.match(reply.body, /b\.setAttribute\('aria-pressed', String\(on\)\)/)
   })
 })
 

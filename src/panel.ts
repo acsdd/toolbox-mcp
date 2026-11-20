@@ -94,7 +94,7 @@ ${WIDGET_HOST_CSS}
   }
   button, input, select { font: inherit; color: inherit; }
   button { cursor: pointer; }
-  button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 
   /* Widget host: vertical nav rail on the left, glued stage on the right. */
   .shell { display: grid; grid-template: 62px 1fr / 232px minmax(0, 1fr); height: 100vh; }
@@ -107,6 +107,7 @@ ${WIDGET_HOST_CSS}
   .badge.live { color: var(--accent); border-color: #2a4c34; background: rgba(156, 243, 126, .06); }
 
   .sidebar { grid-row: 2; grid-column: 1; display: flex; flex-direction: column; gap: 6px; padding: 22px 16px; background: rgba(8, 17, 12, .72); border-right: 1px solid var(--border-soft); }
+  .sidebar nav { display: flex; flex-direction: column; gap: 6px; }
   .navbtn { display: grid; grid-template-columns: 30px 1fr auto; align-items: center; min-height: 48px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; color: #71847a; text-align: left; transition: background .12s ease, color .12s ease; }
   .navbtn i { font-style: normal; font-size: 1.0625rem; }
   .navbtn small { color: var(--dim); font-size: .5625rem; }
@@ -466,9 +467,15 @@ ${WIDGET_HOST_CSS}
   .set-msg.err { color: var(--red); }
 
   @media (max-width: 860px) {
-    .shell { grid-template: 62px 1fr / 1fr; }
-    .sidebar { display: none; }
-    main { grid-column: 1; }
+    /* The rail folds into a scrollable strip: at this width the sections
+       still need a way in, so the navigation stays on screen. */
+    .shell { grid-template: 62px auto minmax(0, 1fr) / minmax(0, 1fr); }
+    .sidebar { grid-row: 2; grid-column: 1; flex-direction: row; align-items: center; gap: 8px; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--border-soft); overflow-x: auto; }
+    .sidebar nav { flex-direction: row; gap: 6px; }
+    .sidebar .foot { display: none; }
+    .navbtn { grid-template-columns: auto auto; gap: 8px; min-height: 38px; padding: 0 12px; white-space: nowrap; }
+    .navbtn small { display: none; }
+    main { grid-column: 1; grid-row: 3; }
     .mf-bar input[type="search"] { width: 100%; }
     main.host-screen { padding: 22px 18px 40px; }
   }
@@ -484,12 +491,14 @@ ${WIDGET_HOST_CSS}
   </header>
 
   <aside class="sidebar">
-    <button class="navbtn active" data-nav="overview"><i>▣</i><span>Overview</span><small>01</small></button>
-    <button class="navbtn" data-nav="models"><i>⌁</i><span>Model Farm</span><small>02</small></button>
-    <button class="navbtn" data-nav="terminal"><i>❯</i><span>Terminal</span><small>03</small></button>
-    <button class="navbtn" data-nav="marketplace"><i>▦</i><span>Marketplace</span><small>04</small></button>
-    <button class="navbtn hidden" data-nav="gateway"><i>⇄</i><span>Gateway</span><small>05</small></button>
-    <button class="navbtn" data-nav="settings"><i>⚙</i><span>Settings</span><small>06</small></button>
+    <nav aria-label="Panel sections">
+      <button class="navbtn active" data-nav="overview" aria-current="page"><i aria-hidden="true">▣</i><span>Overview</span><small aria-hidden="true">01</small></button>
+      <button class="navbtn" data-nav="models"><i aria-hidden="true">⌁</i><span>Model Farm</span><small aria-hidden="true">02</small></button>
+      <button class="navbtn" data-nav="terminal"><i aria-hidden="true">❯</i><span>Terminal</span><small aria-hidden="true">03</small></button>
+      <button class="navbtn" data-nav="marketplace"><i aria-hidden="true">▦</i><span>Marketplace</span><small aria-hidden="true">04</small></button>
+      <button class="navbtn hidden" data-nav="gateway"><i aria-hidden="true">⇄</i><span>Gateway</span><small aria-hidden="true">05</small></button>
+      <button class="navbtn" data-nav="settings"><i aria-hidden="true">⚙</i><span>Settings</span><small aria-hidden="true">06</small></button>
+    </nav>
     <div class="foot"><b>LOCAL SESSION</b><br />MCP stdio + panel<br />127.0.0.1 only</div>
   </aside>
 
@@ -515,7 +524,7 @@ ${WIDGET_HOST_CSS}
         <div class="card">
           <h2>MCP tool surface <em id="ov-tool-count"></em></h2>
           <div class="tool-search">
-            <input type="search" id="ov-tool-search" placeholder="search tools by name, group or purpose…" oninput="ovFilterTools()" autocomplete="off" spellcheck="false" />
+            <input type="search" id="ov-tool-search" aria-label="Search MCP tools" placeholder="search tools by name, group or purpose…" oninput="ovFilterTools()" autocomplete="off" spellcheck="false" />
             <button class="btn small" onclick="ovFilterTools()">Filter</button>
           </div>
           <div class="grp-chips" id="ov-groups"></div>
@@ -542,8 +551,8 @@ ${WIDGET_HOST_CSS}
       <p class="sub">HuggingFace models fit-scored against this machine. Filters mark live; submit for the ordered verdict.</p>
       <div class="mf-bar">
         <div class="seg" role="group" aria-label="Scenario">
-          <button id="sc-now" class="on" onclick="setScenario('now')">NOW</button>
-          <button id="sc-total" onclick="setScenario('total')">TOTAL</button>
+          <button id="sc-now" class="on" aria-pressed="true" onclick="setScenario('now')">NOW</button>
+          <button id="sc-total" aria-pressed="false" onclick="setScenario('total')">TOTAL</button>
         </div>
         <label>min <select id="f-min" onchange="setRange()">
           <option value="">any</option><option value="1">1B+</option><option value="3">3B+</option>
@@ -553,7 +562,7 @@ ${WIDGET_HOST_CSS}
           <option value="">any</option><option value="3">3B</option><option value="7">7B</option>
           <option value="13">13B</option><option value="33">33B</option><option value="70">70B</option>
         </select></label>
-        <input type="search" id="f-search" placeholder="search models…" oninput="setSearch()" />
+        <input type="search" id="f-search" aria-label="Search models" placeholder="search models…" oninput="setSearch()" />
         <div class="mf-purpose-filters" id="mf-purpose-filters" aria-label="Filter models by purpose"></div>
         <button class="btn primary" onclick="mfSubmit()">Submit filter</button>
         <button class="btn" onclick="mfSearch()">Search HuggingFace</button>
@@ -598,7 +607,7 @@ ${WIDGET_HOST_CSS}
         <pre class="term-out" id="term-out"></pre>
         <div class="term-line">
           <span>❯</span>
-          <input id="term-in" autocomplete="off" spellcheck="false" aria-describedby="term-completion" placeholder="type a command, Enter to run, ↑ history, Tab to complete, Ctrl+C to interrupt" />
+          <input id="term-in" autocomplete="off" spellcheck="false" aria-label="Terminal command" aria-describedby="term-completion" placeholder="type a command, Enter to run, ↑ history, Tab to complete, Ctrl+C to interrupt" />
         </div>
         <div class="term-completion" id="term-completion" role="status" aria-live="polite" hidden></div>
       </div>
@@ -675,7 +684,12 @@ var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, su
 var lastResult = null
 
 function show(name) {
-  document.querySelectorAll('.navbtn').forEach(function (b) { b.classList.toggle('active', b.dataset.nav === name) })
+  document.querySelectorAll('.navbtn').forEach(function (b) {
+    const active = b.dataset.nav === name
+    b.classList.toggle('active', active)
+    if (active) b.setAttribute('aria-current', 'page')
+    else b.removeAttribute('aria-current')
+  })
   ;['overview', 'models', 'terminal', 'marketplace', 'gateway', 'settings'].forEach(function (s) {
     document.getElementById('sec-' + s).classList.toggle('hidden', s !== name)
   })
@@ -687,7 +701,15 @@ function show(name) {
   if (name === 'settings') setLoad()
   if (name === 'overview') ovTimer()
 }
-document.querySelectorAll('.navbtn').forEach(function (b) { b.onclick = function () { show(b.dataset.nav) } })
+/* Announce the new view: focus moves from the rail to its heading, so a
+   screen reader reads the section it just switched to. */
+function focusSection(name) {
+  var heading = document.querySelector('#sec-' + name + ' h1')
+  if (!heading) return
+  heading.setAttribute('tabindex', '-1')
+  heading.focus({ preventScroll: true })
+}
+document.querySelectorAll('.navbtn').forEach(function (b) { b.onclick = function () { show(b.dataset.nav); focusSection(b.dataset.nav) } })
 
 /* ---- overview: the MCP feature surface ---- */
 var ov = { catalog: null, tools: [], groups: [], group: '', query: '', activity: null, timer: null }
@@ -1062,10 +1084,15 @@ function quantFitNote(quant) {
   return '<span class="fit-ok">' + esc(chosenVal) + ' fits with ' + gb(fit.headroom) + ' to spare</span>'
 }
 
+function mfScenarioButton(id, on) {
+  var b = document.getElementById(id)
+  b.classList.toggle('on', on)
+  b.setAttribute('aria-pressed', String(on))
+}
 function setScenario(sc) {
   mf.scenario = sc
-  document.getElementById('sc-now').classList.toggle('on', sc === 'now')
-  document.getElementById('sc-total').classList.toggle('on', sc === 'total')
+  mfScenarioButton('sc-now', sc === 'now')
+  mfScenarioButton('sc-total', sc === 'total')
   mfSavePrefs()
   queueLoad()
 }
@@ -1096,8 +1123,8 @@ async function mfRestorePrefs() {
   if (!res.ok) throw new Error('settings unavailable')
   var prefs = (await res.json()).modelFarm || {}
   mf.scenario = prefs.scenario === 'total' ? 'total' : 'now'
-  document.getElementById('sc-now').classList.toggle('on', mf.scenario === 'now')
-  document.getElementById('sc-total').classList.toggle('on', mf.scenario === 'total')
+  mfScenarioButton('sc-now', mf.scenario === 'now')
+  mfScenarioButton('sc-total', mf.scenario === 'total')
   mf.min = typeof prefs.minParams === 'number' ? prefs.minParams : null
   mf.max = typeof prefs.maxParams === 'number' ? prefs.maxParams : null
   document.getElementById('f-min').value = mf.min === null ? '' : String(mf.min)
