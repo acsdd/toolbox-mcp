@@ -503,12 +503,13 @@ describe('model farm: what can I run now (point 7)', () => {
         ollamaNames: ['qwen2.5-coder-7b-instruct'],
         catalog: [QWEN, tiny],
         details: {
-          // Shrink QWEN so both it and tiny score green on a modest free disk.
-          // QWEN stays heavier than tiny, so lightness alone would pick tiny.
+          // Both scores must be green no matter how busy the test machine is, so
+          // keep the weights tiny. QWEN stays heavier than tiny, so lightness
+          // alone would pick tiny while the installed check should pick QWEN.
           'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF': {
-            siblings: [{ rfilename: 'qwen2.5-coder-7b-instruct-q4_k_m.gguf', lfs: { size: 1 * GiB } }]
+            siblings: [{ rfilename: 'qwen2.5-coder-7b-instruct-q4_k_m.gguf', lfs: { size: 0.1 * GiB } }]
           },
-          'acme/tiny-GGUF': { siblings: [{ rfilename: 'tiny-q4_k_m.gguf', lfs: { size: 0.2 * GiB } }] }
+          'acme/tiny-GGUF': { siblings: [{ rfilename: 'tiny-q4_k_m.gguf', lfs: { size: 0.05 * GiB } }] }
         }
       }),
       execFileImpl: gpuExec
