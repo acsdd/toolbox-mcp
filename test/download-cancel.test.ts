@@ -62,11 +62,13 @@ function mockGgufFetch(): RuntimeFetch {
 describe('model farm: download cancellation', () => {
   it('gracefully cancels an in-progress transfer when requested', async () => {
     let downloadAborted = false
+    let downloadStarted = false
     const services = createServices({
       fetchImpl: mockCatalogFetch(),
       runtimeFetchImpl: mockGgufFetch(),
       freeDiskImpl: async () => 100 * 1024 * 1024 * 1024,
       downloadFileImpl: async (_url, _target, _onProgress, signal) => {
+        downloadStarted = true
         return new Promise<number>((resolve, reject) => {
           const timeout = setTimeout(() => resolve(1024), 5000)
           if (signal) {
@@ -90,11 +92,12 @@ describe('model farm: download cancellation', () => {
     let progress = await services.llamafarmProgress()
     for (let i = 0; i < 50; i++) {
       progress = await services.llamafarmProgress()
-      if (progress.downloads.length > 0) break
+      if (progress.downloads.length > 0 && downloadStarted) break
       await new Promise((r) => setTimeout(r, 20))
     }
     assert.equal(progress.downloads.length, 1)
     assert.equal(progress.downloads[0].status, 'downloading')
+    assert.equal(downloadStarted, true)
 
     const cancelRes = await services.llamafarmCancel({ repo: 'test/cancel-model-3b' })
     assert.equal(cancelRes.ok, true)
