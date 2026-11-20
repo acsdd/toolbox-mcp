@@ -6,7 +6,7 @@
 
 **Site:** <https://acsdd.github.io/toolbox-mcp/> — The project landing page.
 
-Local-first MCP server that exposes the shared [Toolbox widgets](https://github.com/acsdd/toolbox-widgets) — **crypto watch**, **Gmail announcer** and **resource monitor** — to any MCP client, plus a small ops panel on `http://127.0.0.1:3851`.
+Local-first MCP server: the shared [Toolbox widgets](https://github.com/acsdd/toolbox-widgets) — **crypto watch**, **Gmail announcer**, **resource monitor** — the **Model Farm** (catalog, fit scoring, local runtimes), the module **Marketplace** and remote MCP servers, all behind one tool surface, plus a small ops panel on `http://127.0.0.1:3851`.
 
 ## Download the Model Farm app
 
