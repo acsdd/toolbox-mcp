@@ -65,8 +65,11 @@ async function main() {
   })
   const client = new Client({ name: 'modelfarm-install-probe', version: '1.0.0' })
 
+  let childPid = null
   try {
     await client.connect(transport)
+    // Read the pid while the transport is open; closing it clears the handle.
+    childPid = transport.pid
     const { tools } = await client.listTools()
     assert.ok(tools.length >= 30, `expected the full tool surface, saw ${tools.length}`)
 
@@ -86,6 +89,11 @@ async function main() {
     console.log('MCP_CLIENT_JOURNEY=ok')
   } finally {
     await client.close().catch(() => {})
+    // Windows keeps the Electron-as-Node child alive after stdin closes, so a
+    // finished probe would otherwise leave an MCP server and its panel behind.
+    if (childPid) {
+      try { process.kill(childPid) } catch { /* already gone */ }
+    }
     fs.rmSync(home, { recursive: true, force: true })
   }
 }

@@ -37,6 +37,8 @@ const transport = new StdioClientTransport({
 
 const client = new Client({ name: 'secondary-runtime-acceptance', version: '1.0.0' })
 await client.connect(transport)
+// Read the pid while the transport is open; closing it clears the handle.
+const childPid = transport.pid
 
 const call = async (name, args) => {
   const result = await client.callTool({ name, arguments: args })
@@ -85,6 +87,12 @@ try {
 
   console.log('SECONDARY_RUNTIME_ACCEPTANCE=ok')
 } finally {
+  await client.close().catch(() => {})
   await transport.close().catch(() => {})
+  // Windows keeps the Electron-as-Node child alive after stdin closes, so a
+  // finished probe would otherwise leave an MCP server and its panel behind.
+  if (childPid) {
+    try { process.kill(childPid) } catch { /* already gone */ }
+  }
   rmSync(home, { recursive: true, force: true })
 }
