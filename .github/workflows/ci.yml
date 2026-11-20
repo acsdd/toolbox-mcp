@@ -17,12 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The @toolbox/widgets dependency is a sibling checkout (symlinked by
-      # npm), so its own runtime deps must be installed for Node to resolve
-      # them from the package realpath.
+      # Pin the sibling dependency so the same MCP commit always tests the
+      # same widget source. Update this revision deliberately after validation.
       - name: Fetch widget core
         shell: bash
-        run: git clone https://github.com/acsdd/toolbox-widgets.git ../toolbox-widgets
+        run: |
+          git clone https://github.com/acsdd/toolbox-widgets.git ../toolbox-widgets
+          git -C ../toolbox-widgets checkout --detach 146b9ba5446575d36263c835b503608c218944d1
 
       - name: Install widget core deps
         run: npm install --omit=dev

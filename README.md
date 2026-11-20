@@ -16,8 +16,8 @@ no Node.js and no administrator rights.
 
 | Build | What it is | Size |
 | --- | --- | --- |
-| [`ModelFarm-Setup-0.9.1.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.1/ModelFarm-Setup-0.9.1.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
-| [`ModelFarm-Portable-0.9.1.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.1/ModelFarm-Portable-0.9.1.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
+| [`ModelFarm-Setup-0.9.2.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.2/ModelFarm-Setup-0.9.2.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
+| [`ModelFarm-Portable-0.9.2.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.2/ModelFarm-Portable-0.9.2.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
 
 Install, update, roll back and uninstall are described in
 [docs/install.md](docs/install.md). Older builds are on the
@@ -241,7 +241,7 @@ present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.9.1.exe + dist/ModelFarm-Setup-0.9.1.exe
+npm run portable      # → dist/ModelFarm-Portable-0.9.2.exe + dist/ModelFarm-Setup-0.9.2.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -272,11 +272,11 @@ the widget core repo, so **the widget core has to be published first**:
 
 ```bash
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.9.1
+git tag v0.9.2
 git push origin main --tags
-gh release create v0.9.1 \
-  dist/ModelFarm-Portable-0.9.1.exe dist/ModelFarm-Setup-0.9.1.exe \
-  --title "Model Farm 0.9.1" --notes-file docs/release-notes-0.9.1.md
+gh release create v0.9.2 \
+  dist/ModelFarm-Portable-0.9.2.exe dist/ModelFarm-Setup-0.9.2.exe \
+  --title "Model Farm 0.9.2" --notes-file docs/release-notes-0.9.2.md
 ```
 
 The download links in this readme and in `docs/index.html` point at the current
