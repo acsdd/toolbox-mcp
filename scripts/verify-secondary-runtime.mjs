@@ -7,14 +7,16 @@ import assert from 'node:assert/strict'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { join } from 'node:path'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import net from 'node:net'
-import fs from 'node:fs'
 
-const installDir = join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Model Farm')
+// Optional first argument: an install folder (defaults to the assisted
+// installer's per-user location) or an unpacked portable app folder.
+const installDir = process.argv[2] ?? join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Model Farm')
 const exe = join(installDir, 'Model Farm.exe')
 const entry = join(installDir, 'resources', 'app.asar', 'dist', 'index.js')
-const home = join(tmpdir(), 'modelfarm-secondary-probe')
+const home = mkdtempSync(join(tmpdir(), 'modelfarm-secondary-probe-'))
 
 const freePort = () =>
   new Promise((resolve, reject) => {
@@ -84,5 +86,5 @@ try {
   console.log('SECONDARY_RUNTIME_ACCEPTANCE=ok')
 } finally {
   await transport.close().catch(() => {})
-  fs.rmSync(home, { recursive: true, force: true })
+  rmSync(home, { recursive: true, force: true })
 }

@@ -1,6 +1,6 @@
 {
   "name": "toolbox-mcp",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Local-first MCP server exposing Toolbox widgets (crypto watch, Gmail announcer, resource monitor) plus a localhost ops panel.",
   "author": "Alpha Team",
   "license": "MIT",
@@ -43,7 +43,8 @@
     "verify:install": "node scripts/verify-install.cjs",
     "verify:journey": "node scripts/verify-model-journey.mjs",
     "verify:secondary": "node scripts/verify-secondary-runtime.mjs",
-    "verify:all": "npm test && node scripts/verify-install.cjs && node scripts/verify-secondary-runtime.mjs"
+    "verify:all": "npm test && node scripts/verify-install.cjs && node scripts/verify-secondary-runtime.mjs",
+    "verify:lmstudio": "node scripts/verify-lmstudio-journey.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.0",

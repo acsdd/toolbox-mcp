@@ -152,6 +152,8 @@ interface ServicesOptions {
   freeDiskImpl?: (directory: string) => Promise<number | null>
   /** Downloads a URL to a file (injectable for tests); may report progress and honour cancellation. */
   downloadFileImpl?: (url: string, target: string, onProgress?: (progress: DownloadProgress) => void, signal?: AbortSignal) => Promise<number>
+  /** Home used to expand runtime model folders; injectable so tests never write into the real profile. */
+  homeDir?: string
 }
 
 export interface LlamafarmScoreInput {
@@ -420,7 +422,8 @@ export function createServices(options: ServicesOptions = {}) {
   const execFileImpl = options.execFileImpl ?? (execFile as unknown as ExecFileLike)
   const runtimeOptions = {
     fetchImpl: options.runtimeFetchImpl ?? (globalThis.fetch as RuntimeFetch),
-    execFileImpl: options.execFileImpl as never
+    execFileImpl: options.execFileImpl as never,
+    ...(options.homeDir ? { homeDir: options.homeDir } : {})
   }
 
   async function init(): Promise<void> {
@@ -1135,7 +1138,7 @@ export function createServices(options: ServicesOptions = {}) {
       })
     }
 
-    const directory = runtimeModelsDir(descriptor)!
+    const directory = runtimeModelsDir(descriptor, runtimeOptions)!
     const available = await (options.freeDiskImpl ?? freeDiskBytes)(directory).catch(() => null)
     const short = diskShortfall(available, neededBytes)
     if (short !== null && short > 0) {
@@ -1259,7 +1262,7 @@ export function createServices(options: ServicesOptions = {}) {
     })
 
     let gguf: Awaited<ReturnType<typeof resolveGgufFile>>
-    const directory = runtimeModelsDir(descriptor) ?? join(homedir(), '.toolbox-mcp', 'models')
+    const directory = runtimeModelsDir(descriptor, runtimeOptions) ?? join(homedir(), '.toolbox-mcp', 'models')
     let destination: string
     try {
       gguf = await resolveGgufFile(model.id, quant ?? model.quantLabel, runtimeOptions)

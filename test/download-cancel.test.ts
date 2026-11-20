@@ -67,6 +67,7 @@ describe('model farm: download cancellation', () => {
       fetchImpl: mockCatalogFetch(),
       runtimeFetchImpl: mockGgufFetch(),
       freeDiskImpl: async () => 100 * 1024 * 1024 * 1024,
+      homeDir: join(home, 'home'),
       downloadFileImpl: async (_url, _target, _onProgress, signal) => {
         downloadStarted = true
         return new Promise<number>((resolve, reject) => {
@@ -117,6 +118,7 @@ describe('model farm: download cancellation', () => {
       fetchImpl: mockCatalogFetch(),
       runtimeFetchImpl: mockGgufFetch(),
       freeDiskImpl: async () => 100 * 1024 * 1024 * 1024,
+      homeDir: join(home, 'home'),
       downloadFileImpl: async (_url, _target, _onProgress, signal) => {
         return new Promise<number>((_resolve, reject) => {
           if (signal) {
