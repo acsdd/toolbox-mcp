@@ -43,6 +43,7 @@ Part of the Toolbox family:
 | `llamafarm_status` / `llamafarm_catalog` / `llamafarm_score` / `llamafarm_refresh` | Model Farm: HuggingFace catalog fit-scored against this machine; `status` also returns a 0–100 PC scorecard |
 | `llamafarm_grade` | Rate this PC 0–100, and grade one model against it (weakest-link weighted) when a repo is given |
 | `llamafarm_install` | Pull a catalog model into the local runtime (Ollama by default, or the runtime you picked) |
+| `llamafarm_cancel` | Stop an in-progress GGUF download started by the panel or a tool (Ollama-owned pulls are stopped in their terminal) |
 | `llamafarm_notes` / `llamafarm_note` | Read or save the free-form note kept per model repo (why you kept it, which quant fits); the panel shows it in the model detail |
 | `runtimes_detect` / `runtimes_install` / `runtimes_use` / `runtimes_models` / `runtimes_download` | Local model runtimes: find Ollama, LM Studio, llama.cpp, Jan, GPT4All, KoboldCpp, LocalAI, vLLM, llamafile and text-generation-webui, install Ollama, and choose which one the Model Farm installs into |
 | `marketplace_list` / `marketplace_install` / `marketplace_uninstall` | Live module marketplace (public registry, installs via the bundle validator) |
@@ -145,7 +146,8 @@ model to AstrLink.
   **Remote-server modules** (e.g. LiquidVision crypto derivatives, cve.now
   vulnerability feed) connect over streamable HTTP and their tools appear
   here namespaced (`cve_now_list_feed`, `liquidvision_get_funding_rates`).
-  Endpoints must be public HTTPS — loopback/private hosts are rejected.
+  Endpoints must be public HTTPS — local network names are refused, and every
+  DNS answer for the host must be a public address.
   Remote modules are opt-in and badged: their tool arguments leave this
   machine. Installed remotes reconnect automatically on startup.
 - **Gateway** — read-only observability for the local AstrLink API gateway:
