@@ -39,7 +39,11 @@
     "portable": "node scripts/pack-portable.mjs",
     "release:notes": "node scripts/release-notes.cjs",
     "test": "npm run build && node --test \"test/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "verify:install": "node scripts/verify-install.cjs",
+    "verify:journey": "node scripts/verify-model-journey.mjs",
+    "verify:secondary": "node scripts/verify-secondary-runtime.mjs",
+    "verify:all": "npm test && node scripts/verify-install.cjs && node scripts/verify-secondary-runtime.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.0",
