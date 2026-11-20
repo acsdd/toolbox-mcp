@@ -16,8 +16,8 @@ no Node.js and no administrator rights.
 
 | Build | What it is | Size |
 | --- | --- | --- |
-| [`ModelFarm-Setup-0.9.3.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.3/ModelFarm-Setup-0.9.3.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
-| [`ModelFarm-Portable-0.9.3.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.3/ModelFarm-Portable-0.9.3.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
+| [`ModelFarm-Setup-0.9.4.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.4/ModelFarm-Setup-0.9.4.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
+| [`ModelFarm-Portable-0.9.4.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.4/ModelFarm-Portable-0.9.4.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
 
 Install, update, roll back and uninstall are described in
 [docs/install.md](docs/install.md). Older builds are on the
@@ -112,7 +112,10 @@ model to AstrLink.
   (model, runtime, how long ago); clicking a chip searches that repo again.
   Installs started elsewhere — through an MCP tool while the panel is open —
   show their download progress in the panel and refresh the list and the strip
-  when they finish. Each expanded model also carries a free-form **Note**
+  when they finish. The progress row shows the current rate and the estimated
+  time left, and **cancel** stops a GGUF download; a failed or cancelled install
+  offers **Retry install** (Ollama-owned pulls are stopped in the terminal that
+  started them, and the panel says so). Each expanded model also carries a free-form **Note**
   (why you kept it, which quant fits, observed speed), stored locally in
   settings and shared with the `llamafarm_note` / `llamafarm_notes` tools;
   an unsaved draft survives list refreshes until you save it.
@@ -218,6 +221,12 @@ npm run typecheck
   server refuses to connect rather than fall back to plain text.
 - Remote marketplace modules are opt-in and badged: their tool arguments leave
   this machine.
+- Remote modules connect only over public HTTPS. The endpoint host is resolved
+  and every answer must be a public address — loopback, private, link-local,
+  CGNAT and reserved ranges, `localhost` and local network names are refused, so
+  a registry entry cannot point the server at this machine or the local network.
+  DNS can change between that check and the connection, so treat the guard as
+  one layer, not as full protection against a hostile public endpoint.
 
 ## Release
 
@@ -241,7 +250,7 @@ present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.9.3.exe + dist/ModelFarm-Setup-0.9.3.exe
+npm run portable      # → dist/ModelFarm-Portable-0.9.4.exe + dist/ModelFarm-Setup-0.9.4.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -272,11 +281,11 @@ the widget core repo, so **the widget core has to be published first**:
 
 ```bash
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.9.3
+git tag v0.9.4
 git push origin main --tags
-gh release create v0.9.3 \
-  dist/ModelFarm-Portable-0.9.3.exe dist/ModelFarm-Setup-0.9.3.exe \
-  --title "Model Farm 0.9.3" --notes-file docs/release-notes-0.9.3.md
+gh release create v0.9.4 \
+  dist/ModelFarm-Portable-0.9.4.exe dist/ModelFarm-Setup-0.9.4.exe \
+  --title "Model Farm 0.9.4" --notes-file docs/release-notes-0.9.4.md
 ```
 
 The download links in this readme and in `docs/index.html` point at the current
