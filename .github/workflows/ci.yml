@@ -15,21 +15,22 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Pin the sibling dependency so the same MCP commit always tests the
-      # same widget source. Update this revision deliberately after validation.
+      # same widget source. Update this revision deliberately after validation;
+      # it must match the widget core the release was packaged with (0.2.2).
       - name: Fetch widget core
         shell: bash
         run: |
           git clone https://github.com/acsdd/toolbox-widgets.git ../toolbox-widgets
-          git -C ../toolbox-widgets checkout --detach 146b9ba5446575d36263c835b503608c218944d1
+          git -C ../toolbox-widgets checkout --detach c126f0a4ef796ba4147bc343356156adfe0c646e
 
       - name: Install widget core deps
         run: npm install --omit=dev
         working-directory: ../toolbox-widgets
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
