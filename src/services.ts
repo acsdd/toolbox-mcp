@@ -1276,6 +1276,13 @@ export function createServices(options: ServicesOptions = {}) {
       return failure('insufficient-disk', `Not enough disk at ${directory} for ${model.id}: ${diskShortfallLabel(short)}.`)
     }
 
+    const key = model.id.toLowerCase()
+    // Two concurrent installs would write the same staging file and leave the
+    // first transfer without a cancel handle.
+    if (activeDownloads.has(key)) {
+      return failure('failed', `"${model.id}" is already downloading. Cancel it before starting another install.`)
+    }
+
     const entry: FarmDownload = {
       repo: model.id,
       runtime: descriptor.id,
@@ -1288,7 +1295,6 @@ export function createServices(options: ServicesOptions = {}) {
       startedAt: Date.now()
     }
     downloads.push(entry)
-    const key = model.id.toLowerCase()
     const controller = new AbortController()
     activeDownloads.set(key, controller)
     let downloaded: { path: string; bytes: number }

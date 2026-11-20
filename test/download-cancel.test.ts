@@ -109,6 +109,42 @@ describe('model farm: download cancellation', () => {
     assert.equal(progress.downloads[0].status, 'cancelled')
   })
 
+  it('refuses a second install of a repo that is already downloading', async () => {
+    const services = createServices({
+      fetchImpl: mockCatalogFetch(),
+      runtimeFetchImpl: mockGgufFetch(),
+      freeDiskImpl: async () => 100 * 1024 * 1024 * 1024,
+      downloadFileImpl: async (_url, _target, _onProgress, signal) => {
+        return new Promise<number>((_resolve, reject) => {
+          if (signal) {
+            signal.addEventListener('abort', () => {
+              const err = new Error('Download was cancelled.')
+              err.name = 'AbortError'
+              reject(err)
+            })
+          }
+        })
+      }
+    })
+
+    await services.init()
+    await services.runtimesUse('lmstudio')
+
+    const first = services.llamafarmInstall({ repo: 'test/cancel-model-3b' })
+    for (let i = 0; i < 50; i++) {
+      if ((await services.llamafarmProgress()).downloads.length > 0) break
+      await new Promise((r) => setTimeout(r, 20))
+    }
+
+    const second = await services.llamafarmInstall({ repo: 'test/cancel-model-3b' })
+    assert.equal(second.ok, false)
+    assert.match(second.message, /already downloading/i)
+
+    await services.llamafarmCancel({ repo: 'test/cancel-model-3b' })
+    const firstResult = await first
+    assert.equal(firstResult.reason, 'cancelled')
+  })
+
   it('rejects cancellation for repos that have no active download', async () => {
     const services = createServices({
       fetchImpl: mockCatalogFetch(),
