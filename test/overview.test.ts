@@ -73,7 +73,7 @@ function mount(responses: Record<string, unknown> = {}) {
   }
   const history = { urls: [] as string[], replaceState(_state: unknown, _title: unknown, url: string) { this.urls.push(url) } }
   const client = runInNewContext(
-    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget })',
+    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage })',
     {
       document: {
         getElementById: get,
@@ -103,6 +103,8 @@ function mount(responses: Record<string, unknown> = {}) {
     targets: () => Array<{ id: string; label: string }>
     target: () => string
     pickTarget: (select: { value: string }) => void
+    astrlink: (id: string, inst: Record<string, unknown>) => string
+    installMessage: (body: Record<string, unknown>, ok: boolean, steps: string[]) => string
   }
   return { client, get, elements, history }
 }
@@ -291,5 +293,54 @@ describe('model farm install target', () => {
     const { client } = mount()
     assert.deepEqual(JSON.parse(JSON.stringify(client.targets())), [{ id: 'ollama', label: 'Ollama' }])
     assert.equal(client.target(), 'ollama')
+  })
+})
+
+describe('model farm install result', () => {
+  const setup = {
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    model: 'ornith-1.5-9b',
+    capability: 'openai.chat'
+  }
+
+  it('names the runtime and its address in the AstrLink setup', () => {
+    const { client } = mount()
+    const html = client.astrlink('acme/model', {
+      state: 'ok',
+      message: '',
+      runtime: { id: 'llamacpp', label: 'llama.cpp', baseUrl: 'http://127.0.0.1:8080' },
+      astrlink: setup
+    })
+    assert.match(html, /llama\.cpp/)
+    assert.match(html, /127\.0\.0\.1:8080\/v1/)
+    // The old copy claimed this was Ollama's address no matter the runtime.
+    assert.doesNotMatch(html, /Ollama/)
+  })
+
+  it('keeps the service explanation and the next step together', () => {
+    const { client } = mount()
+    const text = client.installMessage(
+      { message: 'ornith is ready to run. Ollama could not use the Q8 tag, so it installed the default.' },
+      true,
+      ['ollama pull hf.co/acme/model', 'ollama run hf.co/acme/model']
+    )
+    assert.match(text, /could not use the Q8 tag/)
+    assert.match(text, /ollama run hf\.co\/acme\/model/)
+  })
+
+  it('does not repeat a step the message already names', () => {
+    const { client } = mount()
+    const text = client.installMessage(
+      { message: 'Run ollama run hf.co/acme/model to start it.' },
+      true,
+      ['ollama run hf.co/acme/model']
+    )
+    assert.equal(text, 'Run ollama run hf.co/acme/model to start it.')
+  })
+
+  it('reports the service error when the install failed', () => {
+    const { client } = mount()
+    const text = client.installMessage({ error: 'Not enough disk at /models.' }, false, ['ignored'])
+    assert.equal(text, 'Not enough disk at /models.')
   })
 })

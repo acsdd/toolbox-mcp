@@ -622,13 +622,20 @@ describe('panel model farm feature UI', () => {
       'class="mf-target"',
       'aria-label="Runtime to install ',
       'onchange="mfPickTarget(this)"',
-      "var payload = { repo: id, runtime: target }"
+      "var payload = { repo: id, runtime: target }",
+      'function mfInstallMessage',
+      'runtime: ok ? body.runtime : null',
+      '" role="status" aria-live="polite">'
     ]) {
       assert.ok(reply.body.includes(hook), `page missing ${hook}`)
     }
     // One runtime keeps the plain "Install in <label>" button; the picker only
     // appears when there is a choice to make.
     assert.match(reply.body, /targets\.length > 1 \? '' : ' in '/)
+    // The AstrLink note names the runtime that actually received the model,
+    // so it must not claim the address is always Ollama's.
+    assert.doesNotMatch(reply.body, /default local Ollama address/)
+    assert.ok(reply.body.includes("'’s local address ('"), 'AstrLink note names the runtime address')
   })
 
   it('gives every section an address and follows the rail in the URL', async () => {

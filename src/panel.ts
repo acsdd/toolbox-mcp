@@ -1400,10 +1400,11 @@ function renderAstrlinkSetup(id, inst) {
   var copying = inst.copyState === 'copying'
   var feedback = inst.copyState === 'copied' ? 'Copied' :
     inst.copyState === 'error' ? 'Copy unavailable — select and copy the settings above.' : ''
+  var label = inst.runtime && inst.runtime.label ? inst.runtime.label : 'the runtime'
   return '<div class="msetup"><strong>Use in AstrLink</strong>' +
     '<p>Add an OpenAI-compatible service in AstrLink using these settings. ' +
     'See the <a href="https://docs.astrsk.ai/en/How-to-connect-providers" target="_blank" rel="noopener">AstrLink provider setup guide ↗</a>. ' +
-    'This uses the default local Ollama address; adjust it if your server runs elsewhere.</p>' +
+    'This uses ' + esc(label) + '’s local address (' + esc(inst.astrlink.baseUrl) + '); adjust it if the server runs elsewhere.</p>' +
     '<pre tabindex="0" aria-label="AstrLink service settings">' + esc(mfAstrlinkText(inst.astrlink)) + '</pre>' +
     '<div class="msetup-actions"><button class="btn" data-copy-setup="' + esc(id) +
     '" onclick="mfCopyAstrlink(this.dataset.copySetup)"' + (copying ? ' disabled' : '') + '>Copy setup</button>' +
@@ -1641,7 +1642,7 @@ function renderGroups(result) {
             ? '<button class="btn small" onclick="mfInstall(\\'' + esc(m.id) + '\\')">Retry install</button>'
             : '') +
           removeBtn +
-          (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '">' + esc(inst.message) + '</span>' : '') +
+          (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '" role="status" aria-live="polite">' + esc(inst.message) + '</span>' : '') +
           '</div>' + quantBlock
         var noteBlock = '<div class="mnote"><label for="mf-note-' + esc(m.id) + '">Note</label>' +
           '<textarea id="mf-note-' + esc(m.id) + '" class="mnote-input" rows="2" maxlength="1000" placeholder="quant that fits, speed, why you kept it…">' +
@@ -1690,6 +1691,17 @@ function mfPickTarget(select) {
     n.textContent = 'safetensors only — convert to GGUF to install in ' + name
   })
 }
+/** The install card line: the service's explanation plus the step to run next. */
+function mfInstallMessage(body, ok, steps) {
+  var message = body.message || body.error || (ok ? 'Installed' : 'Install failed')
+  if (ok && steps.length) {
+    var step = steps[steps.length - 1]
+    // The service's message carries the path or a quantization fallback note;
+    // the last step says how to start it. Keep both instead of dropping one.
+    if (step && message.indexOf(step) === -1) message = message + ' ' + step
+  }
+  return message
+}
 async function mfInstall(id, quant) {
   var target = rtInstallTarget()
   mf.install[id] = { state: 'busy', message: 'downloading into ' + rtLabel(target) + '…' }
@@ -1705,9 +1717,12 @@ async function mfInstall(id, quant) {
     var body = await res.json()
     var ok = res.ok && body.ok === true
     var steps = body.steps || []
-    var message = body.message || body.error || (ok ? 'Installed' : 'Install failed')
-    if (ok && steps.length) message = steps[steps.length - 1]
-    mf.install[id] = { state: ok ? 'ok' : 'err', message: message, astrlink: ok ? body.astrlink : null }
+    mf.install[id] = {
+      state: ok ? 'ok' : 'err',
+      message: mfInstallMessage(body, ok, steps),
+      runtime: ok ? body.runtime : null,
+      astrlink: ok ? body.astrlink : null
+    }
   } catch (cause) {
     mf.install[id] = { state: 'err', message: String(cause && cause.message ? cause.message : cause) }
   }
