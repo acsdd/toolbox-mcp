@@ -28,8 +28,15 @@ manifest version, and the remote client identity equals `appVersion()`.
 - The packaged smoke test passes on this build: sandboxed window, panel bound
   to the loopback address, foreign origin refused with `403`, the 37-tool
   catalogue served, and the listener closes with the window.
-- The install probe reports a matching version and a successful read-only
-  call.
+- The install probe passes against the portable payload and against the Setup
+  artifact's extracted payload (manifest `0.9.8`, widget core `0.2.2`): 37
+  tools, matching panel catalogue, successful read-only call.
+- The secondary-runtime probe detects 10 runtimes and passes switching,
+  unknown-runtime refusal, the non-Ollama removal guard and restore.
+- The Ollama journey (search, Q8 request, install, remove) passes on the
+  packaged build. Ollama cannot use the `Q8` tag this repository publishes, so
+  it installed the repository default and the message said so; removal left
+  the model store clean.
 
 No widget-core change ships in this release; it stays at 0.2.2.
 

@@ -213,10 +213,14 @@ portable app) or a built checkout, each with a throwaway settings folder and
 panel port:
 
 ```bash
-npm run verify:install              # MCP handshake, tool surface, panel catalogue
+npm run verify:install -- <dir>     # MCP handshake, tool surface, panel catalogue
 npm run verify:secondary -- <dir>   # runtime detection, switching, removal guards
 npm run verify:lmstudio -- <dir>    # real GGUF download into LM Studio, then cleanup
 ```
+
+Without an argument each probe uses the default install folder
+(`%LOCALAPPDATA%\Programs\Model Farm`). Point them at the unpacked build when
+you are testing the artifacts before they are installed.
 
 The LM Studio probe downloads one ~55 MB model, refuses to run if that model is
 already in the folder, and deletes only the files it created.
@@ -291,17 +295,24 @@ the widget core repo, so **the widget core has to be published first**:
 
 1. **`toolbox-widgets`** — push `main`. That publishes the new registry entry,
    so the module shows up in the live Marketplace, and it gives this repo's CI
-   the widget core it builds against.
-2. **`toolbox-mcp`** — push `main`, then tag and release:
+   the widget core it builds against. Update the `toolbox-widgets` revision
+   pinned in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) to that
+   commit, so CI tests the widget core the release will actually ship.
+2. **`toolbox-mcp`** — bump `package.json`, the download links in this readme
+   and `docs/index.html`, then push `main`, tag and release:
 
 ```bash
 npm run release:notes -- --to HEAD --out release-notes.md
+sha256sum dist/ModelFarm-Portable-0.9.8.exe dist/ModelFarm-Setup-0.9.8.exe > dist/SHA256SUMS.txt
 git tag v0.9.8
 git push origin main --tags
 gh release create v0.9.8 \
-  dist/ModelFarm-Portable-0.9.8.exe dist/ModelFarm-Setup-0.9.8.exe \
+  dist/ModelFarm-Portable-0.9.8.exe dist/ModelFarm-Setup-0.9.8.exe dist/SHA256SUMS.txt \
   --title "Model Farm 0.9.8" --notes-file docs/release-notes-0.9.8.md
 ```
+
+The release notes repeat the hashes, and `SHA256SUMS.txt` makes verification
+scriptable with `sha256sum -c`.
 
 The download links in this readme and in `docs/index.html` point at the current
 version — update them to the new tag when you cut the next release.
