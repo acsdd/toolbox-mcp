@@ -139,6 +139,8 @@ const handlers: Record<string, ToolHandler> = {
     ),
   llamafarm_run_now: async () => json(await services.llamafarmRunNow()),
   llamafarm_progress: async () => json(await services.llamafarmProgress()),
+  llamafarm_cancel: async (args) =>
+    json(await services.llamafarmCancel({ repo: typeof args.repo === 'string' ? args.repo : '' })),
   llamafarm_notes: async () => json({ notes: (await services.settingsSnapshot()).modelNotes }),
   llamafarm_note: async (args) => {
     try {

@@ -335,6 +335,10 @@ ${WIDGET_HOST_CSS}
   .mf-dl { display: flex; align-items: center; gap: 10px; font-size: .6875rem; color: var(--text); padding: 6px 0; }
   .mf-dl span { min-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mf-dl small { color: var(--dim); }
+  .mf-cancel-btn { font: inherit; font-size: .625rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--dim); background: transparent; border: 1px solid var(--border); border-radius: 3px; padding: 3px 9px; cursor: pointer; }
+  .mf-cancel-btn:hover:not(:disabled) { color: #e08b7a; border-color: #e08b7a; }
+  .mf-cancel-btn:disabled { opacity: 0.6; cursor: default; }
+  .mf-cancel-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
   .mf-bar-track { flex: 1; height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
   .mf-bar-fill { height: 100%; background: var(--accent); transition: width 0.4s ease; }
   .mf-bar-fill.indet { width: 40%; animation: mf-slide 1.1s ease-in-out infinite; }
@@ -1725,11 +1729,31 @@ function mfStartProgress() {
           ? (d.totalBytes ? 'target ' + gb(d.totalBytes) : '')
           : gb(d.receivedBytes) + (d.totalBytes ? ' / ' + gb(d.totalBytes) : '')
         return '<div class="mf-dl"><span>' + esc(d.repo) + ' → ' + esc(d.runtime) + '</span>' +
-          bar + label + '<small>' + size + '</small></div>'
+          bar + label + '<small>' + size + '</small>' +
+          '<button class="mf-cancel-btn" type="button" data-repo="' + esc(d.repo) + '" onclick="mfCancel(this)">cancel</button></div>'
       }).join('')
     } catch (cause) { /* polling is best-effort */ }
     finally { polling = false }
   }, 700)
+}
+async function mfCancel(button) {
+  var repo = button.getAttribute('data-repo') || ''
+  button.disabled = true
+  button.textContent = 'cancelling…'
+  try {
+    var res = await fetch('/api/llamafarm/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: repo })
+    })
+    var data = await res.json().catch(function () { return null })
+    if (data && data.ok) return // the row clears on the next poll
+    button.textContent = 'cannot cancel'
+    button.title = (data && data.message) || 'Cancellation is not available for this download.'
+  } catch (cause) {
+    button.disabled = false
+    button.textContent = 'cancel'
+  }
 }
 function mfStopProgress() {
   if (Object.keys(mf.install).some(function (id) { return mf.install[id].state === 'busy' })) return
@@ -2417,6 +2441,11 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
         }
         if (req.method === 'GET' && url.pathname === '/api/llamafarm/run-now') {
           send(res, 200, JSON.stringify(await services.llamafarmRunNow()))
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/llamafarm/cancel') {
+          const body = (await readJson(req)) as { repo?: unknown }
+          send(res, 200, JSON.stringify(await services.llamafarmCancel({ repo: typeof body?.repo === 'string' ? body.repo : '' })))
           return
         }
         if (req.method === 'GET' && url.pathname === '/api/llamafarm/progress') {

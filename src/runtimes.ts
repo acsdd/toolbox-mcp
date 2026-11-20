@@ -113,7 +113,8 @@ export interface DownloadProgress {
 export type DownloadFn = (
   url: string,
   target: string,
-  onProgress?: (progress: DownloadProgress) => void
+  onProgress?: (progress: DownloadProgress) => void,
+  signal?: AbortSignal
 ) => Promise<number>
 
 export type RuntimeExec = (
@@ -658,11 +659,11 @@ export interface RuntimeInstallResult {
 export async function downloadFile(
   url: string,
   target: string,
-  options: RuntimeOptions & { fetchImpl?: RuntimeFetch } = {},
+  options: RuntimeOptions & { fetchImpl?: RuntimeFetch; signal?: AbortSignal } = {},
   onProgress?: (progress: DownloadProgress) => void
 ): Promise<number> {
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as RuntimeFetch)
-  const response = await fetchImpl(url, { redirect: 'follow' })
+  const response = await fetchImpl(url, { redirect: 'follow', ...(options.signal ? { signal: options.signal } : {}) } as RequestInit)
   if (!response.ok) throw new Error(`Download failed with HTTP ${response.status} for ${url}`)
   await mkdir(path.dirname(target), { recursive: true })
   const lengthHeader = response.headers?.get('content-length') ?? null
@@ -676,7 +677,7 @@ export async function downloadFile(
         callback(null, chunk)
       }
     })
-    await pipeline(Readable.fromWeb(response.body as never), counter, createWriteStream(target))
+    await pipeline(Readable.fromWeb(response.body as never), counter, createWriteStream(target), ...(options.signal ? [{ signal: options.signal }] : []))
   } else {
     const buffer = Buffer.from(await response.text(), 'utf8')
     const { writeFile } = await import('node:fs/promises')
@@ -958,16 +959,17 @@ export function ggufDirectory(file: GgufFile, directory: string): string {
 export async function downloadGguf(
   file: GgufFile,
   directory: string,
-  options: RuntimeOptions & { download?: DownloadFn; onProgress?: (progress: DownloadProgress) => void } = {}
+  options: RuntimeOptions & { download?: DownloadFn; onProgress?: (progress: DownloadProgress) => void; signal?: AbortSignal } = {}
 ): Promise<{ path: string; bytes: number }> {
-  const download = options.download ?? ((url: string, target: string, onProgress?: (p: DownloadProgress) => void) => downloadFile(url, target, options, onProgress))
+  const download = options.download ?? ((url: string, target: string, onProgress?: (p: DownloadProgress) => void, signal?: AbortSignal) => downloadFile(url, target, { ...options, ...(signal ? { signal } : {}) }, onProgress))
   const destination = ggufDirectory(file, directory)
   await mkdir(destination, { recursive: true })
   const target = path.join(destination, path.basename(file.filename))
   if (existsSync(target)) throw new Error(`Model file already exists: ${target}. It was not replaced.`)
   const staging = `${target}.${randomUUID()}.part`
   try {
-    await download(file.url, staging, options.onProgress)
+    if (options.signal?.aborted) throw new Error('Download was cancelled.')
+    await download(file.url, staging, options.onProgress, options.signal)
     const bytes = (await stat(staging)).size
     if (bytes === 0 || (file.sizeBytes > 0 && bytes !== file.sizeBytes)) {
       throw new Error(`Downloaded size ${bytes} bytes; expected ${file.sizeBytes > 0 ? file.sizeBytes : 'non-empty weights'}. Model was not installed.`)

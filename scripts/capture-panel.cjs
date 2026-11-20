@@ -64,6 +64,8 @@ require(path.join(appRoot, 'scripts/desktop.cjs')).then(async (window) => {
   assert.match(layout.activeShadow, /2px 0px/, 'the accent sits on the rail’s inner (left) edge')
 
   // A narrow window drops the rail and gives the stage the full width.
+  // desktop.cjs enforces a 1000px minimum, so lift the floor for this probe.
+  window.setMinimumSize(360, 480)
   window.setSize(820, 700)
   await new Promise((resolve) => setTimeout(resolve, 900))
   const narrow = await readLayout(window)

@@ -62,16 +62,16 @@ const READ_ONLY_TOOLS = new Set([
   'widgets_export'
 ])
 const DESTRUCTIVE_TOOLS = new Set([
-  'gmail_disconnect', 'llamafarm_remove', 'runtimes_install', 'marketplace_uninstall', 'widgets_import'
+  'gmail_disconnect', 'llamafarm_remove', 'llamafarm_cancel', 'runtimes_install', 'marketplace_uninstall', 'widgets_import'
 ])
 const IDEMPOTENT_TOOLS = new Set([
-  ...READ_ONLY_TOOLS, 'crypto_set_watchlist', 'gmail_disconnect', 'runtimes_use',
+  ...READ_ONLY_TOOLS, 'crypto_set_watchlist', 'gmail_disconnect', 'llamafarm_cancel', 'runtimes_use',
   'marketplace_install', 'marketplace_uninstall', 'llamafarm_note'
 ])
 const OPEN_WORLD_TOOLS = new Set([
   'crypto_refresh', 'crypto_set_watchlist', 'crypto_series', 'gmail_check', 'gmail_connect',
   'llamafarm_status', 'llamafarm_catalog', 'llamafarm_score', 'llamafarm_refresh', 'llamafarm_grade',
-  'llamafarm_install', 'llamafarm_search', 'llamafarm_quants', 'llamafarm_remove',
+  'llamafarm_install', 'llamafarm_search', 'llamafarm_quants', 'llamafarm_remove', 'llamafarm_cancel',
   'llamafarm_run_now', 'runtimes_detect', 'runtimes_install', 'runtimes_models',
   'runtimes_download', 'gateway_status', 'gateway_requests', 'marketplace_list',
   'marketplace_install', 'marketplace_uninstall', 'remote_status'
@@ -233,6 +233,14 @@ const TOOL_SPECS: Omit<ToolSpec, 'annotations'>[] = [
       repo: z.string().optional().describe('HuggingFace repo id of an installed model'),
       model: z.string().optional().describe('Exact local Ollama model name, including its tag'),
       runtime: z.string().optional().describe('Runtime owning the model; defaults to the active one. Only Ollama removal is supported.')
+    }
+  },
+  {
+    name: 'llamafarm_cancel',
+    group: 'llamafarm',
+    description: 'Cancel an active model download by repository id.',
+    shape: {
+      repo: z.string().describe('HuggingFace repository id of the active download to cancel')
     }
   },
   {

@@ -150,8 +150,8 @@ interface ServicesOptions {
   runtimeFetchImpl?: RuntimeFetch
   /** Fresh available bytes on a destination volume; null when unavailable. */
   freeDiskImpl?: (directory: string) => Promise<number | null>
-  /** Downloads a URL to a file (injectable for tests); may report progress. */
-  downloadFileImpl?: (url: string, target: string, onProgress?: (progress: DownloadProgress) => void) => Promise<number>
+  /** Downloads a URL to a file (injectable for tests); may report progress and honour cancellation. */
+  downloadFileImpl?: (url: string, target: string, onProgress?: (progress: DownloadProgress) => void, signal?: AbortSignal) => Promise<number>
 }
 
 export interface LlamafarmScoreInput {
@@ -236,7 +236,7 @@ export interface LlamafarmRunNowResult {
 export interface FarmDownload {
   repo: string
   runtime: string
-  status: 'downloading' | 'done' | 'error'
+  status: 'downloading' | 'done' | 'error' | 'cancelled'
   /** null = indeterminate (e.g. an Ollama pull with no byte stream). */
   percent: number | null
   receivedBytes: number
@@ -245,6 +245,15 @@ export interface FarmDownload {
   error: string | null
   startedAt: number
 }
+export interface LlamafarmCancelInput {
+  repo: string
+}
+export interface LlamafarmCancelResult {
+  ok: boolean
+  repo: string
+  message: string
+}
+
 export interface LlamafarmProgressResult {
   downloads: FarmDownload[]
 }
@@ -284,6 +293,7 @@ export type LlamafarmInstallReason =
   | 'failed'
   | 'runtime-missing'
   | 'insufficient-disk'
+  | 'cancelled'
 
 export interface LlamafarmInstallResult {
   ok: boolean
@@ -394,6 +404,7 @@ export function createServices(options: ServicesOptions = {}) {
   let runtimeReport: RuntimeReport | null = null
   /** Folder downloads tracked for the progress surface (point 4). */
   const downloads: FarmDownload[] = []
+  const activeDownloads = new Map<string, AbortController>()
   const remotes = new Map<string, { module: MarketplaceModule; connection: RemoteConnection; tools: RemoteToolDef[] }>()
   const remoteErrors = new Map<string, string>()
   const remoteConnectOperations = new Map<string, Promise<ProxiedTool[]>>()
@@ -938,7 +949,7 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   /** Keep the latest terminal attempts without ever evicting an active transfer. */
-  function settleDownload(entry: FarmDownload, status: 'done' | 'error'): void {
+  function settleDownload(entry: FarmDownload, status: 'done' | 'error' | 'cancelled'): void {
     entry.status = status
     let terminal = 0
     for (let index = downloads.length - 1; index >= 0; index--) {
@@ -946,6 +957,30 @@ export function createServices(options: ServicesOptions = {}) {
         downloads.splice(index, 1)
       }
     }
+  }
+
+  /** Cancel an active in-progress model download by repository id. */
+  async function llamafarmCancel(input: LlamafarmCancelInput): Promise<LlamafarmCancelResult> {
+    const repo = input.repo?.trim() ?? ''
+    const key = repo.toLowerCase()
+    const entry = downloads.find((d) => d.repo.toLowerCase() === key && d.status === 'downloading') ?? null
+    if (!entry) {
+      return { ok: false, repo, message: `No active download found for "${repo}".` }
+    }
+    const controller = activeDownloads.get(key)
+    if (!controller) {
+      // Ollama streams a pull through its own daemon; it offers no abort hook.
+      return {
+        ok: false,
+        repo,
+        message: `"${repo}" is being pulled by Ollama, which cannot be cancelled from here. Interrupt the pull in the terminal that started it.`
+      }
+    }
+    controller.abort()
+    activeDownloads.delete(key)
+    settleDownload(entry, 'cancelled')
+    entry.error = 'Download cancelled by user.'
+    return { ok: true, repo, message: `Download of "${repo}" was cancelled.` }
   }
 
   /** Tracked downloads, newest started last (point 4). */
@@ -1253,11 +1288,15 @@ export function createServices(options: ServicesOptions = {}) {
       startedAt: Date.now()
     }
     downloads.push(entry)
+    const key = model.id.toLowerCase()
+    const controller = new AbortController()
+    activeDownloads.set(key, controller)
     let downloaded: { path: string; bytes: number }
     try {
       downloaded = await downloadGguf(gguf, directory, {
         ...runtimeOptions,
         ...(options.downloadFileImpl ? { download: options.downloadFileImpl } : {}),
+        signal: controller.signal,
         onProgress: (progress) => {
           entry.receivedBytes = progress.receivedBytes
           entry.totalBytes = progress.totalBytes ?? entry.totalBytes
@@ -1270,9 +1309,17 @@ export function createServices(options: ServicesOptions = {}) {
       entry.totalBytes = downloaded.bytes
       entry.file = downloaded.path
     } catch (cause) {
+      if (controller.signal.aborted) {
+        // llamafarmCancel may already have settled the entry as cancelled.
+        if (entry.status === 'downloading') settleDownload(entry, 'cancelled')
+        entry.error = 'Download cancelled by user.'
+        return failure('cancelled', entry.error)
+      }
       settleDownload(entry, 'error')
       entry.error = cause instanceof Error ? cause.message : String(cause)
       return failure('failed', entry.error)
+    } finally {
+      if (activeDownloads.get(key) === controller) activeDownloads.delete(key)
     }
 
     const modelName = basename(downloaded.path, extname(downloaded.path))
@@ -1741,6 +1788,7 @@ export function createServices(options: ServicesOptions = {}) {
     llamafarmRemove,
     llamafarmRunNow,
     llamafarmProgress,
+    llamafarmCancel,
     runtimesDetect,
     runtimesInstall,
     runtimesUse,
