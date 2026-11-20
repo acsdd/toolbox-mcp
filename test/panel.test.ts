@@ -141,6 +141,18 @@ describe('panel accessibility', () => {
     assert.match(reply.body, /id="sc-total" aria-pressed="false"/)
     assert.match(reply.body, /b\.setAttribute\('aria-pressed', String\(on\)\)/)
   })
+
+  it('names the tool-group filter and exposes which chip is picked', async () => {
+    const reply = await ask({ path: '/' })
+    assert.match(reply.body, /id="ov-groups" role="group" aria-label="Filter tools by group"/)
+    // The picked chip carries aria-pressed so the state is not colour-only.
+    assert.match(reply.body, /class="grp-chip' \+ \(ov\.group === '' \? ' on' : ''\) \+ '" aria-pressed="' \+ \(ov\.group === '' \? 'true' : 'false'\)/)
+    assert.match(reply.body, /class="grp-chip' \+ \(ov\.group === g\.id \? ' on' : ''\) \+ '" aria-pressed="' \+ \(ov\.group === g\.id \? 'true' : 'false'\)/)
+    // Chip glyphs are decoration; the accessible name is the group label.
+    assert.match(reply.body, /<span aria-hidden="true">' \+ esc\(g\.icon\) \+ '<\/span> /)
+    // The match count is announced as the filter changes.
+    assert.match(reply.body, /id="ov-tool-count" aria-live="polite"/)
+  })
 })
 
 describe('panel origin checks', () => {

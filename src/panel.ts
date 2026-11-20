@@ -522,12 +522,12 @@ ${WIDGET_HOST_CSS}
 
       <div class="ov-grid">
         <div class="card">
-          <h2>MCP tool surface <em id="ov-tool-count"></em></h2>
+          <h2>MCP tool surface <em id="ov-tool-count" aria-live="polite"></em></h2>
           <div class="tool-search">
             <input type="search" id="ov-tool-search" aria-label="Search MCP tools" placeholder="search tools by name, group or purpose…" oninput="ovFilterTools()" autocomplete="off" spellcheck="false" />
             <button class="btn small" onclick="ovFilterTools()">Filter</button>
           </div>
-          <div class="grp-chips" id="ov-groups"></div>
+          <div class="grp-chips" id="ov-groups" role="group" aria-label="Filter tools by group"></div>
           <div id="ov-tools"></div>
         </div>
 
@@ -783,11 +783,11 @@ function renderTiles(server) {
 /* --- the tool surface --- */
 function renderGroupChips() {
   var box = document.getElementById('ov-groups')
-  box.innerHTML = '<button class="grp-chip' + (ov.group === '' ? ' on' : '') + '" onclick="ovPickGroup(\\'\\')">all</button>' +
+  box.innerHTML = '<button class="grp-chip' + (ov.group === '' ? ' on' : '') + '" aria-pressed="' + (ov.group === '' ? 'true' : 'false') + '" onclick="ovPickGroup(\\'\\')">all</button>' +
     ov.groups.map(function (g) {
       var count = ov.tools.filter(function (t) { return t.group === g.id }).length
-      return '<button class="grp-chip' + (ov.group === g.id ? ' on' : '') + '" onclick="ovPickGroup(\\\'' + esc(g.id) + '\\\')">' +
-        esc(g.icon) + ' ' + esc(g.label) + ' · ' + count + '</button>'
+      return '<button class="grp-chip' + (ov.group === g.id ? ' on' : '') + '" aria-pressed="' + (ov.group === g.id ? 'true' : 'false') + '" onclick="ovPickGroup(\\\'' + esc(g.id) + '\\\')">' +
+        '<span aria-hidden="true">' + esc(g.icon) + '</span> ' + esc(g.label) + ' · ' + count + '</button>'
     }).join('')
 }
 function ovPickGroup(id) {
