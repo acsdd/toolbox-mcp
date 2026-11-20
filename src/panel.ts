@@ -75,7 +75,7 @@ ${WIDGET_HOST_CSS}
   :root {
     --bg: #060b08; --bg-2: #08110c; --panel: #0c1712; --panel2: #0a1410;
     --elevated: #112018; --border: #1f3a2d; --border-soft: #16281f;
-    --text: #dde5df; --muted: #6d7f74; --dim: #46584d;
+    --text: #dde5df; --muted: #93a79a; --dim: #7d9185;
     --accent: #9cf37e; --accent-2: #5fd7c0;
     --green: #92ec74; --yellow: #e8c35c; --red: #ff6b6e;
     --radius: 10px;
