@@ -639,6 +639,23 @@ export async function listRuntimeModels(
   if (!probe) {
     return { models: [], baseUrl, error: `Nothing is answering on port ${descriptor.port}.` }
   }
+  const owner = probe.identity
+  if (owner && owner !== descriptor.id) {
+    const named = runtimeDescriptor(owner)
+    return {
+      models: [],
+      baseUrl,
+      error: `Port ${descriptor.port} is served by ${named?.label ?? owner}, not ${descriptor.label}.`
+    }
+  }
+  const shared = RUNTIME_REGISTRY.filter((entry) => entry.port === descriptor.port).length > 1
+  if (!owner && shared) {
+    return {
+      models: [],
+      baseUrl,
+      error: `Port ${descriptor.port} answers but does not name itself; it cannot be assumed to be ${descriptor.label}.`
+    }
+  }
   return { models: probe.models, baseUrl: probe.baseUrl, error: null }
 }
 

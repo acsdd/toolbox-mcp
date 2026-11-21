@@ -275,6 +275,11 @@ ${WIDGET_HOST_CSS}
   .rt-item.on .rt-id small { color: var(--green); }
   .rt-note { color: var(--dim); font-size: .6875rem; line-height: 1.5; }
   .rt-item .btn { align-self: flex-start; min-height: 34px; }
+  .rt-empty { margin: 0; color: var(--dim); font-size: .75rem; }
+  .rt-more { grid-column: 1 / -1; border-top: 1px solid var(--border-soft); padding-top: 10px; }
+  .rt-more summary { cursor: pointer; color: var(--dim); font-size: .6875rem; letter-spacing: .04em; text-transform: uppercase; }
+  .rt-more summary:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+  .rt-more-list { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 10px; }
   .rt-log { margin-top: 10px; font-size: .75rem; min-height: 18px; }
   .rt-log .ok { color: var(--green); }
   .rt-log .err { color: var(--red); }
@@ -1477,20 +1482,35 @@ function rtRender() {
   if (!meta || !list || !rt.data || !rt.data.runtimes) return
   var found = rt.data.runtimes.filter(function (r) { return r.installed || r.running })
   meta.textContent = found.length + ' of ' + rt.data.runtimes.length + ' found'
-  list.innerHTML = rt.data.runtimes.map(function (r) {
-    var state = r.running ? 'running' : (r.installed ? 'installed · server not running' : 'not found')
-    var active = rt.data.active === r.id
-    var detail = r.version ? ' · ' + esc(r.version) : ''
-    var models = r.models && r.models.length ? ' · ' + r.models.length + ' models' : ''
-    var action = active
-      ? '<span class="rt-id"><small>active</small></span>'
-      : r.installed
-        ? '<button class="btn small" aria-label="Use ' + esc(r.label) + '" title="Make ' + esc(r.label) + ' the active runtime" onclick="rtUse(\\\'' + esc(r.id) + '\\\')">use this</button>'
-        : '<a class="btn small" aria-label="Get ' + esc(r.label) + '" href="' + esc(r.homepage) + '" target="_blank" rel="noopener">get it</a>'
-    return '<div class="rt-item' + (active ? ' on' : '') + '">' +
-      '<div class="rt-id"><b>' + esc(r.label) + '</b><small>' + state + detail + '</small></div>' +
-      '<div class="rt-note">' + esc(r.note) + models + '</div>' + action + '</div>'
-  }).join('')
+  var visible = rt.data.runtimes.filter(function (r) {
+    return r.installed || r.running || rt.data.active === r.id
+  })
+  var missing = rt.data.runtimes.filter(function (r) { return visible.indexOf(r) === -1 })
+  var html = ''
+  if (!found.length) {
+    html += '<p class="rt-empty">No local runtime found yet. Install one below, or fetch a model into a folder.</p>'
+  }
+  html += visible.map(rtRow).join('')
+  if (missing.length) {
+    html += '<details class="rt-more"' + (found.length ? '' : ' open') + '>' +
+      '<summary>Other runtimes (' + missing.length + ')</summary>' +
+      '<div class="rt-more-list">' + missing.map(rtRow).join('') + '</div></details>'
+  }
+  list.innerHTML = html
+}
+function rtRow(r) {
+  var state = r.running ? 'running' : (r.installed ? 'installed · server not running' : 'not found')
+  var active = rt.data.active === r.id
+  var detail = r.version ? ' · ' + esc(r.version) : ''
+  var models = r.models && r.models.length ? ' · ' + r.models.length + ' models' : ''
+  var action = active
+    ? '<span class="rt-id"><small>active</small></span>'
+    : r.installed
+      ? '<button class="btn small" aria-label="Use ' + esc(r.label) + '" title="Make ' + esc(r.label) + ' the active runtime" onclick="rtUse(\\\'' + esc(r.id) + '\\\')">use this</button>'
+      : '<a class="btn small" aria-label="Get ' + esc(r.label) + '" href="' + esc(r.homepage) + '" target="_blank" rel="noopener">get it</a>'
+  return '<div class="rt-item' + (active ? ' on' : '') + '">' +
+    '<div class="rt-id"><b>' + esc(r.label) + '</b><small>' + state + detail + '</small></div>' +
+    '<div class="rt-note">' + esc(r.note) + models + '</div>' + action + '</div>'
 }
 function rtLabel(id) {
   var found = rt.data && rt.data.runtimes && rt.data.runtimes.filter(function (r) { return r.id === id })[0]

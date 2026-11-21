@@ -324,6 +324,44 @@ describe('model farm runtime status', () => {
     const html = get('rt-list')!.innerHTML
     assert.match(html, /installed · server not running · 0\.12\.3/)
     assert.match(html, /<small>not found<\/small>/)
+    // The missing runtime sits in the folded list, not next to the found one.
+    assert.ok(html.indexOf('Ollama') < html.indexOf('<details'))
+    assert.match(html, /Other runtimes \(1\)/)
+    assert.match(get('rt-meta')!.textContent, /^1 of 2 found$/)
+  })
+
+  it('opens the folded list when nothing is found', () => {
+    const { client, get } = mount()
+    client.rt.data = {
+      active: null,
+      runtimes: [
+        { id: 'ollama', label: 'Ollama', installed: false, running: false, models: [], note: 'Missing.' },
+        { id: 'jan', label: 'Jan', installed: false, running: false, models: [], note: 'Missing.' }
+      ]
+    }
+    client.rtRender()
+    const html = get('rt-list')!.innerHTML
+    assert.match(get('rt-meta')!.textContent, /^0 of 2 found$/)
+    assert.match(html, /No local runtime found yet/)
+    assert.match(html, /<details class="rt-more" open>/)
+    assert.match(html, /Other runtimes \(2\)/)
+  })
+
+  it('keeps the active runtime visible even when it is missing', () => {
+    const { client, get } = mount()
+    client.rt.data = {
+      active: 'jan',
+      runtimes: [
+        { id: 'ollama', label: 'Ollama', installed: true, running: true, models: [], note: '' },
+        { id: 'jan', label: 'Jan', installed: false, running: false, models: [], note: 'Not here.' },
+        { id: 'vllm', label: 'vLLM', installed: false, running: false, models: [], note: 'Not here.' }
+      ]
+    }
+    client.rtRender()
+    const html = get('rt-list')!.innerHTML
+    assert.ok(html.indexOf('Jan') < html.indexOf('<details'))
+    assert.match(html, /Other runtimes \(1\)/)
+    assert.match(get('rt-meta')!.textContent, /^1 of 3 found$/)
   })
 
   it('uses the runtime scan for the Ollama chip', () => {

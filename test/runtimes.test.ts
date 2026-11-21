@@ -202,6 +202,31 @@ describe('port probes', () => {
     assert.equal(result.models.length, 0)
     assert.match(result.error ?? '', /8080/)
   })
+
+  it('does not return another runtime’s models from a shared port', async () => {
+    const descriptor = runtimeDescriptor('localai')
+    assert.ok(descriptor)
+    const result = await listRuntimeModels(descriptor, {
+      fetchImpl: tableFetch({
+        'http://127.0.0.1:8080/v1/models': { data: [{ id: 'owned-by-llamacpp' }] },
+        'http://127.0.0.1:8080/': 'llama.cpp server'
+      })
+    })
+    assert.equal(result.models.length, 0)
+    assert.match(result.error ?? '', /served by llama\.cpp/)
+  })
+
+  it('does not guess which runtime owns an unnamed shared port', async () => {
+    const descriptor = runtimeDescriptor('llamacpp')
+    assert.ok(descriptor)
+    const result = await listRuntimeModels(descriptor, {
+      fetchImpl: tableFetch({
+        'http://127.0.0.1:8080/v1/models': { data: [{ id: 'who-knows' }] }
+      })
+    })
+    assert.equal(result.models.length, 0)
+    assert.match(result.error ?? '', /does not name itself/)
+  })
 })
 
 describe('detection', () => {
