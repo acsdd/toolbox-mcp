@@ -976,7 +976,7 @@ export function createServices(options: ServicesOptions = {}) {
       return {
         ok: false,
         repo,
-        message: `"${repo}" is being pulled by Ollama, which cannot be cancelled from here. Interrupt the pull in the terminal that started it.`
+        message: `"${repo}" is being pulled by Ollama, which cannot be cancelled from the panel. The pull keeps running in the background, and the model is available when it finishes.`
       }
     }
     controller.abort()

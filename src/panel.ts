@@ -342,6 +342,7 @@ ${WIDGET_HOST_CSS}
   .mf-cancel-btn:hover:not(:disabled) { color: #e08b7a; border-color: #e08b7a; }
   .mf-cancel-btn:disabled { opacity: 0.6; cursor: default; }
   .mf-cancel-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  .mf-cancel-note { font-size: .625rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--dim); padding: 3px 0; }
   .mf-bar-track { flex: 1; height: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
   .mf-bar-fill { height: 100%; background: var(--accent); transition: width 0.4s ease; }
   .mf-bar-fill.indet { width: 40%; animation: mf-slide 1.1s ease-in-out infinite; }
@@ -576,14 +577,14 @@ ${WIDGET_HOST_CSS}
       <div class="machine" id="mf-machine"></div>
       <div class="mf-recent hidden" id="mf-recent" aria-label="Recently installed models"></div>
       <div class="card rt-card" id="rt-card">
-        <h2>Local runtimes <em id="rt-meta">detecting…</em></h2>
-        <p class="rt-intro">Ollama is not the only local runtime. These are the ones found on this machine — pick one and the Model Farm installs into it.</p>
+        <h2>Local runtimes <em id="rt-meta" aria-live="polite">detecting…</em></h2>
+        <p class="rt-intro">Ollama is not the only local runtime. These are the ones found on this machine. Make one active for grading — each model can still install into any of them.</p>
         <div class="rt-list" id="rt-list"></div>
         <div class="actions">
           <button class="btn" onclick="rtDetect()">Scan again</button>
           <button class="btn primary" onclick="rtInstall()">Install / update Ollama</button>
         </div>
-        <div class="rt-log" id="rt-log"></div>
+        <div class="rt-log" id="rt-log" role="status" aria-live="polite"></div>
       </div>
       <div class="mf-runnow" id="mf-runnow"></div>
       <div class="mf-progress" id="mf-progress"></div>
@@ -1207,27 +1208,32 @@ function mfAgo(ts) {
   if (days < 30) return days + 'd ago'
   return new Date(ts).toLocaleDateString()
 }
-async function mfLoadRecent() {
+/** The recently-installed strip: model name, age, and the runtime in words. */
+function mfRecentHtml(history) {
+  return '<span class="mf-recent-title">Recently installed</span>' + history.map(function (entry, index) {
+    return '<button type="button" class="mf-recent-chip" onclick="mfRecentJump(' + index + ')" title="' + esc(entry.repo) + ' — search again">' +
+      '<b>' + esc(entry.label) + '</b><em>' + mfAgo(entry.installedAt) + (entry.runtime ? ' · ' + esc(rtLabel(entry.runtime)) : '') + '</em></button>'
+  }).join('')
+}
+function mfRenderRecent() {
   var box = document.getElementById('mf-recent')
+  if (!box) return
+  if (!mf.recent || !mf.recent.length) { box.innerHTML = ''; box.classList.add('hidden'); return }
+  box.classList.remove('hidden')
+  box.innerHTML = mfRecentHtml(mf.recent)
+}
+async function mfLoadRecent() {
   try {
     var res = await fetch('/api/settings')
     if (!res.ok) throw new Error('settings unavailable')
     var body = await res.json()
-    var history = body.modelInstalls || []
-    mf.recent = history
+    mf.recent = body.modelInstalls || []
     mf.notes = body.modelNotes || {}
-    if (!history.length) { box.innerHTML = ''; box.classList.add('hidden') }
-    else {
-      box.classList.remove('hidden')
-      box.innerHTML = '<span class="mf-recent-title">Recently installed</span>' + history.map(function (entry, index) {
-        return '<button type="button" class="mf-recent-chip" onclick="mfRecentJump(' + index + ')" title="' + esc(entry.repo) + ' — search again">' +
-          '<b>' + esc(entry.label) + '</b><em>' + mfAgo(entry.installedAt) + (entry.runtime ? ' · ' + esc(entry.runtime) : '') + '</em></button>'
-      }).join('')
-    }
+    mfRenderRecent()
     if (lastResult) renderGroups(lastResult)
   } catch (cause) {
-    box.innerHTML = ''
-    box.classList.add('hidden')
+    mf.recent = []
+    mfRenderRecent()
   }
 }
 function mfRecentJump(index) {
@@ -1407,7 +1413,7 @@ function renderAstrlinkSetup(id, inst) {
     'This uses ' + esc(label) + '’s local address (' + esc(inst.astrlink.baseUrl) + '); adjust it if the server runs elsewhere.</p>' +
     '<pre tabindex="0" aria-label="AstrLink service settings">' + esc(mfAstrlinkText(inst.astrlink)) + '</pre>' +
     '<div class="msetup-actions"><button class="btn" data-copy-setup="' + esc(id) +
-    '" onclick="mfCopyAstrlink(this.dataset.copySetup)"' + (copying ? ' disabled' : '') + '>Copy setup</button>' +
+    '" aria-label="Copy AstrLink setup for ' + esc(id) + '" onclick="mfCopyAstrlink(this.dataset.copySetup)"' + (copying ? ' disabled' : '') + '>Copy setup</button>' +
     '<span role="status" aria-live="polite">' + esc(copying ? 'Copying…' : feedback) + '</span></div>' +
     '<p class="msetup-note">Manual setup only. No credentials included; no gateway settings changed.</p></div>'
 }
@@ -1439,8 +1445,10 @@ async function rtDetect() {
     return
   }
   rtRender()
-  // The cards name the runtime they install into, so refresh them once the
-  // detection lands. Notes in progress survive the re-render.
+  // Runtime labels in the recently-installed strip resolve once detection
+  // lands. The cards also name the runtime they install into, so refresh them
+  // too — notes in progress survive the re-render.
+  if (mf.recent && mf.recent.length) mfRenderRecent()
   if (lastResult) renderGroups(lastResult)
 }
 function rtRender() {
@@ -1457,8 +1465,8 @@ function rtRender() {
     var action = active
       ? '<span class="rt-id"><small>active</small></span>'
       : r.installed
-        ? '<button class="btn small" onclick="rtUse(\\\'' + esc(r.id) + '\\\')">use this</button>'
-        : '<a class="btn small" href="' + esc(r.homepage) + '" target="_blank" rel="noopener">get it</a>'
+        ? '<button class="btn small" aria-label="Use ' + esc(r.label) + '" title="Make ' + esc(r.label) + ' the active runtime" onclick="rtUse(\\\'' + esc(r.id) + '\\\')">use this</button>'
+        : '<a class="btn small" aria-label="Get ' + esc(r.label) + '" href="' + esc(r.homepage) + '" target="_blank" rel="noopener">get it</a>'
     return '<div class="rt-item' + (active ? ' on' : '') + '">' +
       '<div class="rt-id"><b>' + esc(r.label) + '</b><small>' + state + detail + '</small></div>' +
       '<div class="rt-note">' + esc(r.note) + models + '</div>' + action + '</div>'
@@ -1612,7 +1620,7 @@ function renderGroups(result) {
         var quant = mf.quants[m.id]
         var quantBlock = ''
         if (pullable) {
-          quantBlock = '<div class="mquants"><button class="btn small" onclick="mfQuants(&quot;' + esc(m.id) + '&quot;)">Quants…</button>'
+          quantBlock = '<div class="mquants"><button class="btn small" aria-label="Choose quantization for ' + esc(m.label) + '" onclick="mfQuants(&quot;' + esc(m.id) + '&quot;)">Quants…</button>'
           if (quant && quant.state === 'ok' && quant.list.length) {
             var selectedQuant = quant.list.find(function (q) { return (q.quant || q.filename) === quant.chosen }) ||
               quant.list.find(function (q) { return (q.quant || q.filename) === m.quantLabel }) || quant.list[0]
@@ -1631,15 +1639,15 @@ function renderGroups(result) {
           quantBlock += '</div>'
         }
         var removeBtn = m.installed && m.installedRuntime === 'ollama'
-          ? '<button class="btn small" data-repo="' + esc(m.id) + '" data-model="' + esc(m.installed) + '" data-runtime="ollama" onclick="mfRemove(this.dataset.repo,this.dataset.model,this.dataset.runtime)"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>Remove from Ollama</button>'
+          ? '<button class="btn small" data-repo="' + esc(m.id) + '" data-model="' + esc(m.installed) + '" data-runtime="ollama" aria-label="Remove ' + esc(m.label) + ' from Ollama" onclick="mfRemove(this.dataset.repo,this.dataset.model,this.dataset.runtime)"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>Remove from Ollama</button>'
           : (m.installed && m.installedRuntime ? '<span class="note">Manage models in ' + esc(rtLabel(m.installedRuntime)) + '.</span>' : '')
         var installBlock = '<div class="minstall">' +
           (pullable
             ? targetPicker +
-              '<button class="mf-install" onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install' + (targets.length > 1 ? '' : ' in ' + esc(targetName)) + '</button>'
+              '<button class="mf-install" aria-label="Install ' + esc(m.label) + '" onclick="mfInstall(\\'' + esc(m.id) + '\\')"' + (inst && inst.state === 'busy' ? ' disabled' : '') + '>⬇ Install' + (targets.length > 1 ? '' : ' in ' + esc(targetName)) + '</button>'
             : '<span class="note mf-target-note">safetensors only — convert to GGUF to install in ' + esc(targetName) + '</span>') +
           (pullable && inst && inst.state === 'err'
-            ? '<button class="btn small" onclick="mfInstall(\\'' + esc(m.id) + '\\')">Retry install</button>'
+            ? '<button class="btn small" aria-label="Retry install of ' + esc(m.label) + '" onclick="mfInstall(\\'' + esc(m.id) + '\\')">Retry install</button>'
             : '') +
           removeBtn +
           (inst ? '<span class="' + (inst.state === 'ok' ? 'ok' : 'err') + '" role="status" aria-live="polite">' + esc(inst.message) + '</span>' : '') +
@@ -1647,7 +1655,7 @@ function renderGroups(result) {
         var noteBlock = '<div class="mnote"><label for="mf-note-' + esc(m.id) + '">Note</label>' +
           '<textarea id="mf-note-' + esc(m.id) + '" class="mnote-input" rows="2" maxlength="1000" placeholder="quant that fits, speed, why you kept it…">' +
           esc(mf.noteDrafts[m.id] !== undefined ? mf.noteDrafts[m.id] : (mf.notes[m.id] || '')) + '</textarea>' +
-          '<div><button class="btn small" onclick="mfSaveNote(&quot;' + esc(m.id) + '&quot;)">Save note</button> ' +
+          '<div><button class="btn small" aria-label="Save note for ' + esc(m.label) + '" onclick="mfSaveNote(&quot;' + esc(m.id) + '&quot;)">Save note</button> ' +
           '<span id="mf-note-status-' + esc(m.id) + '" class="note" aria-live="polite"></span></div></div>'
         row += '<div class="mdetail"><p>' + esc(m.reason) + '</p>' +
           renderScorecard(m.grade) +
@@ -1874,6 +1882,28 @@ async function mfSyncProgress() {
     if ((body.downloads || []).some(function (d) { return d.status === 'downloading' })) mfStartProgress()
   } catch (cause) { /* best-effort */ }
 }
+/** One in-progress transfer: named runtime, bar, size/rate, and an action. */
+function mfDownloadRow(d) {
+  var runtime = d.runtime || 'ollama'
+  var indet = d.percent === null || d.percent === undefined
+  var pct = indet ? 0 : d.percent
+  var bar = indet
+    ? '<div class="mf-bar-track"><div class="mf-bar-fill indet"></div></div>'
+    : '<div class="mf-bar-track"><div class="mf-bar-fill" style="width:' + pct + '%"></div></div>'
+  var label = indet ? '<b>pulling…</b>' : '<b>' + pct + '%</b>'
+  var size = indet
+    ? (d.totalBytes ? 'target ' + gb(d.totalBytes) : '')
+    : gb(d.receivedBytes) + (d.totalBytes ? ' / ' + gb(d.totalBytes) : '')
+  var rate = indet ? '' : mfTrackRate(d)
+  if (rate) size += ' · ' + rate
+  // Ollama streams the pull through its daemon; there is no abort hook, so
+  // offer an honest note instead of a button that can only fail.
+  var action = runtime === 'ollama'
+    ? '<span class="mf-cancel-note" title="Ollama pulls finish in the background and cannot be cancelled here.">no cancel</span>'
+    : '<button class="mf-cancel-btn" type="button" aria-label="Cancel download of ' + esc(d.repo) + '" data-repo="' + esc(d.repo) + '" onclick="mfCancel(this)">cancel</button>'
+  return '<div class="mf-dl"><span>' + esc(d.repo) + ' → ' + esc(rtLabel(runtime)) + '</span>' +
+    bar + label + '<small>' + size + '</small>' + action + '</div>'
+}
 function mfStartProgress() {
   if (mf.progressTimer) return
   var generation = mf.progressGeneration = (mf.progressGeneration || 0) + 1
@@ -1906,22 +1936,7 @@ function mfStartProgress() {
       Object.keys(mf.dlSamples).forEach(function (repo) {
         if (shown.indexOf(repo) === -1) delete mf.dlSamples[repo]
       })
-      box.innerHTML = active.map(function (d) {
-        var indet = d.percent === null || d.percent === undefined
-        var pct = indet ? 0 : d.percent
-        var bar = indet
-          ? '<div class="mf-bar-track"><div class="mf-bar-fill indet"></div></div>'
-          : '<div class="mf-bar-track"><div class="mf-bar-fill" style="width:' + pct + '%"></div></div>'
-        var label = indet ? '<b>pulling…</b>' : '<b>' + pct + '%</b>'
-        var size = indet
-          ? (d.totalBytes ? 'target ' + gb(d.totalBytes) : '')
-          : gb(d.receivedBytes) + (d.totalBytes ? ' / ' + gb(d.totalBytes) : '')
-        var rate = indet ? '' : mfTrackRate(d)
-        if (rate) size += ' · ' + rate
-        return '<div class="mf-dl"><span>' + esc(d.repo) + ' → ' + esc(d.runtime) + '</span>' +
-          bar + label + '<small>' + size + '</small>' +
-          '<button class="mf-cancel-btn" type="button" data-repo="' + esc(d.repo) + '" onclick="mfCancel(this)">cancel</button></div>'
-      }).join('')
+      box.innerHTML = active.map(mfDownloadRow).join('')
     } catch (cause) { /* polling is best-effort */ }
     finally { polling = false }
   }, 700)

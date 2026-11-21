@@ -105,6 +105,19 @@ require(path.join(appRoot, 'scripts/desktop.cjs')).then(async (window) => {
   assert.ok(overview.tools >= 20)
   assert.equal(overview.tiles, 4)
   assert.ok(overview.groups > 1)
+  // The capture below must show the Overview, not the Settings view the probe
+  // visited earlier. Confirm the switch landed, reset the scroll, and give the
+  // hidden window a moment to paint before reading the frame.
+  const overviewShown = await window.webContents.executeJavaScript(`
+    (() => {
+      window.scrollTo(0, 0);
+      return { overviewVisible: !document.getElementById('sec-overview').classList.contains('hidden'),
+               settingsHidden: document.getElementById('sec-settings').classList.contains('hidden') };
+    })()
+  `)
+  assert.equal(overviewShown.overviewVisible, true)
+  assert.equal(overviewShown.settingsHidden, true)
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 400))')
   await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
   // Keep a picture of the Overview next to the Model Farm one.
   const docs = path.join(__dirname, '..', 'docs')

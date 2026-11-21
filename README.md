@@ -16,15 +16,15 @@ no Node.js and no administrator rights.
 
 | Build | What it is | Size |
 | --- | --- | --- |
-| [`ModelFarm-Setup-0.9.15.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.15/ModelFarm-Setup-0.9.15.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
-| [`ModelFarm-Portable-0.9.15.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.15/ModelFarm-Portable-0.9.15.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
+| [`ModelFarm-Setup-0.9.16.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.16/ModelFarm-Setup-0.9.16.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
+| [`ModelFarm-Portable-0.9.16.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.16/ModelFarm-Portable-0.9.16.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
 
 Install, update, roll back and uninstall are described in
 [docs/install.md](docs/install.md). Older builds are on the
 [releases page](https://github.com/acsdd/toolbox-mcp/releases). The binaries are
 not code-signed, so Windows SmartScreen shows an "unverified publisher" warning
 on first start. Each release ships
-[`SHA256SUMS.txt`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.15/SHA256SUMS.txt)
+[`SHA256SUMS.txt`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.16/SHA256SUMS.txt)
 so a download can be checked with `sha256sum -c SHA256SUMS.txt`.
 
 Part of the Toolbox family:
@@ -48,7 +48,7 @@ Part of the Toolbox family:
 | `llamafarm_search` / `llamafarm_quants` | Search HuggingFace live beyond the cached catalog, and list every GGUF quantization of a repo — smallest first, with real file sizes — before installing |
 | `llamafarm_remove` | Remove an installed Ollama model by repo id or exact local name |
 | `llamafarm_run_now` / `llamafarm_progress` | Best green model per task right now; status, percent and bytes of tracked folder downloads |
-| `llamafarm_cancel` | Stop an in-progress GGUF download started by the panel or a tool (Ollama-owned pulls are stopped in their terminal) |
+| `llamafarm_cancel` | Stop an in-progress GGUF download started by the panel or a tool (Ollama-owned pulls cannot be cancelled from the panel and keep running in the background) |
 | `llamafarm_notes` / `llamafarm_note` | Read or save the free-form note kept per model repo (why you kept it, which quant fits); the panel shows it in the model detail |
 | `runtimes_detect` / `runtimes_install` / `runtimes_use` / `runtimes_models` / `runtimes_download` | Local model runtimes: find Ollama, LM Studio, llama.cpp, Jan, GPT4All, KoboldCpp, LocalAI, vLLM, llamafile and text-generation-webui, install Ollama, and choose which one the Model Farm installs into |
 | `marketplace_list` / `marketplace_install` / `marketplace_uninstall` | Live module marketplace (public registry, installs via the bundle validator) |
@@ -98,10 +98,10 @@ model to AstrLink.
   digits-only PC-vs-model comparison with signed headroom and the weak-link
   sentence.
   The catalog is cached in `~/.toolbox-mcp/llamafarm-cache.json` for 6 hours.
-  Expanding a model shows an **Install in &lt;runtime&gt;** action: the runtime is
-  the one you picked under **Local runtimes** — Ollama by default. When more than
-  one runtime is found on this machine, the action grows a runtime dropdown, so
-  the model goes into the runtime you mean without leaving the card; picking one
+  Expanding a model shows an **Install in &lt;runtime&gt;** action: it targets the
+  active runtime from **Local runtimes** — Ollama by default. When more than one
+  runtime is found on this machine, the action grows a runtime dropdown, so the
+  model goes into the runtime you mean without leaving the card; picking one
   there retargets every open card. Ollama serves
   any GGUF straight from the Hub, so that install is a single `ollama pull
   hf.co/owner/repo:Q4_K_M` — with a GPU split it writes a Modelfile instead.
@@ -126,13 +126,14 @@ model to AstrLink.
   AstrLink automatically. Failed installs offer no setup. The same success-only
   settings are returned in the `astrlink` field of `llamafarm_install`.
   A **Recently installed** strip above the list remembers successful installs
-  (model, runtime, how long ago); clicking a chip searches that repo again.
-  Installs started elsewhere — through an MCP tool while the panel is open —
-  show their download progress in the panel and refresh the list and the strip
-  when they finish. The progress row shows the current rate and the estimated
-  time left, and **cancel** stops a GGUF download; a failed or cancelled install
-  offers **Retry install** (Ollama-owned pulls are stopped in the terminal that
-  started them, and the panel says so). Each expanded model also carries a free-form **Note**
+  (model, runtime by name, how long ago); clicking a chip searches that repo
+  again. Installs started elsewhere — through an MCP tool while the panel is
+  open — show their download progress in the panel and refresh the list and the
+  strip when they finish. The progress row names the runtime, shows the current
+  rate and the estimated time left, and **cancel** stops a GGUF download; a
+  failed or cancelled install offers **Retry install**. An Ollama-owned pull
+  has no abort hook, so its row says it cannot be cancelled here instead of
+  offering a button that could only fail. Each expanded model also carries a free-form **Note**
   (why you kept it, which quant fits, observed speed), stored locally in
   settings and shared with the `llamafarm_note` / `llamafarm_notes` tools;
   an unsaved draft survives list refreshes until you save it. Size bounds and
@@ -147,9 +148,10 @@ model to AstrLink.
   program in its install folder — a leftover data folder alone does not count,
   so an app you uninstalled is not reported as present. When two runtimes share
   a port, the one that names itself in its banner wins and the other says
-  which runtime holds the port. Pick one with **use this** and the Model Farm
-  installs into that runtime from then on; the choice is stored in
-  `~/.toolbox-mcp/settings.json`. **Install / update Ollama** downloads the
+  which runtime holds the port. Pick one with **use this** to make it the
+  active runtime for grading; the choice is stored in
+  `~/.toolbox-mcp/settings.json`, and each model card can still install into
+  any runtime that was found. **Install / update Ollama** downloads the
   official installer and runs it silently (per user, no administrator rights)
   so you end up with a fresh version rather than a stale one. Runtimes with
   their own installer get a **get it** link instead.
@@ -294,7 +296,7 @@ present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.9.15.exe + dist/ModelFarm-Setup-0.9.15.exe
+npm run portable      # → dist/ModelFarm-Portable-0.9.16.exe + dist/ModelFarm-Setup-0.9.16.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -329,11 +331,11 @@ the widget core repo, so **the widget core has to be published first**:
 ```bash
 npm run portable
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.9.15
+git tag v0.9.16
 git push origin main --tags
-gh release create v0.9.15 \
-  dist/ModelFarm-Portable-0.9.15.exe dist/ModelFarm-Setup-0.9.15.exe dist/SHA256SUMS.txt \
-  --title "Model Farm 0.9.15" --notes-file docs/release-notes-0.9.15.md
+gh release create v0.9.16 \
+  dist/ModelFarm-Portable-0.9.16.exe dist/ModelFarm-Setup-0.9.16.exe dist/SHA256SUMS.txt \
+  --title "Model Farm 0.9.16" --notes-file docs/release-notes-0.9.16.md
 ```
 
 `npm run portable` writes `dist/SHA256SUMS.txt` itself, so the checksum file in

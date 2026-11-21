@@ -73,7 +73,7 @@ function mount(responses: Record<string, unknown> = {}) {
   }
   const history = { urls: [] as string[], replaceState(_state: unknown, _title: unknown, url: string) { this.urls.push(url) } }
   const client = runInNewContext(
-    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage })',
+    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage, recentHtml: mfRecentHtml, downloadRow: mfDownloadRow })',
     {
       document: {
         getElementById: get,
@@ -105,6 +105,8 @@ function mount(responses: Record<string, unknown> = {}) {
     pickTarget: (select: { value: string }) => void
     astrlink: (id: string, inst: Record<string, unknown>) => string
     installMessage: (body: Record<string, unknown>, ok: boolean, steps: string[]) => string
+    recentHtml: (history: Array<Record<string, unknown>>) => string
+    downloadRow: (download: Record<string, unknown>) => string
   }
   return { client, get, elements, history }
 }
@@ -342,5 +344,59 @@ describe('model farm install result', () => {
     const { client } = mount()
     const text = client.installMessage({ error: 'Not enough disk at /models.' }, false, ['ignored'])
     assert.equal(text, 'Not enough disk at /models.')
+  })
+})
+
+describe('model farm runtime names', () => {
+  const runtimes = {
+    active: 'ollama',
+    runtimes: [
+      { id: 'ollama', label: 'Ollama', installed: true, running: true },
+      { id: 'lmstudio', label: 'LM Studio', installed: true, running: false }
+    ]
+  }
+
+  it('names the runtime in the recently-installed strip', () => {
+    const { client } = mount()
+    client.rt.data = runtimes
+    const html = client.recentHtml([
+      { repo: 'acme/model', label: 'acme model', runtime: 'lmstudio', installedAt: Date.now() }
+    ])
+    assert.match(html, /LM Studio/)
+    assert.match(html, /acme model/)
+    // The stored id is an implementation detail, not something to show.
+    assert.doesNotMatch(html, /· lmstudio/)
+  })
+
+  it('falls back to the stored id until detection lands', () => {
+    const { client } = mount()
+    const html = client.recentHtml([
+      { repo: 'acme/model', label: 'acme model', runtime: 'lmstudio', installedAt: Date.now() }
+    ])
+    assert.match(html, /· lmstudio/)
+  })
+
+  it('names the runtime in a running transfer and offers cancel when possible', () => {
+    const { client } = mount()
+    client.rt.data = runtimes
+    const row = client.downloadRow({
+      repo: 'acme/model', runtime: 'lmstudio', percent: 42, receivedBytes: 1000, totalBytes: 2000
+    })
+    assert.match(row, /LM Studio/)
+    assert.doesNotMatch(row, /→ lmstudio/)
+    assert.match(row, /42%/)
+    assert.match(row, /Cancel download of acme\/model/)
+  })
+
+  it('does not offer a cancel that Ollama cannot honour', () => {
+    const { client } = mount()
+    client.rt.data = runtimes
+    const row = client.downloadRow({
+      repo: 'acme/other', runtime: 'ollama', percent: null, receivedBytes: 0, totalBytes: 0
+    })
+    assert.match(row, /Ollama/)
+    assert.match(row, /no cancel/)
+    assert.match(row, /cannot be cancelled here/)
+    assert.doesNotMatch(row, /mfCancel/)
   })
 })

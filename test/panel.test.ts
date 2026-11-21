@@ -638,6 +638,33 @@ describe('panel model farm feature UI', () => {
     assert.ok(reply.body.includes("'’s local address ('"), 'AstrLink note names the runtime address')
   })
 
+  it('names the runtime and the model in repeated controls', async () => {
+    const reply = await ask({ path: '/' })
+    assert.equal(reply.status, 200)
+    for (const hook of [
+      'function mfRecentHtml(history)',
+      'function mfRenderRecent()',
+      'if (mf.recent && mf.recent.length) mfRenderRecent()',
+      'function mfDownloadRow(d)',
+      'active.map(mfDownloadRow)',
+      'class="mf-cancel-note"',
+      'id="rt-log" role="status" aria-live="polite"',
+      'aria-label="Use ',
+      'aria-label="Get ',
+      'aria-label="Choose quantization for ',
+      'aria-label="Install ',
+      'aria-label="Retry install of ',
+      'aria-label="Remove ',
+      'aria-label="Save note for ',
+      'aria-label="Copy AstrLink setup for '
+    ]) {
+      assert.ok(reply.body.includes(hook), `page missing ${hook}`)
+    }
+    // Progress rows and the recent strip show the runtime's name, not its id.
+    assert.doesNotMatch(reply.body, /esc\(d\.runtime\) \+ '<\/span>'/)
+    assert.doesNotMatch(reply.body, /esc\(entry\.runtime\)/)
+  })
+
   it('gives every section an address and follows the rail in the URL', async () => {
     const reply = await ask({ path: '/' })
     assert.equal(reply.status, 200)

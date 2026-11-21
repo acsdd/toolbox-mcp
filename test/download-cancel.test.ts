@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
-import type { FetchLike } from '@toolbox/widgets'
+import type { ExecFileLike, FetchLike } from '@toolbox/widgets'
 import { createServices } from '../dist/services.js'
 import type { RuntimeFetch, RuntimeFetchResponse } from '../dist/runtimes.js'
 
@@ -159,5 +159,41 @@ describe('model farm: download cancellation', () => {
     const cancelRes = await services.llamafarmCancel({ repo: 'nonexistent/repo' })
     assert.equal(cancelRes.ok, false)
     assert.match(cancelRes.message, /no active download/i)
+  })
+
+  it('says plainly that an Ollama pull keeps running instead of pointing at a terminal', async () => {
+    let finishPull: (result: { ok: boolean; code: number; output: string; error: string | null }) => void = () => {}
+    const ollamaExec: ExecFileLike = (_file, _args, _opts, cb) =>
+      cb(null, 'ollama version is 0.5.4')
+    const services = createServices({
+      fetchImpl: mockCatalogFetch(),
+      execFileImpl: ollamaExec,
+      freeDiskImpl: async () => 100 * 1024 * 1024 * 1024,
+      homeDir: join(home, 'home-ollama-cancel'),
+      pullModel: () => new Promise<{ ok: boolean; code: number; output: string; error: string | null }>((resolve) => {
+        finishPull = resolve
+      })
+    })
+    await services.init()
+    await services.runtimesUse('ollama')
+
+    const install = services.llamafarmInstall({ repo: 'test/cancel-model-3b' })
+    let progress = await services.llamafarmProgress()
+    for (let i = 0; i < 50; i++) {
+      progress = await services.llamafarmProgress()
+      if (progress.downloads.length > 0) break
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    assert.equal(progress.downloads.length, 1)
+
+    const cancelRes = await services.llamafarmCancel({ repo: 'test/cancel-model-3b' })
+    assert.equal(cancelRes.ok, false)
+    assert.match(cancelRes.message, /cannot be cancelled from the panel/i)
+    assert.match(cancelRes.message, /keeps running in the background/i)
+    assert.doesNotMatch(cancelRes.message, /terminal/i)
+
+    finishPull({ ok: false, code: 1, output: '', error: 'stopped for test' })
+    const result = await install
+    assert.equal(result.ok, false)
   })
 })
