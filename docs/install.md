@@ -127,17 +127,28 @@ packaged MCP server straight from the install folder:
       "args": [
         "C:\\Users\\you\\AppData\\Local\\Programs\\Model Farm\\resources\\app.asar\\dist\\index.js"
       ],
-      "env": { "ELECTRON_RUN_AS_NODE": "1" }
+      "env": {
+        "ELECTRON_RUN_AS_NODE": "1",
+        "TOOLBOX_MCP_HOME": "C:\\Users\\you\\AppData\\Roaming\\Model Farm\\settings"
+      }
     }
   }
 }
 ```
 
 `ELECTRON_RUN_AS_NODE` makes the app executable behave as a plain Node
-runtime, so the server starts on stdio without opening a window. The server
-also serves its own panel; set `TOOLBOX_MCP_PORT` when `3851` is already
-taken, and `TOOLBOX_MCP_HOME` when you want the settings somewhere else than
-`%APPDATA%\Model Farm\settings`.
+runtime, so the server starts on stdio without opening a window.
+`TOOLBOX_MCP_HOME` keeps the client and the app on the same settings and
+credential references. The panel's **Connect an MCP client** card builds this
+exact block for your installation, so you can copy it from there.
+
+The server also serves its own panel. If `3851` is already taken — by the app
+you have open, for example — it moves to a free loopback port and prints the
+address. Set `TOOLBOX_MCP_PORT` to pin a specific port.
+
+The portable executable unpacks to a temporary folder on every run, so its
+paths are not stable enough for a client. Install the app (or use a source
+checkout) if you want an MCP client to launch the tools.
 
 Check the journey yourself at any time (with no path it checks the default
 install folder):

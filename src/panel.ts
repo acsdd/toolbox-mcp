@@ -6,7 +6,8 @@
  * Binds to 127.0.0.1 only. MCP clients talk stdio; humans use the panel.
  */
 import { createServer, type Server, type ServerResponse } from 'node:http'
-import { pathToFileURL } from 'node:url'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { WIDGET_HOST_CSS } from '@toolbox/widgets'
 import { createServices, type Services } from './services.js'
 import { createTerminal, type Terminal } from './terminal.js'
@@ -161,8 +162,11 @@ ${WIDGET_HOST_CSS}
   .tile.bad b { color: var(--red); }
 
   .ov-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, .85fr); gap: 16px; align-items: start; }
-  .ov-activity-card { position: sticky; top: 0; }
-  @media (max-width: 1180px) { .ov-grid { grid-template-columns: 1fr; } .ov-activity-card { position: static; } }
+  .ov-side { display: grid; gap: 16px; align-content: start; position: sticky; top: 0; }
+  .ov-connect-note { margin: 0 0 10px; color: var(--dim); font-size: .75rem; line-height: 1.6; }
+  .ov-connect-config { margin: 0 0 10px; padding: 10px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--bg); color: var(--muted); font-size: .6875rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; user-select: text; }
+  .ov-connect-config.hidden, .ov-connect-card .hidden { display: none; }
+  @media (max-width: 1180px) { .ov-grid { grid-template-columns: 1fr; } .ov-side { position: static; } }
 
   .tool-search { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 18px; border-bottom: 1px solid var(--border-soft); }
   .tool-search input[type="search"] { flex: 1; min-width: 200px; min-height: 38px; padding: 0 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel2); color: var(--text); font-size: .75rem; }
@@ -539,9 +543,21 @@ ${WIDGET_HOST_CSS}
           <div id="ov-tools"></div>
         </div>
 
-        <div class="card ov-activity-card">
-          <h2>Live activity <em id="ov-act-count"></em></h2>
-          <div class="act-list" id="ov-activity"></div>
+        <div class="ov-side">
+          <div class="card ov-activity-card">
+            <h2>Live activity <em id="ov-act-count"></em></h2>
+            <div class="act-list" id="ov-activity"></div>
+          </div>
+          <div class="card ov-connect-card">
+            <h2>Connect an MCP client <em id="ov-connect-meta" aria-live="polite"></em></h2>
+            <p class="ov-connect-note" id="ov-connect-note"></p>
+            <pre class="ov-connect-config" id="ov-connect-config" tabindex="0" aria-label="MCP client configuration"></pre>
+            <div class="actions">
+              <button class="btn" id="ov-connect-copy" onclick="ovCopyConnect()">Copy config</button>
+              <a class="btn" href="https://github.com/acsdd/toolbox-mcp/blob/main/docs/install.md#use-the-mcp-tools-from-an-mcp-client" target="_blank" rel="noopener">Client guide ↗</a>
+              <span id="ov-connect-status" role="status" aria-live="polite"></span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -811,6 +827,37 @@ function renderHero(server) {
     (info.repo ? '<span class="fact"><a href="' + esc(info.repo) + '" target="_blank" rel="noopener" style="color:var(--accent)">github ↗</a></span>' : '')
   document.getElementById('ov-version').textContent = 'toolbox-mcp ' + (info.version || '')
 }
+function renderConnect(server, attached) {
+  var meta = document.getElementById('ov-connect-meta')
+  var note = document.getElementById('ov-connect-note')
+  var pre = document.getElementById('ov-connect-config')
+  var copy = document.getElementById('ov-connect-copy')
+  if (!meta || !note || !pre) return
+  var client = server && server.client
+  if (!client || !client.config) {
+    meta.textContent = 'not available'
+    note.textContent = (client && client.reason) || 'A client configuration is not available for this build.'
+    pre.classList.add('hidden')
+    if (copy) copy.classList.add('hidden')
+    return
+  }
+  meta.textContent = attached ? 'client attached' : 'panel only'
+  note.textContent = 'Paste this into the mcpServers configuration of your MCP client (Claude Desktop, Cursor, …). The paths are for this installation.'
+  pre.textContent = client.config
+  pre.classList.remove('hidden')
+  if (copy) copy.classList.remove('hidden')
+}
+async function ovCopyConnect() {
+  var pre = document.getElementById('ov-connect-config')
+  var status = document.getElementById('ov-connect-status')
+  if (!pre || !status) return
+  try {
+    await navigator.clipboard.writeText(pre.textContent)
+    status.textContent = 'Copied.'
+  } catch (cause) {
+    status.textContent = 'Copy unavailable — select the configuration and copy it.'
+  }
+}
 function renderTiles(server) {
   var activity = ov.activity && Array.isArray(ov.activity.perTool)
     ? ov.activity
@@ -1024,6 +1071,7 @@ async function loadActivity() {
   ov.activity = await res.json()
   renderActivity()
   renderTiles(ov.catalog ? ov.catalog.server : { transport: 'stdio' })
+  if (ov.catalog) renderConnect(ov.catalog.server, ov.activity && ov.activity.attached)
 }
 async function bootOverview() {
   var res = await fetch('/api/overview')
@@ -2547,6 +2595,57 @@ export interface PanelOptions {
   terminal?: Terminal
 }
 
+export interface ClientLaunch {
+  command: string
+  args: string[]
+  env?: Record<string, string>
+  /** Ready to paste into a client that uses the mcpServers format. */
+  config?: string
+  /** Why no configuration can be given, when it cannot. */
+  reason?: string
+}
+
+export interface ClientLaunchOptions {
+  execPath?: string
+  distDir?: string
+  packaged?: boolean
+  portable?: boolean
+  /** The settings folder to keep; null leaves it out. Defaults to the process setting. */
+  home?: string | null
+}
+
+/**
+ * The exact command an MCP client should launch for this installation. A
+ * portable build is unpacked to a temporary folder, so its paths would go
+ * stale between runs and are deliberately not offered.
+ */
+export function clientLaunch(options: ClientLaunchOptions = {}): ClientLaunch {
+  const execPath = options.execPath ?? process.execPath
+  const distDir = options.distDir ?? dirname(fileURLToPath(import.meta.url))
+  if (options.portable ?? Boolean(process.env.PORTABLE_EXECUTABLE_FILE)) {
+    return {
+      command: execPath,
+      args: [],
+      reason: 'This is the portable build, and it unpacks to a temporary folder each time. Install Model Farm, or run the server from a source checkout, to connect an MCP client.'
+    }
+  }
+  // Electron adds these at runtime; the Node type has no reason to know them.
+  const host = process as NodeJS.Process & { resourcesPath?: string; defaultApp?: boolean }
+  const packaged = options.packaged ?? (Boolean(host.resourcesPath) && !host.defaultApp)
+  const home = options.home === undefined ? process.env.TOOLBOX_MCP_HOME : options.home
+  const args = [join(distDir, 'index.js')]
+  const env: Record<string, string> = {}
+  if (packaged) env.ELECTRON_RUN_AS_NODE = '1'
+  if (home) env.TOOLBOX_MCP_HOME = home
+  const entry = { command: execPath, args, ...(Object.keys(env).length ? { env } : {}) }
+  return {
+    command: execPath,
+    args,
+    ...(Object.keys(env).length ? { env } : {}),
+    config: JSON.stringify({ mcpServers: { toolbox: entry } }, null, 2)
+  }
+}
+
 export function startPanel(services: Services, options: PanelOptions = {}): Promise<PanelHandle> {
   const terminal = options.terminal ?? createTerminal()
   const activity = options.activity ?? createActivity(false)
@@ -2582,7 +2681,8 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
               version: appVersion(),
               transport: 'stdio',
               panel: `http://127.0.0.1:${panelPort}`,
-              repo: REPO_URL
+              repo: REPO_URL,
+              client: clientLaunch()
             },
             groups: TOOL_GROUPS,
             tools: catalogEntries()
@@ -2841,24 +2941,38 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
   })
 
   return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(options.port ?? PANEL_PORT, '127.0.0.1', () => {
-      const address = server.address()
-      if (!address || typeof address === 'string') {
-        server.close()
-        reject(new Error('The panel did not obtain a TCP port.'))
-        return
-      }
-      panelPort = address.port
-      resolve({
-        port: address.port,
-        close: () => {
-          terminal.stop()
-          server.closeAllConnections()
-          server.close()
+    // A second server — an MCP client launching the app while the panel is
+    // already open — must not fail because the default port is taken.
+    const start = (port: number, fallback: boolean) => {
+      const onError = (cause: Error) => {
+        server.off('error', onError)
+        if (fallback && (cause as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+          start(0, false)
+          return
         }
+        reject(cause)
+      }
+      server.once('error', onError)
+      server.listen(port, '127.0.0.1', () => {
+        server.off('error', onError)
+        const address = server.address()
+        if (!address || typeof address === 'string') {
+          server.close()
+          reject(new Error('The panel did not obtain a TCP port.'))
+          return
+        }
+        panelPort = address.port
+        resolve({
+          port: address.port,
+          close: () => {
+            terminal.stop()
+            server.closeAllConnections()
+            server.close()
+          }
+        })
       })
-    })
+    }
+    start(options.port ?? PANEL_PORT, true)
   })
 }
 

@@ -13,7 +13,7 @@ interface Element {
   innerHTML: string
   textContent: string
   value: string
-  classList: { toggle(): void; contains(): boolean }
+  classList: { toggle(): void; contains(): boolean; add(): void; remove(): void }
   addEventListener(): void
   focus(): void
   appendChild(child: { innerHTML: string }): void
@@ -57,7 +57,7 @@ function mount(responses: Record<string, unknown> = {}) {
     innerHTML: '',
     textContent: '',
     value: '',
-    classList: { toggle() {}, contains() { return false } },
+    classList: { toggle() {}, contains() { return false }, add() {}, remove() {} },
     addEventListener() {},
     focus() {},
     appendChild(child: { innerHTML: string }) { this.innerHTML += child.innerHTML }
@@ -73,7 +73,7 @@ function mount(responses: Record<string, unknown> = {}) {
   }
   const history = { urls: [] as string[], replaceState(_state: unknown, _title: unknown, url: string) { this.urls.push(url) } }
   const client = runInNewContext(
-    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage, recentHtml: mfRecentHtml, downloadRow: mfDownloadRow, machine: renderMachine, rtRender: rtRender })',
+    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage, recentHtml: mfRecentHtml, downloadRow: mfDownloadRow, machine: renderMachine, rtRender: rtRender, connect: renderConnect })',
     {
       document: {
         getElementById: get,
@@ -109,6 +109,7 @@ function mount(responses: Record<string, unknown> = {}) {
     downloadRow: (download: Record<string, unknown>) => string
     machine: (machine: Record<string, unknown>, grade: Record<string, unknown> | null) => void
     rtRender: () => void
+    connect: (server: Record<string, unknown> | null, attached: boolean) => void
   }
   return { client, get, elements, history }
 }
@@ -493,5 +494,43 @@ describe('model farm runtime names', () => {
     assert.match(row, /no cancel/)
     assert.match(row, /cannot be cancelled here/)
     assert.doesNotMatch(row, /mfCancel/)
+  })
+})
+
+describe('connect an MCP client', () => {
+  const SERVER = {
+    client: {
+      command: 'C:\Program Files\nodejs\node.exe',
+      args: ['D:\toolbox-mcp\dist\index.js'],
+      config: '{\n  "mcpServers": {\n    "toolbox": {}\n  }\n}'
+    }
+  }
+
+  it('shows the configuration for this installation and reports the client state', () => {
+    const { client, get } = mount()
+    client.connect(SERVER, true)
+    assert.match(get('ov-connect-meta')!.textContent, /client attached/)
+    assert.equal(get('ov-connect-config')!.textContent, SERVER.client.config)
+    assert.match(get('ov-connect-note')!.textContent, /mcpServers/)
+  })
+
+  it('says when a client is not attached yet', () => {
+    const { client, get } = mount()
+    client.connect(SERVER, false)
+    assert.match(get('ov-connect-meta')!.textContent, /panel only/)
+  })
+
+  it('explains a portable build instead of showing a temporary path', () => {
+    const { client, get } = mount()
+    client.connect({
+      client: {
+        command: 'C:\Users\you\AppData\Local\Temp\abc\Model Farm.exe',
+        args: [],
+        reason: 'Portable builds extract to a temporary folder; install the app or use a source checkout.'
+      }
+    }, false)
+    assert.match(get('ov-connect-meta')!.textContent, /not available/)
+    assert.match(get('ov-connect-note')!.textContent, /Portable builds/)
+    assert.match(get('ov-connect-note')!.textContent, /install the app/)
   })
 })

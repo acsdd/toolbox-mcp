@@ -75,7 +75,7 @@
       }
       .download .btn:hover { border-color: var(--accent); transform: translateY(-2px); }
       .download .btn.primary { border-color: var(--accent); color: var(--accent); }
-      :is(.download .btn, .card, ul.family a, footer a):focus-visible {
+      :is(.download .btn, .card, ul.family a, footer a, .doc-links a):focus-visible {
         outline: 2px solid var(--accent-2);
         outline-offset: 3px;
       }
@@ -103,6 +103,22 @@
       ul.family span { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; }
       footer { padding-top: 22px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
       footer a { color: var(--accent-2); }
+      .start { margin: 0 0 40px; }
+      .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; counter-reset: step; }
+      .steps li { display: grid; grid-template-columns: 30px 1fr; gap: 12px; align-items: start; padding: 14px 16px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--panel); counter-increment: step; }
+      .steps li::before { content: counter(step); display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 50%; color: var(--accent); font-weight: 700; font-size: 13px; }
+      .steps b { display: block; color: var(--text); font-size: 15px; }
+      .steps span { display: block; color: var(--muted); font-size: 14px; }
+      .facts { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin: 0 0 40px; }
+      .facts section { padding: 16px 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+      .facts ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
+      .facts li { margin: 0 0 6px; }
+      .facts li:last-child { margin-bottom: 0; }
+      .shot { margin: 0 0 40px; }
+      .shot img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+      .shot figcaption { margin-top: 8px; color: var(--muted); font-size: 13px; }
+      .doc-links { margin: -20px 0 40px; color: var(--muted); font-size: 14px; }
+      .doc-links a { color: var(--accent-2); }
     </style>
   </head>
   <body>
@@ -114,17 +130,50 @@
       <section class="download">
         <h2>Download the Model Farm app</h2>
         <div class="buttons">
-          <a class="btn primary" href="https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.19/ModelFarm-Setup-0.9.19.exe">Model Farm 0.9.19 — Installer (125 MB)</a>
-          <a class="btn" href="https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.19/ModelFarm-Portable-0.9.19.exe">Model Farm 0.9.19 — Portable (113 MB)</a>
+          <a class="btn primary" href="https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.20/ModelFarm-Setup-0.9.20.exe">Model Farm 0.9.20 — Installer (125 MB)</a>
+          <a class="btn" href="https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.20/ModelFarm-Portable-0.9.20.exe">Model Farm 0.9.20 — Portable (113 MB)</a>
         </div>
-        <p class="note">Windows, no Node.js and no administrator rights. The binaries are not code-signed, so SmartScreen shows an "unverified publisher" warning on first start. Older builds: <a href="https://github.com/acsdd/toolbox-mcp/releases">all releases</a>. Verify a download with <a href="https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.19/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
+        <p class="note">Windows, no Node.js and no administrator rights. The binaries are not code-signed, so SmartScreen shows an "unverified publisher" warning on first start. Older builds: <a href="https://github.com/acsdd/toolbox-mcp/releases">all releases</a>. Verify a download with <a href="https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.20/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
       </section>
+      <section class="start">
+        <h2>Start in three steps</h2>
+        <ol class="steps">
+          <li><div><b>Download and run</b><span>Use the installer, or the portable executable if you prefer nothing installed.</span></div></li>
+          <li><div><b>Open Model Farm</b><span>The window is the ops panel: Overview, Model Farm, Terminal and Marketplace.</span></div></li>
+          <li><div><b>Connect your agent — optional</b><span>Open <b>Overview → Connect an MCP client</b> and copy the generated configuration into Claude Desktop, Cursor or another MCP client.</span></div></li>
+        </ol>
+      </section>
+      <div class="facts">
+        <section>
+          <h2>Runs on</h2>
+          <ul>
+            <li>Windows 10 or 11, x64.</li>
+            <li>No Node.js and no administrator rights.</li>
+            <li>Local models are optional — Ollama, LM Studio, llama.cpp and others are detected if present.</li>
+            <li>A source checkout runs on Node.js 22+.</li>
+          </ul>
+        </section>
+        <section>
+          <h2>Private by default</h2>
+          <ul>
+            <li>The server binds to 127.0.0.1 only and loads nothing from the network.</li>
+            <li>No account, no telemetry and nothing uploaded.</li>
+            <li>The Gmail App Password stays in the Windows credential store.</li>
+            <li>Remote modules are opt-in, badged and limited to public HTTPS endpoints.</li>
+          </ul>
+        </section>
+      </div>
+      <figure class="shot">
+        <img src="panel-overview.png" alt="Model Farm ops panel — Overview with the MCP tool surface and live activity" loading="lazy" />
+        <figcaption>The ops panel on this machine: the tool surface an agent sees, live activity, and the connection details for an MCP client.</figcaption>
+      </figure>
       <div class="cards">
         <a class="card" href="https://github.com/acsdd/toolbox-mcp#readme"><span class="label">Readme</span><span class="note">What the project is and how to run it</span></a>
         <a class="card" href="https://github.com/acsdd/toolbox-mcp/releases"><span class="label">Releases</span><span class="note">Tags and downloadable builds</span></a>
         <a class="card" href="https://github.com/acsdd/toolbox-mcp/issues"><span class="label">Issues</span><span class="note">Report a problem or ask for something</span></a>
         <a class="card" href="https://github.com/acsdd/toolbox-mcp"><span class="label">Source</span><span class="note">Clone it and build from source</span></a>
       </div>
+      <p class="doc-links"><a href="install.md">Install guide</a> · <a href="https://github.com/acsdd/toolbox-mcp/blob/main/SECURITY.md">Security</a> · <a href="https://github.com/acsdd/toolbox-mcp/blob/main/CONTRIBUTING.md">Contributing</a> · <a href="https://github.com/acsdd/toolbox-mcp/blob/main/LICENSE">MIT license</a></p>
       <h2>Toolbox family</h2>
       <ul class="family">
         <li><a href="https://github.com/acsdd/ArtistWave">ArtistWave</a><span>A browser music workspace — artists, genres, playlists.</span></li>

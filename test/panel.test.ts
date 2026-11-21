@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
-import { startPanel } from '../dist/panel.js'
+import { clientLaunch, startPanel } from '../dist/panel.js'
 import { createServices } from '../dist/services.js'
 import type { Terminal } from '../dist/terminal.js'
 
@@ -678,6 +678,77 @@ describe('panel model farm feature UI', () => {
       'setSectionHash(b.dataset.nav)'
     ]) {
       assert.ok(reply.body.includes(hook), `page missing ${hook}`)
+    }
+  })
+})
+
+describe('MCP client configuration', () => {
+  it('builds an exact mcpServers entry for a source checkout', () => {
+    const execPath = 'C:/Program Files/nodejs/node.exe'
+    const distDir = 'D:/toolbox-mcp/dist'
+    const entry = join(distDir, 'index.js')
+    const launch = clientLaunch({
+      execPath,
+      distDir,
+      packaged: false,
+      portable: false,
+      home: null
+    })
+    assert.equal(launch.command, execPath)
+    assert.deepEqual(launch.args, [entry])
+    assert.equal(launch.env, undefined)
+    assert.ok(launch.config)
+    assert.deepEqual(JSON.parse(launch.config), {
+      mcpServers: { toolbox: { command: execPath, args: [entry] } }
+    })
+  })
+
+  it('runs the installed app as Node and keeps its settings folder', () => {
+    const execPath = 'C:/Program Files/Model Farm/Model Farm.exe'
+    const distDir = 'C:/Program Files/Model Farm/resources/app.asar/dist'
+    const home = 'C:/Users/you/AppData/Roaming/Model Farm/settings'
+    const launch = clientLaunch({ execPath, distDir, packaged: true, portable: false, home })
+    assert.deepEqual(launch.env, { ELECTRON_RUN_AS_NODE: '1', TOOLBOX_MCP_HOME: home })
+    assert.deepEqual(JSON.parse(launch.config!), {
+      mcpServers: {
+        toolbox: {
+          command: execPath,
+          args: [join(distDir, 'index.js')],
+          env: { ELECTRON_RUN_AS_NODE: '1', TOOLBOX_MCP_HOME: home }
+        }
+      }
+    })
+  })
+
+  it('does not hand a client a temporary path from the portable build', () => {
+    const launch = clientLaunch({
+      execPath: 'C:/Users/you/AppData/Local/Temp/abc/Model Farm.exe',
+      distDir: 'C:/Users/you/AppData/Local/Temp/abc/resources/app.asar/dist',
+      portable: true
+    })
+    assert.equal(launch.config, undefined)
+    assert.match(launch.reason ?? '', /portable/i)
+    assert.match(launch.reason ?? '', /install|source/i)
+  })
+
+  it('serves the configuration through the catalog API', async () => {
+    const reply = await ask({ path: '/api/catalog' })
+    assert.equal(reply.status, 200)
+    const body = JSON.parse(reply.body)
+    assert.equal(body.server.client.command, process.execPath)
+    assert.ok(body.server.client.args[0].endsWith('index.js'))
+    assert.deepEqual(JSON.parse(body.server.client.config).mcpServers.toolbox.command, process.execPath)
+  })
+})
+
+describe('panel port conflicts', () => {
+  it('moves to a free port when another panel already holds the requested one', async () => {
+    const second = await startPanel(services, { port: panel.port })
+    try {
+      assert.notEqual(second.port, panel.port)
+      assert.ok(second.port > 0)
+    } finally {
+      second.close()
     }
   })
 })

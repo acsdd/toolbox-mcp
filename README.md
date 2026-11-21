@@ -1,12 +1,27 @@
 # toolbox-mcp
 
 [![M8ven Verified](https://m8ven.ai/badge/mcp/acsdd-toolbox-mcp-12f9lc?variant=verified&v=d19a97a36f93ae9d30c3cb51d3bfcf15)](https://m8ven.ai/mcp/acsdd-toolbox-mcp-12f9lc?s=readme)
+[![CI](https://github.com/acsdd/toolbox-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/acsdd/toolbox-mcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/acsdd/toolbox-mcp?style=flat-square)](https://github.com/acsdd/toolbox-mcp/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-9cf37e?style=flat-square)](LICENSE)
 
 **Status:** `external_UAT` — released for acceptance testing outside the team. ![status](https://img.shields.io/badge/status-external_UAT-9cf37e?style=flat-square)
 
 **Site:** <https://acsdd.github.io/toolbox-mcp/> — The project landing page.
 
 Local-first MCP server: the shared [Toolbox widgets](https://github.com/acsdd/toolbox-widgets) — **crypto watch**, **Gmail announcer**, **resource monitor** — the **Model Farm** (catalog, fit scoring, local runtimes), the module **Marketplace** and remote MCP servers, all behind one tool surface, plus a small ops panel on `http://127.0.0.1:3851`.
+
+## Quick start
+
+1. Download the Model Farm installer below and run it — no Node.js and no
+   administrator rights.
+2. Start **Model Farm**. The window is the ops panel: Overview, Model Farm,
+   Terminal and Marketplace.
+3. To use the same tools inside Claude Desktop, Cursor or another MCP client,
+   open **Overview → Connect an MCP client** and copy the configuration shown
+   there. It is generated for this installation.
+
+The complete guide is [Install Model Farm on Windows](docs/install.md).
 
 ## Download the Model Farm app
 
@@ -16,15 +31,15 @@ no Node.js and no administrator rights.
 
 | Build | What it is | Size |
 | --- | --- | --- |
-| [`ModelFarm-Setup-0.9.19.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.19/ModelFarm-Setup-0.9.19.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
-| [`ModelFarm-Portable-0.9.19.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.19/ModelFarm-Portable-0.9.19.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
+| [`ModelFarm-Setup-0.9.20.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.20/ModelFarm-Setup-0.9.20.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
+| [`ModelFarm-Portable-0.9.20.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.20/ModelFarm-Portable-0.9.20.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
 
 Install, update, roll back and uninstall are described in
 [docs/install.md](docs/install.md). Older builds are on the
 [releases page](https://github.com/acsdd/toolbox-mcp/releases). The binaries are
 not code-signed, so Windows SmartScreen shows an "unverified publisher" warning
 on first start. Each release ships
-[`SHA256SUMS.txt`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.19/SHA256SUMS.txt)
+[`SHA256SUMS.txt`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.20/SHA256SUMS.txt)
 so a download can be checked with `sha256sum -c SHA256SUMS.txt`.
 
 Part of the Toolbox family:
@@ -76,7 +91,9 @@ model to AstrLink.
   searchable
   by name or purpose and filterable by group, with each tool's parameter
   schema shown as chips. A **Live activity** feed on the right lists the tool
-  calls as they land, with outcome and duration. The four shared widgets sit
+  calls as they land, with outcome and duration, and below it **Connect an MCP
+  client** shows the exact `mcpServers` block for this installation — source
+  checkout or installed app — with a copy button. The four shared widgets sit
   below as real UI: a price table, a mail list, resource meters and a widget
   bundle summary. The whole page is served by the server itself — nothing is
   fetched from the network. Every section has an address (`#models`,
@@ -260,6 +277,9 @@ already in the folder, and deletes only the files it created. The Ollama probe
 does the same for `gradium/phonon-31m-en`, and fails before touching anything
 if that repository is already installed.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the checkout, test and review
+conventions.
+
 ## Security
 
 - The server binds to `127.0.0.1` only — it is never reachable from the network.
@@ -281,6 +301,10 @@ if that repository is already installed.
   a registry entry cannot point the server at this machine or the local network.
   DNS can change between that check and the connection, so treat the guard as
   one layer, not as full protection against a hostile public endpoint.
+
+Found a problem in that posture? Report it privately — see
+[SECURITY.md](SECURITY.md). Please do not open a public issue for a
+vulnerability.
 
 ## Release
 
@@ -304,7 +328,7 @@ present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.9.19.exe + dist/ModelFarm-Setup-0.9.19.exe
+npm run portable      # → dist/ModelFarm-Portable-0.9.20.exe + dist/ModelFarm-Setup-0.9.20.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -339,11 +363,11 @@ the widget core repo, so **the widget core has to be published first**:
 ```bash
 npm run portable
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.9.19
+git tag v0.9.20
 git push origin main --tags
-gh release create v0.9.19 \
-  dist/ModelFarm-Portable-0.9.19.exe dist/ModelFarm-Setup-0.9.19.exe dist/SHA256SUMS.txt \
-  --title "Model Farm 0.9.19" --notes-file docs/release-notes-0.9.19.md
+gh release create v0.9.20 \
+  dist/ModelFarm-Portable-0.9.20.exe dist/ModelFarm-Setup-0.9.20.exe dist/SHA256SUMS.txt \
+  --title "Model Farm 0.9.20" --notes-file docs/release-notes-0.9.20.md
 ```
 
 `npm run portable` writes `dist/SHA256SUMS.txt` itself, so the checksum file in
