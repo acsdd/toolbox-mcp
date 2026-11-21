@@ -16,15 +16,15 @@ no Node.js and no administrator rights.
 
 | Build | What it is | Size |
 | --- | --- | --- |
-| [`ModelFarm-Setup-0.9.16.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.16/ModelFarm-Setup-0.9.16.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
-| [`ModelFarm-Portable-0.9.16.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.16/ModelFarm-Portable-0.9.16.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
+| [`ModelFarm-Setup-0.9.17.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.17/ModelFarm-Setup-0.9.17.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
+| [`ModelFarm-Portable-0.9.17.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.17/ModelFarm-Portable-0.9.17.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
 
 Install, update, roll back and uninstall are described in
 [docs/install.md](docs/install.md). Older builds are on the
 [releases page](https://github.com/acsdd/toolbox-mcp/releases). The binaries are
 not code-signed, so Windows SmartScreen shows an "unverified publisher" warning
 on first start. Each release ships
-[`SHA256SUMS.txt`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.16/SHA256SUMS.txt)
+[`SHA256SUMS.txt`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.17/SHA256SUMS.txt)
 so a download can be checked with `sha256sum -c SHA256SUMS.txt`.
 
 Part of the Toolbox family:
@@ -110,8 +110,12 @@ model to AstrLink.
   (`:latest`) and the panel names the reference that was installed.
   A runtime that takes files instead of pulls gets the GGUF downloaded into its
   own models folder, and one that serves a single model per process (llama.cpp,
-  llamafile) is started with it. If the runtime is missing, the action says so
-  and prints the exact command to run.
+  llamafile, vLLM) is started with it. A port that already serves the same
+  model is reused; a port that serves another model is left alone and the exact
+  command to start the runtime yourself is shown. vLLM's local GGUF path needs
+  the `vllm-gguf-plugin` package and receives the Hub repository as its
+  `--tokenizer`. If the runtime is missing, the action says so and prints the
+  exact command to run.
   Successful installs show **Use in AstrLink** with a **Copy setup** button:
   OpenAI-compatible provider, the address of the runtime that received the
   model (Ollama: `http://127.0.0.1:11434/v1`), the installed model and
@@ -148,7 +152,11 @@ model to AstrLink.
   program in its install folder — a leftover data folder alone does not count,
   so an app you uninstalled is not reported as present. When two runtimes share
   a port, the one that names itself in its banner wins and the other says
-  which runtime holds the port. Pick one with **use this** to make it the
+  which runtime holds the port — the neighbour is not counted as installed
+  just because the owner answers there. An install whose server is off is shown
+  as **installed · server not running**, and the Ollama chip and the active
+  runtime chip read the same scan, so they cannot contradict each other. Pick
+  one with **use this** to make it the
   active runtime for grading; the choice is stored in
   `~/.toolbox-mcp/settings.json`, and each model card can still install into
   any runtime that was found. **Install / update Ollama** downloads the
@@ -296,7 +304,7 @@ present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.9.16.exe + dist/ModelFarm-Setup-0.9.16.exe
+npm run portable      # → dist/ModelFarm-Portable-0.9.17.exe + dist/ModelFarm-Setup-0.9.17.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -331,11 +339,11 @@ the widget core repo, so **the widget core has to be published first**:
 ```bash
 npm run portable
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.9.16
+git tag v0.9.17
 git push origin main --tags
-gh release create v0.9.16 \
-  dist/ModelFarm-Portable-0.9.16.exe dist/ModelFarm-Setup-0.9.16.exe dist/SHA256SUMS.txt \
-  --title "Model Farm 0.9.16" --notes-file docs/release-notes-0.9.16.md
+gh release create v0.9.17 \
+  dist/ModelFarm-Portable-0.9.17.exe dist/ModelFarm-Setup-0.9.17.exe dist/SHA256SUMS.txt \
+  --title "Model Farm 0.9.17" --notes-file docs/release-notes-0.9.17.md
 ```
 
 `npm run portable` writes `dist/SHA256SUMS.txt` itself, so the checksum file in

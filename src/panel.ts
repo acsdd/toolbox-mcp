@@ -1355,16 +1355,31 @@ function renderMachine(m, grade) {
   if (typeof m.freeDiskBytes === 'number') {
     html += '<div class="chip"><span>STORAGE</span><b>' + rated('storage', gb(m.freeDiskBytes) + ' free') + '</b></div>'
   }
-  var oll = m.ollama.installed
-    ? 'installed · ' + m.ollama.models.length + ' models'
-    : 'not found' + (m.ollama.error ? ' (' + esc(m.ollama.error) + ')' : '')
+  // The runtime scan also finds an installed Ollama whose server is off. The
+  // score probe only sees a running API, so prefer the scan once it is here
+  // rather than reporting "not found" next to an installed active runtime.
+  var scanOllama = rt.data && rt.data.runtimes
+    ? rt.data.runtimes.filter(function (r) { return r.id === 'ollama' })[0]
+    : null
+  var oll
+  if (scanOllama && scanOllama.running) {
+    oll = 'running · ' + scanOllama.models.length + ' models'
+  } else if (scanOllama && scanOllama.installed) {
+    oll = 'installed · server not running'
+  } else if (m.ollama.installed) {
+    oll = 'installed · ' + m.ollama.models.length + ' models'
+  } else {
+    oll = 'not found' + (m.ollama.error ? ' (' + esc(m.ollama.error) + ')' : '')
+  }
   html += '<div class="chip"><span>OLLAMA</span><b>' + oll + '</b></div>'
   var activeId = rt.data && rt.data.active ? rt.data.active : 'ollama'
   var activeRuntime = rt.data
     ? rt.data.runtimes.filter(function (r) { return r.id === activeId })[0]
     : null
   if (activeRuntime) {
-    var state = activeRuntime.running ? 'running' : (activeRuntime.installed ? 'installed' : 'not running')
+    var state = activeRuntime.running
+      ? 'running'
+      : (activeRuntime.installed ? 'installed · server not running' : 'not found')
     html += '<div class="chip"><span>ACTIVE RUNTIME</span><b>' + esc(activeRuntime.label) + ' · ' + state + '</b></div>'
   }
   if (grade) {
@@ -1449,7 +1464,12 @@ async function rtDetect() {
   // lands. The cards also name the runtime they install into, so refresh them
   // too — notes in progress survive the re-render.
   if (mf.recent && mf.recent.length) mfRenderRecent()
-  if (lastResult) renderGroups(lastResult)
+  if (lastResult) {
+    // The Ollama chip reads the scan too; without this it keeps whatever the
+    // score request saw and can contradict the ACTIVE RUNTIME chip.
+    if (lastResult.machine) renderMachine(lastResult.machine, lastResult.machineGrade)
+    renderGroups(lastResult)
+  }
 }
 function rtRender() {
   var meta = document.getElementById('rt-meta')
@@ -1458,7 +1478,7 @@ function rtRender() {
   var found = rt.data.runtimes.filter(function (r) { return r.installed || r.running })
   meta.textContent = found.length + ' of ' + rt.data.runtimes.length + ' found'
   list.innerHTML = rt.data.runtimes.map(function (r) {
-    var state = r.running ? 'running' : (r.installed ? 'installed' : 'not found')
+    var state = r.running ? 'running' : (r.installed ? 'installed · server not running' : 'not found')
     var active = rt.data.active === r.id
     var detail = r.version ? ' · ' + esc(r.version) : ''
     var models = r.models && r.models.length ? ' · ' + r.models.length + ' models' : ''
@@ -1496,9 +1516,19 @@ function rtInstallTarget() {
 async function rtUse(id) {
   var log = document.getElementById('rt-log')
   if (log) log.innerHTML = ''
-  await fetch('/api/runtimes/use', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id })
-  })
+  try {
+    var res = await fetch('/api/runtimes/use', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id })
+    })
+    if (!res.ok) {
+      var body = await res.json().catch(function () { return {} })
+      if (log) log.innerHTML = '<span class="err">' + esc(body.error || 'The runtime could not be selected.') + '</span>'
+      return
+    }
+  } catch (cause) {
+    if (log) log.innerHTML = '<span class="err">The runtime could not be selected — the panel is not reachable.</span>'
+    return
+  }
   await rtDetect()
   if (lastResult) await mfLoad()
 }

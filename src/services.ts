@@ -1336,7 +1336,12 @@ export function createServices(options: ServicesOptions = {}) {
     let baseUrl: string | null = null
 
     if (descriptor.accepts === 'server') {
-      const started = await startServerRuntime(descriptor, downloaded.path, runtimeOptions)
+      // A local GGUF carries no tokenizer config for vLLM; the Hub repository
+      // it came from does.
+      const started = await startServerRuntime(descriptor, downloaded.path, {
+        ...runtimeOptions,
+        ...(descriptor.id === 'vllm' ? { tokenizer: model.id } : {})
+      })
       baseUrl = started.baseUrl
       steps.push(...started.steps)
       if (!started.ok) steps.push(started.message)

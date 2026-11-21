@@ -21,6 +21,8 @@ import {
   resolveGgufFile,
   runtimeDescriptor,
   runtimeModelsDir,
+  serverLaunchCommand,
+  startServerRuntime,
   type RuntimeFetch,
   type RuntimeFetchResponse
 } from '../dist/runtimes.js'
@@ -244,6 +246,27 @@ describe('detection', () => {
     assert.match(localai.note, /served by llama\.cpp/)
     assert.equal(llamafile.running, false)
     assert.match(llamafile.note, /served by llama\.cpp/)
+    // Another runtime answering on the port is not proof that these are
+    // installed — only the CLI or an install folder is.
+    assert.equal(localai.installed, false)
+    assert.equal(llamafile.installed, false)
+  })
+
+  it('does not call a runtime installed when a neighbour answers on its port', async () => {
+    const report = await detectRuntimes({
+      env: {},
+      homeDir: '/home/vrm',
+      fetchImpl: tableFetch({
+        'http://127.0.0.1:1337/v1/models': { data: [] },
+        'http://127.0.0.1:1337/': 'LM Studio'
+      }),
+      execFileImpl: (_file, _args, _options, cb) => cb(new Error('not found'), '', '')
+    })
+    const jan = report.runtimes.find((entry) => entry.id === 'jan')
+    assert.ok(jan)
+    assert.equal(jan.running, false)
+    assert.equal(jan.installed, false)
+    assert.match(jan.note, /served by LM Studio/)
   })
 
   it('probes the CLI for a version', async () => {
@@ -331,6 +354,82 @@ describe('detection', () => {
     })
     assert.equal(report.active, 'lmstudio')
     assert.equal(report.platform, process.platform)
+  })
+})
+
+describe('starting a server runtime', () => {
+  it('builds the command each runtime understands', () => {
+    const llamacpp = runtimeDescriptor('llamacpp')
+    const vllm = runtimeDescriptor('vllm')
+    assert.ok(llamacpp && vllm)
+    const model = 'C:/Model Farm/acme/model Q4_K_M.gguf'
+
+    const llamaCmd = serverLaunchCommand(llamacpp, model)
+    assert.equal(llamaCmd.file, 'llama-server')
+    assert.deepEqual(llamaCmd.args, ['-m', model, '--port', '8080', '--host', '127.0.0.1'])
+    assert.match(llamaCmd.display, /"C:\/Model Farm\/acme\/model Q4_K_M\.gguf"/)
+
+    // vLLM takes a subcommand; the old launcher used llama.cpp arguments.
+    const vllmCmd = serverLaunchCommand(vllm, model)
+    assert.equal(vllmCmd.file, 'vllm')
+    assert.deepEqual(vllmCmd.args.slice(0, 2), ['serve', model])
+    assert.ok(vllmCmd.args.includes('--port'))
+  })
+
+  it('passes the tokenizer repository to vLLM for a local GGUF', () => {
+    const vllm = runtimeDescriptor('vllm')
+    assert.ok(vllm)
+    const command = serverLaunchCommand(vllm, '/models/model.gguf', 'acme/model')
+    assert.deepEqual(command.args, [
+      'serve', '/models/model.gguf', '--tokenizer', 'acme/model', '--port', '8000', '--host', '127.0.0.1'
+    ])
+  })
+
+  it('reuses a server that already serves the same model', async () => {
+    const llamacpp = runtimeDescriptor('llamacpp')
+    assert.ok(llamacpp)
+    let launched = 0
+    const result = await startServerRuntime(llamacpp, '/models/cool-model-Q4_K_M.gguf', {
+      fetchImpl: tableFetch({
+        'http://127.0.0.1:8080/v1/models': { data: [{ id: 'cool-model-Q4_K_M.gguf' }] },
+        'http://127.0.0.1:8080/': 'llama.cpp server'
+      }),
+      launchImpl: () => { launched += 1 }
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.baseUrl, 'http://127.0.0.1:8080')
+    assert.match(result.message, /already serves cool-model-Q4_K_M\.gguf/)
+    assert.equal(launched, 0)
+  })
+
+  it('refuses to claim a port already serving another model', async () => {
+    const llamacpp = runtimeDescriptor('llamacpp')
+    assert.ok(llamacpp)
+    let launched = 0
+    const result = await startServerRuntime(llamacpp, '/models/new-model.gguf', {
+      fetchImpl: tableFetch({
+        'http://127.0.0.1:8080/v1/models': { data: [{ id: 'other-model.gguf' }] },
+        'http://127.0.0.1:8080/': 'llama.cpp server'
+      }),
+      launchImpl: () => { launched += 1 }
+    })
+    assert.equal(result.ok, false)
+    assert.match(result.message, /already serving other-model\.gguf/)
+    assert.match(result.message, /new-model\.gguf/)
+    assert.equal(launched, 0)
+  })
+
+  it('does not claim a port that some other server already answers on', async () => {
+    const llamacpp = runtimeDescriptor('llamacpp')
+    assert.ok(llamacpp)
+    let launched = 0
+    const result = await startServerRuntime(llamacpp, '/models/model.gguf', {
+      fetchImpl: tableFetch({ 'http://127.0.0.1:8080/v1/models': { data: [] } }),
+      launchImpl: () => { launched += 1 }
+    })
+    assert.equal(result.ok, false)
+    assert.match(result.message, /already answers/)
+    assert.equal(launched, 0)
   })
 })
 

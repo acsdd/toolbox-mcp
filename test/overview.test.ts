@@ -73,7 +73,7 @@ function mount(responses: Record<string, unknown> = {}) {
   }
   const history = { urls: [] as string[], replaceState(_state: unknown, _title: unknown, url: string) { this.urls.push(url) } }
   const client = runInNewContext(
-    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage, recentHtml: mfRecentHtml, downloadRow: mfDownloadRow })',
+    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage, recentHtml: mfRecentHtml, downloadRow: mfDownloadRow, machine: renderMachine, rtRender: rtRender })',
     {
       document: {
         getElementById: get,
@@ -107,6 +107,8 @@ function mount(responses: Record<string, unknown> = {}) {
     installMessage: (body: Record<string, unknown>, ok: boolean, steps: string[]) => string
     recentHtml: (history: Array<Record<string, unknown>>) => string
     downloadRow: (download: Record<string, unknown>) => string
+    machine: (machine: Record<string, unknown>, grade: Record<string, unknown> | null) => void
+    rtRender: () => void
   }
   return { client, get, elements, history }
 }
@@ -295,6 +297,61 @@ describe('model farm install target', () => {
     const { client } = mount()
     assert.deepEqual(JSON.parse(JSON.stringify(client.targets())), [{ id: 'ollama', label: 'Ollama' }])
     assert.equal(client.target(), 'ollama')
+  })
+})
+
+describe('model farm runtime status', () => {
+  const MACHINE = {
+    availableRamBytes: 8 * 1024 ** 3,
+    totalRamBytes: 16 * 1024 ** 3,
+    cores: 8,
+    gpus: [],
+    freeDiskBytes: 100 * 1024 ** 3,
+    // The score probe can fail while the runtime scan still finds an install.
+    ollama: { installed: false, models: [], error: 'fetch failed' }
+  }
+
+  it('says an installed runtime has no server running', () => {
+    const { client, get } = mount()
+    client.rt.data = {
+      active: 'ollama',
+      runtimes: [
+        { id: 'ollama', label: 'Ollama', installed: true, running: false, version: '0.12.3', models: [], note: 'Pulls any GGUF.' },
+        { id: 'jan', label: 'Jan', installed: false, running: false, models: [], note: 'Not here.' }
+      ]
+    }
+    client.rtRender()
+    const html = get('rt-list')!.innerHTML
+    assert.match(html, /installed · server not running · 0\.12\.3/)
+    assert.match(html, /<small>not found<\/small>/)
+  })
+
+  it('uses the runtime scan for the Ollama chip', () => {
+    const { client, get } = mount()
+    client.rt.data = {
+      active: 'ollama',
+      runtimes: [{ id: 'ollama', label: 'Ollama', installed: true, running: false, models: [], note: '' }]
+    }
+    client.machine(MACHINE, null)
+    const html = get('mf-machine')!.innerHTML
+    assert.match(html, /OLLAMA<\/span><b>installed · server not running<\/b>/)
+    assert.doesNotMatch(html, /fetch failed/)
+    assert.match(html, /ACTIVE RUNTIME<\/span><b>Ollama · installed · server not running<\/b>/)
+  })
+
+  it('reports a serving Ollama with its model count', () => {
+    const { client, get } = mount()
+    client.rt.data = {
+      active: 'ollama',
+      runtimes: [{
+        id: 'ollama', label: 'Ollama', installed: true, running: true, note: '',
+        models: [{ name: 'llama3', sizeBytes: 1, modifiedAt: null }]
+      }]
+    }
+    client.machine(MACHINE, null)
+    const html = get('mf-machine')!.innerHTML
+    assert.match(html, /OLLAMA<\/span><b>running · 1 models<\/b>/)
+    assert.match(html, /ACTIVE RUNTIME<\/span><b>Ollama · running<\/b>/)
   })
 })
 

@@ -276,7 +276,7 @@ export const RUNTIME_REGISTRY: RuntimeDescriptor[] = [
     binaries: ['vllm'],
     installable: false,
     accepts: 'server',
-    note: 'Serves one model from the Hugging Face Hub at a time.'
+    note: 'Serves one model at a time; a local GGUF also needs the vllm-gguf-plugin package.'
   },
   {
     id: 'llamafile',
@@ -583,6 +583,11 @@ export async function detectRuntimes(options: RuntimeOptions & { active?: string
     const unclaimedButTaken =
       probe !== null && owner === null && RUNTIME_REGISTRY.find((entry) => entry.port === descriptor.port)?.id !== descriptor.id
 
+    // A server on the port proves the owning runtime is installed, not the
+    // neighbours that share its port. Only the CLI or an install folder can
+    // show that those are on this machine.
+    const ownsProbe = probe !== null && !claimedByOther && !unclaimedButTaken
+
     const cli = await probeRuntimeCli(descriptor, options)
     const binary = findRuntimeBinary(descriptor, options)
 
@@ -601,13 +606,13 @@ export async function detectRuntimes(options: RuntimeOptions & { active?: string
       homepage: descriptor.homepage,
       api: descriptor.api,
       port: descriptor.port,
-      installed: cli.installed || binary !== null || probe !== null,
-      running: probe !== null && !claimedByOther && !unclaimedButTaken,
+      installed: cli.installed || binary !== null || ownsProbe,
+      running: ownsProbe,
       identified: probe !== null && (owner !== null || others.length === 0),
-      baseUrl: probe !== null && !claimedByOther && !unclaimedButTaken ? probe.baseUrl : null,
+      baseUrl: ownsProbe ? probe?.baseUrl ?? null : null,
       version: cli.version,
       path: binary,
-      models: probe !== null && !claimedByOther && !unclaimedButTaken ? probe.models : [],
+      models: ownsProbe ? probe?.models ?? [] : [],
       accepts: descriptor.accepts,
       installable: descriptor.installable,
       note
@@ -993,14 +998,63 @@ export interface ServerStartResult {
   log: string
 }
 
+export interface ServerLaunchCommand {
+  file: string
+  args: string[]
+  /** The same command as a line the user can read or copy. */
+  display: string
+}
+
+function quoteArg(value: string): string {
+  return /\s/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value
+}
+
 /**
- * Start a runtime that serves one model per process (llama.cpp, llamafile)
- * with the weights we just downloaded, and wait for it to answer.
+ * The command that loads one model into a runtime. The runtimes do not share
+ * a command line: llama.cpp and llamafile take `-m <file>`, while vLLM needs
+ * its `serve` subcommand and, for a local GGUF, the base model's tokenizer.
+ */
+export function serverLaunchCommand(
+  descriptor: RuntimeDescriptor,
+  modelPath: string,
+  tokenizer?: string | null
+): ServerLaunchCommand {
+  const file = descriptor.cli ?? descriptor.id
+  const common = ['--port', String(descriptor.port), '--host', '127.0.0.1']
+  const args =
+    descriptor.id === 'vllm'
+      ? ['serve', modelPath, ...(tokenizer ? ['--tokenizer', tokenizer] : []), ...common]
+      : ['-m', modelPath, ...common]
+  return { file, args, display: [file, ...args.map(quoteArg)].join(' ') }
+}
+
+export interface ServerStartOptions extends RuntimeOptions {
+  /** Starts the process; injectable so tests never spawn a real server. */
+  launchImpl?: (file: string, args: string[]) => void
+  /** The Hugging Face repository that provides the tokenizer (vLLM). */
+  tokenizer?: string | null
+  /** How many times to look for the new server, and how long between looks. */
+  startAttempts?: number
+  startDelayMs?: number
+}
+
+/** Strip a GGUF extension so a file name and a model id can be compared. */
+function modelKey(name: string): string {
+  return path.basename(name).toLowerCase().replace(/\.gguf$/, '')
+}
+
+/**
+ * Start a runtime that serves one model per process (llama.cpp, llamafile,
+ * vLLM) with the weights we just downloaded, and wait for it to answer.
+ *
+ * A port that already answers is checked first. Reusing a server that holds
+ * the same model is safe; claiming one that serves something else would hand
+ * the user the wrong model under the right name.
  */
 export async function startServerRuntime(
   descriptor: RuntimeDescriptor,
   modelPath: string,
-  options: RuntimeOptions = {}
+  options: ServerStartOptions = {}
 ): Promise<ServerStartResult> {
   if (!descriptor.cli) {
     return {
@@ -1011,29 +1065,68 @@ export async function startServerRuntime(
       log: ''
     }
   }
-  const args =
-    descriptor.id === 'llamafile'
-      ? ['-m', modelPath, '--port', String(descriptor.port), '--host', '127.0.0.1']
-      : ['-m', modelPath, '--port', String(descriptor.port), '--host', '127.0.0.1']
-  startDetached(descriptor.cli, args)
-  for (let attempt = 0; attempt < 25; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 1000))
+  const command = serverLaunchCommand(descriptor, modelPath, options.tokenizer)
+  const what = path.basename(modelPath)
+
+  const busy = await probePort(descriptor.port, options)
+  if (busy) {
+    if (busy.models.some((model) => modelKey(model.name) === modelKey(modelPath))) {
+      return {
+        ok: true,
+        baseUrl: busy.baseUrl,
+        message: `${descriptor.label} already serves ${what} on ${busy.baseUrl}.`,
+        steps: [`Already running: ${command.display}`],
+        log: ''
+      }
+    }
+    const holds = busy.models.length
+      ? `already serving ${busy.models.map((model) => model.name).slice(0, 3).join(', ')}`
+      : `already answers${busy.identity ? ` (${runtimeDescriptor(busy.identity)?.label ?? busy.identity})` : ''}`
+    return {
+      ok: false,
+      baseUrl: null,
+      message: `Port ${descriptor.port} ${holds}, not ${what}. Stop that server or start ${descriptor.label} yourself with: ${command.display}`,
+      steps: [],
+      log: ''
+    }
+  }
+
+  const launch = options.launchImpl ?? startDetached
+  launch(command.file, command.args)
+  const attempts = options.startAttempts ?? 25
+  const delayMs = options.startDelayMs ?? 1000
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
     const probe = await probePort(descriptor.port, options)
     if (probe) {
+      // A neighbour that grabbed the port first is not our server.
+      if (probe.identity && probe.identity !== descriptor.id) {
+        return {
+          ok: false,
+          baseUrl: null,
+          message: `Port ${descriptor.port} answered as ${runtimeDescriptor(probe.identity)?.label ?? probe.identity}, not ${descriptor.label}.`,
+          steps: [command.display],
+          log: ''
+        }
+      }
       return {
         ok: true,
         baseUrl: probe.baseUrl,
-        message: `${descriptor.label} is serving the model on ${probe.baseUrl}.`,
-        steps: [`${descriptor.cli} ${args.join(' ')}`],
+        message: `${descriptor.label} is serving ${what} on ${probe.baseUrl}.`,
+        steps: [command.display],
         log: ''
       }
     }
   }
+  const plugin =
+    descriptor.id === 'vllm'
+      ? ' Local GGUF serving needs the vllm-gguf-plugin package and a matching --tokenizer.'
+      : ''
   return {
     ok: false,
     baseUrl: null,
-    message: `${descriptor.label} did not answer on port ${descriptor.port} within 25 seconds.`,
-    steps: [`${descriptor.cli} ${args.join(' ')}`],
+    message: `${descriptor.label} did not answer on port ${descriptor.port} within ${attempts} seconds.${plugin}`,
+    steps: [command.display],
     log: ''
   }
 }
