@@ -19,6 +19,25 @@ interface Element {
   appendChild(child: { innerHTML: string }): void
 }
 
+interface NavItem {
+  label: string
+  hidden: boolean
+  badge: { textContent: string }
+  classList: { contains(): boolean }
+  querySelector(selector: string): { textContent: string } | null
+}
+
+function navItem(label: string, hidden = false): NavItem {
+  const badge = { textContent: '' }
+  return {
+    label,
+    hidden,
+    badge,
+    classList: { contains: () => hidden },
+    querySelector: (selector: string) => (selector === 'small' ? badge : null)
+  }
+}
+
 before(async () => {
   services = createServices({ fetchImpl: async () => new Response('[]', { status: 200 }) })
   await services.init()
@@ -49,7 +68,7 @@ const SCRIPT = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1]
  * Timers are stubbed out: the panel polls its activity feed while the
  * overview is visible, and a test has no reason to wait for that.
  */
-function mount(responses: Record<string, unknown> = {}) {
+function mount(responses: Record<string, unknown> = {}, nav: NavItem[] = []) {
   const script = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1]
   assert.ok(script, 'the panel page carries its script')
   const elements = new Map<string, Element>()
@@ -73,13 +92,13 @@ function mount(responses: Record<string, unknown> = {}) {
   }
   const history = { urls: [] as string[], replaceState(_state: unknown, _title: unknown, url: string) { this.urls.push(url) } }
   const client = runInNewContext(
-    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage, recentHtml: mfRecentHtml, downloadRow: mfDownloadRow, machine: renderMachine, rtRender: rtRender, connect: renderConnect })',
+    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage, recentHtml: mfRecentHtml, downloadRow: mfDownloadRow, machine: renderMachine, rtRender: rtRender, connect: renderConnect, renumber: renumberNav })',
     {
       document: {
         getElementById: get,
         createElement: element,
         querySelector: get,
-        querySelectorAll: () => []
+        querySelectorAll: (selector: string) => (selector === '.navbtn' ? nav : [])
       },
       navigator: { clipboard: { writeText: async () => {} } },
       fetch: fetchStub,
@@ -110,6 +129,7 @@ function mount(responses: Record<string, unknown> = {}) {
     machine: (machine: Record<string, unknown>, grade: Record<string, unknown> | null) => void
     rtRender: () => void
     connect: (server: Record<string, unknown> | null, attached: boolean) => void
+    renumber: () => void
   }
   return { client, get, elements, history }
 }
@@ -532,5 +552,23 @@ describe('connect an MCP client', () => {
     assert.match(get('ov-connect-meta')!.textContent, /not available/)
     assert.match(get('ov-connect-note')!.textContent, /Portable builds/)
     assert.match(get('ov-connect-note')!.textContent, /install the app/)
+  })
+})
+
+describe('section numbering', () => {
+  const labels = ['overview', 'models', 'terminal', 'marketplace', 'gateway', 'settings']
+
+  it('numbers only the sections that are on screen', () => {
+    const nav = labels.map((label) => navItem(label, label === 'gateway'))
+    const { client } = mount({}, nav)
+    client.renumber()
+    assert.deepEqual(nav.map((item) => item.badge.textContent), ['01', '02', '03', '04', '', '05'])
+  })
+
+  it('numbers every section while the gateway is installed', () => {
+    const nav = labels.map((label) => navItem(label))
+    const { client } = mount({}, nav)
+    client.renumber()
+    assert.deepEqual(nav.map((item) => item.badge.textContent), ['01', '02', '03', '04', '05', '06'])
   })
 })

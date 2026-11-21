@@ -756,6 +756,18 @@ function resolveSection(hash) {
   if (name === 'gateway' && nav && nav.classList.contains('hidden')) return 'overview'
   return name
 }
+/* The rail numbers are decoration, but a gap where the gateway would sit
+   reads as a missing section. Number only the sections on screen. */
+function renumberNav() {
+  var buttons = document.querySelectorAll('.navbtn')
+  var n = 0
+  for (var i = 0; i < buttons.length; i++) {
+    if (buttons[i].classList.contains('hidden')) continue
+    n += 1
+    var badge = buttons[i].querySelector('small')
+    if (badge) badge.textContent = (n < 10 ? '0' : '') + n
+  }
+}
 document.querySelectorAll('.navbtn').forEach(function (b) {
   b.onclick = function () {
     show(b.dataset.nav)
@@ -1095,6 +1107,7 @@ async function bootOverview() {
   var gwInstalled = installed.indexOf('astrlink-gateway') !== -1
   document.querySelector('[data-nav="gateway"]').classList.toggle('hidden', !gwInstalled)
   if (!gwInstalled && !document.getElementById('sec-gateway').classList.contains('hidden')) show('overview')
+  renumberNav()
   var requested = typeof location !== 'undefined' ? location.hash : ''
   var start = resolveSection(requested)
   if (start !== 'overview' || (requested && requested !== '#' + start)) setSectionHash(start)
@@ -1108,6 +1121,7 @@ function ovTimer() {
   if (document.getElementById('sec-overview').classList.contains('hidden')) return
   ov.timer = setTimeout(function () { loadActivity().catch(function () {}) }, 4000)
 }
+renumberNav()
 bootOverview().catch(function (cause) {
   var box = document.getElementById('ov-tools')
   if (box) box.innerHTML = '<div class="tool-empty">The tool catalog could not be read: ' + esc(cause && cause.message ? cause.message : cause) + '</div>'
