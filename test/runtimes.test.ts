@@ -252,6 +252,25 @@ describe('detection', () => {
     assert.equal(llamafile.installed, false)
   })
 
+  it('does not guess an owner when a shared port has no banner', async () => {
+    const report = await detectRuntimes({
+      env: {},
+      homeDir: '/home/vrm',
+      fetchImpl: tableFetch({
+        'http://127.0.0.1:8080/v1/models': { data: [] }
+      }),
+      execFileImpl: (_file, _args, _options, cb) => cb(new Error('not found'), '', '')
+    })
+    for (const id of ['llamacpp', 'localai', 'llamafile']) {
+      const runtime = report.runtimes.find((entry) => entry.id === id)
+      assert.ok(runtime)
+      assert.equal(runtime.installed, false, `${id} must not be guessed`)
+      assert.equal(runtime.running, false)
+      assert.equal(runtime.baseUrl, null)
+      assert.match(runtime.note, /does not name itself/)
+    }
+  })
+
   it('does not call a runtime installed when a neighbour answers on its port', async () => {
     const report = await detectRuntimes({
       env: {},

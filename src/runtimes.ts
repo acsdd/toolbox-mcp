@@ -580,13 +580,15 @@ export async function detectRuntimes(options: RuntimeOptions & { active?: string
       (entry) => entry.port === descriptor.port && entry.id !== descriptor.id
     )
     const claimedByOther = owner !== null && owner !== descriptor.id
-    const unclaimedButTaken =
-      probe !== null && owner === null && RUNTIME_REGISTRY.find((entry) => entry.port === descriptor.port)?.id !== descriptor.id
+    // A shared port with no banner cannot be attributed to one of its
+    // claimants; guessing would offer "use this" to a runtime that is not
+    // what is actually running.
+    const unnamedSharedPort = probe !== null && owner === null && others.length > 0
 
     // A server on the port proves the owning runtime is installed, not the
     // neighbours that share its port. Only the CLI or an install folder can
     // show that those are on this machine.
-    const ownsProbe = probe !== null && !claimedByOther && !unclaimedButTaken
+    const ownsProbe = probe !== null && !claimedByOther && !unnamedSharedPort
 
     const cli = await probeRuntimeCli(descriptor, options)
     const binary = findRuntimeBinary(descriptor, options)
@@ -595,8 +597,8 @@ export async function detectRuntimes(options: RuntimeOptions & { active?: string
     if (claimedByOther) {
       const named = runtimeDescriptor(owner as string)
       note = `Port ${descriptor.port} is served by ${named?.label ?? owner}.`
-    } else if (unclaimedButTaken) {
-      note = `Port ${descriptor.port} already answers — it is an OpenAI-compatible server of another kind.`
+    } else if (unnamedSharedPort) {
+      note = `Port ${descriptor.port} already answers, but the server does not name itself; it cannot be called ${descriptor.label} with confidence.`
     }
 
     runtimes.push({
