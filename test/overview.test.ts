@@ -68,7 +68,11 @@ const SCRIPT = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1]
  * Timers are stubbed out: the panel polls its activity feed while the
  * overview is visible, and a test has no reason to wait for that.
  */
-function mount(responses: Record<string, unknown> = {}, nav: NavItem[] = []) {
+function mount(
+  responses: Record<string, unknown> = {},
+  nav: NavItem[] = [],
+  options: { confirm?: (message: string) => boolean } = {}
+) {
   const script = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1]
   assert.ok(script, 'the panel page carries its script')
   const elements = new Map<string, Element>()
@@ -85,14 +89,20 @@ function mount(responses: Record<string, unknown> = {}, nav: NavItem[] = []) {
     if (!elements.has(id)) elements.set(id, element())
     return elements.get(id)!
   }
-  const fetchStub = (url: string) => {
-    const key = String(url).replace('/api/', '')
-    if (key in responses) return Promise.resolve(Response.json(responses[key]))
-    return Promise.resolve(Response.json({}))
+  const requests: Array<{ url: string; init?: RequestInit }> = []
+  const fetchStub = (url: string | URL, init?: RequestInit) => {
+    const target = String(url)
+    requests.push({ url: target, init })
+    const key = target.replace('/api/', '')
+    const reply = responses[key]
+    if (reply instanceof Error) return Promise.reject(reply)
+    if (reply instanceof Response) return Promise.resolve(reply)
+    return Promise.resolve(Response.json(reply ?? {}))
   }
+  const confirmations: string[] = []
   const history = { urls: [] as string[], replaceState(_state: unknown, _title: unknown, url: string) { this.urls.push(url) } }
   const client = runInNewContext(
-    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage, recentHtml: mfRecentHtml, downloadRow: mfDownloadRow, machine: renderMachine, rtRender: rtRender, connect: renderConnect, renumber: renumberNav })',
+    script + '\n;({ ov, filter: ovFilterTools, pick: ovPickGroup, clear: ovClearFilter, render: renderTools, section: sectionFromHash, setHash: setSectionHash, termClear: termClear, reset: mfResetFilters, rt: rt, mfState: mf, targets: rtInstallTargets, target: rtInstallTarget, pickTarget: mfPickTarget, astrlink: renderAstrlinkSetup, installMessage: mfInstallMessage, recentHtml: mfRecentHtml, downloadRow: mfDownloadRow, machine: renderMachine, rtRender: rtRender, connect: renderConnect, renumber: renumberNav, gmail: renderGmail, remove: mfRemove, mpInstall: mpInstall, mpUninstall: mpUninstall, marketplace: mp })',
     {
       document: {
         getElementById: get,
@@ -102,6 +112,10 @@ function mount(responses: Record<string, unknown> = {}, nav: NavItem[] = []) {
       },
       navigator: { clipboard: { writeText: async () => {} } },
       fetch: fetchStub,
+      confirm: (message: string) => {
+        confirmations.push(message)
+        return options.confirm ? options.confirm(message) : true
+      },
       setTimeout: () => 0,
       clearTimeout: () => {},
       location: { hash: '' },
@@ -130,8 +144,17 @@ function mount(responses: Record<string, unknown> = {}, nav: NavItem[] = []) {
     rtRender: () => void
     connect: (server: Record<string, unknown> | null, attached: boolean) => void
     renumber: () => void
+    gmail: (state: Record<string, unknown>) => void
+    remove: (id: string, name: string, runtime: string) => Promise<void>
+    mpInstall: (id: string) => Promise<void>
+    mpUninstall: (id: string) => Promise<void>
+    marketplace: {
+      data: null | { modules: Array<Record<string, unknown>> }
+      busy: boolean
+      note: string | null
+    }
   }
-  return { client, get, elements, history }
+  return { client, get, elements, history, requests, confirmations }
 }
 
 const TOOLS = [
@@ -231,6 +254,22 @@ describe('overview tool surface', () => {
     assert.match(markup, /email/)
     assert.match(markup, /required/)
     assert.match(markup, /Gmail address/)
+  })
+})
+
+describe('gmail widget error state', () => {
+  it('shows the real credential error instead of first-run setup copy', () => {
+    const { client, get } = mount()
+    client.gmail({ configured: false, error: 'Credential vault <locked>', unread: 0, messages: [] })
+    assert.equal(get('ov-gmail-meta').textContent, 'not connected')
+    assert.match(get('gmail').innerHTML, /Credential vault &lt;locked&gt;/)
+    assert.doesNotMatch(get('gmail').innerHTML, /No Gmail account is connected/)
+  })
+
+  it('keeps the setup guidance when there is no service error', () => {
+    const { client, get } = mount()
+    client.gmail({ configured: false, error: null, unread: 0, messages: [] })
+    assert.match(get('gmail').innerHTML, /gmail_connect/)
   })
 })
 
@@ -553,6 +592,99 @@ describe('connect an MCP client', () => {
     assert.match(get('ov-connect-meta')!.textContent, /not available/)
     assert.match(get('ov-connect-note')!.textContent, /Portable builds/)
     assert.match(get('ov-connect-note')!.textContent, /install the app/)
+  })
+})
+
+describe('destructive panel actions', () => {
+  it('cancels Ollama model removal without sending a request', async () => {
+    const { client, requests, confirmations } = mount({}, [], { confirm: () => false })
+    await client.remove('acme/model', 'acme/model:latest', 'ollama')
+    assert.equal(confirmations.length, 1)
+    assert.match(confirmations[0] ?? '', /acme\/model:latest/)
+    assert.match(confirmations[0] ?? '', /Ollama/)
+    assert.match(confirmations[0] ?? '', /cannot be undone/i)
+    assert.equal(requests.some((request) => request.url === '/api/llamafarm/remove'), false)
+  })
+
+  it('removes the named Ollama model only after confirmation', async () => {
+    const { client, requests, confirmations } = mount({ 'llamafarm/remove': { ok: true, message: 'Removed' } })
+    await client.remove('acme/model', 'acme/model:latest', 'ollama')
+    assert.equal(confirmations.length, 1)
+    const removal = requests.find((request) => request.url === '/api/llamafarm/remove')
+    assert.ok(removal)
+    assert.deepEqual(JSON.parse(String(removal.init?.body)), { model: 'acme/model:latest', runtime: 'ollama' })
+  })
+
+  function marketplaceMount(confirm: () => boolean) {
+    const module = {
+      id: 'cve-now', type: 'remote-server', name: 'cve.now', description: 'Vulnerability feed', version: '1.0.0',
+      author: 'Sazabi', categories: ['security'], tags: ['cve'], installed: true, builtIn: false,
+      endpoint: 'https://mcp.cve.now/mcp', homepage: 'https://example.com'
+    }
+    const mounted = mount({ 'marketplace/list?q=&category=': { modules: [module], categories: ['security'], error: null } }, [], { confirm })
+    mounted.client.marketplace.data = { modules: [module] }
+    mounted.client.marketplace.selected = 'cve-now'
+    return mounted
+  }
+
+  it('cancels Marketplace uninstall without disconnecting anything', async () => {
+    const { client, requests, confirmations } = marketplaceMount(() => false)
+    await client.mpUninstall('cve-now').catch(() => {})
+    assert.equal(confirmations.length, 1)
+    assert.match(confirmations[0] ?? '', /cve\.now/)
+    assert.match(confirmations[0] ?? '', /remote tools.*disconnect/i)
+    assert.match(confirmations[0] ?? '', /settings.*kept/i)
+    assert.equal(requests.some((request) => request.url === '/api/marketplace/uninstall'), false)
+  })
+
+  it('uninstalls the named Marketplace module only after confirmation', async () => {
+    const { client, requests, confirmations } = marketplaceMount(() => true)
+    await client.mpUninstall('cve-now')
+    assert.equal(confirmations.length, 1)
+    const removal = requests.find((request) => request.url === '/api/marketplace/uninstall')
+    assert.ok(removal)
+    assert.deepEqual(JSON.parse(String(removal.init?.body)), { id: 'cve-now' })
+    assert.match(client.marketplace.note ?? '', /Uninstalled/)
+  })
+})
+
+describe('Marketplace mutation recovery', () => {
+  it('re-enables Install after a network failure and explains how to retry', async () => {
+    const { client, requests } = mount({ 'marketplace/install': new Error('network offline') })
+    await client.mpInstall('cve-now').catch(() => {})
+    assert.equal(client.marketplace.busy, false)
+    assert.match(client.marketplace.note ?? '', /install failed.*network offline.*try again/i)
+    assert.equal(requests.some((request) => request.url.startsWith('/api/marketplace/list')), false)
+  })
+
+  it('re-enables Install after a non-JSON HTTP error', async () => {
+    const { client, requests } = mount({
+      'marketplace/install': new Response('service unavailable', { status: 503 })
+    })
+    await client.mpInstall('cve-now').catch(() => {})
+    assert.equal(client.marketplace.busy, false)
+    assert.match(client.marketplace.note ?? '', /install failed.*503.*try again/i)
+    assert.doesNotMatch(client.marketplace.note ?? '', /^Installed/)
+    assert.equal(requests.some((request) => request.url.startsWith('/api/marketplace/list')), false)
+  })
+
+  it('re-enables Uninstall after a network failure', async () => {
+    const { client, requests } = mount({ 'marketplace/uninstall': new Error('network offline') })
+    await client.mpUninstall('cve-now').catch(() => {})
+    assert.equal(client.marketplace.busy, false)
+    assert.match(client.marketplace.note ?? '', /uninstall failed.*network offline.*try again/i)
+    assert.equal(requests.some((request) => request.url.startsWith('/api/marketplace/list')), false)
+  })
+
+  it('re-enables Uninstall after a non-JSON HTTP error', async () => {
+    const { client, requests } = mount({
+      'marketplace/uninstall': new Response('service unavailable', { status: 502 })
+    })
+    await client.mpUninstall('cve-now').catch(() => {})
+    assert.equal(client.marketplace.busy, false)
+    assert.match(client.marketplace.note ?? '', /uninstall failed.*502.*try again/i)
+    assert.doesNotMatch(client.marketplace.note ?? '', /Uninstalled/)
+    assert.equal(requests.some((request) => request.url.startsWith('/api/marketplace/list')), false)
   })
 })
 

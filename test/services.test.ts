@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -63,6 +63,34 @@ describe('resource monitor service', () => {
     await services.init()
     const stats = await services.resourceStats()
     assert.ok(stats.cores > 0)
+  })
+})
+
+describe('persisted crypto watchlist recovery', () => {
+  async function startWithWatchlist(value: unknown) {
+    await writeFile(join(home, 'settings.json'), JSON.stringify({ version: 2, cryptoWatchlist: value }), 'utf8')
+    const services = createServices({ fetchImpl: fakeFetch([]) })
+    await services.init()
+    return services
+  }
+
+  for (const [label, value] of [
+    ['an empty list', []],
+    ['a non-array value', 'bitcoin'],
+    ['only malformed ids', ['', '!!!', 'x'.repeat(41), 42]],
+    ['more than eight coins', Array.from({ length: 9 }, (_, index) => `coin-${index}`)]
+  ] as Array<[string, unknown]>) {
+    it(`starts with defaults when the saved watchlist has ${label}`, async () => {
+      const services = await startWithWatchlist(value)
+      assert.deepEqual(services.crypto.watchlist, ['bitcoin', 'ethereum', 'solana'])
+      assert.deepEqual((await services.settingsSnapshot()).watchlist, ['bitcoin', 'ethereum', 'solana'])
+    })
+  }
+
+  it('normalizes usable saved ids without preventing startup', async () => {
+    const services = await startWithWatchlist([' Bitcoin ', 'bitcoin', 'Ethereum', null])
+    assert.deepEqual(services.crypto.watchlist, ['bitcoin', 'ethereum'])
+    assert.deepEqual((await services.settingsSnapshot()).watchlist, ['bitcoin', 'ethereum'])
   })
 })
 

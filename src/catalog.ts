@@ -394,30 +394,48 @@ export interface CatalogEntry {
   params: ToolParam[]
 }
 
-/** The parameter list of a tool, derived from the very schema the server uses. */
-export function toolParams(spec: ToolSpec): ToolParam[] {
-  const schema = z.toJSONSchema(z.object(spec.shape)) as {
-    properties?: Record<string, {
-      type?: string
-      enum?: unknown[]
-      anyOf?: Array<{ type?: string }>
-      description?: string
-    }>
-    required?: string[]
+interface JsonSchemaProperty {
+  type?: string | string[]
+  enum?: unknown[]
+  anyOf?: Array<{ type?: string }>
+  description?: string
+}
+
+/** Convert JSON-schema properties into the compact parameter list the panel shows. */
+export function schemaParams(schema: unknown): ToolParam[] {
+  const doc = (schema && typeof schema === 'object' ? schema : {}) as {
+    properties?: Record<string, JsonSchemaProperty | null>
+    required?: unknown
   }
-  const required = new Set(schema.required ?? [])
-  return Object.entries(schema.properties ?? {}).map(([name, property]) => {
-    const branchTypes = property.anyOf?.map((branch) => branch.type) ?? []
+  const properties = doc.properties && typeof doc.properties === 'object' && !Array.isArray(doc.properties)
+    ? doc.properties
+    : {}
+  const required = new Set(Array.isArray(doc.required)
+    ? doc.required.filter((name): name is string => typeof name === 'string')
+    : [])
+  return Object.entries(properties).map(([name, rawProperty]) => {
+    const property = rawProperty && typeof rawProperty === 'object' ? rawProperty : {}
+    const branchTypes = Array.isArray(property.anyOf)
+      ? property.anyOf.map((branch) => branch?.type).filter((type): type is string => typeof type === 'string')
+      : []
     const unionType = branchTypes.length > 0 && branchTypes.every((type) => type === branchTypes[0])
       ? branchTypes[0]
       : undefined
+    const propertyType = Array.isArray(property.type)
+      ? property.type.filter((type): type is string => typeof type === 'string').join('|') || undefined
+      : property.type
     return {
       name,
-      type: property.enum ? 'enum' : (property.type ?? unionType ?? 'any'),
+      type: property.enum ? 'enum' : (propertyType ?? unionType ?? 'any'),
       required: required.has(name),
-      description: property.description ?? ''
+      description: typeof property.description === 'string' ? property.description : ''
     }
   })
+}
+
+/** The parameter list of a tool, derived from the very schema the server uses. */
+export function toolParams(spec: ToolSpec): ToolParam[] {
+  return schemaParams(z.toJSONSchema(z.object(spec.shape)))
 }
 
 /** The whole catalog, ready for the panel. */

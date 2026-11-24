@@ -9,6 +9,7 @@ import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import os from 'node:os'
+import { normalizeWatchlist } from '@toolbox/widgets'
 
 /** Browsing options the Model Farm panel remembers across restarts. */
 export interface ModelFarmPrefs {
@@ -166,6 +167,15 @@ export function configDir(): string {
   return process.env.TOOLBOX_MCP_HOME ?? join(os.homedir(), '.toolbox-mcp')
 }
 
+/** Persisted settings are untrusted; a bad watchlist must not block startup. */
+function sanitizeCryptoWatchlist(raw: unknown): string[] {
+  try {
+    return normalizeWatchlist(raw)
+  } catch {
+    return [...DEFAULTS.cryptoWatchlist]
+  }
+}
+
 export function configPath(): string {
   return join(configDir(), 'settings.json')
 }
@@ -193,7 +203,7 @@ export async function loadSettings(): Promise<LoadedSettings> {
       : null
     const settings: StoredSettings = {
       version: 2,
-      cryptoWatchlist: Array.isArray(raw.cryptoWatchlist) ? raw.cryptoWatchlist.filter((id): id is string => typeof id === 'string') : DEFAULTS.cryptoWatchlist,
+      cryptoWatchlist: sanitizeCryptoWatchlist(raw.cryptoWatchlist),
       gmail:
         rawGmail && typeof rawGmail.email === 'string' && typeof rawGmail.credentialRef === 'string' && !legacyGmail
           ? {

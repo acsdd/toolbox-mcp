@@ -116,6 +116,16 @@ function requestedQuantLabel(model: CatalogModel, requested?: string | null): st
   return (requested ?? model.quantLabel ?? '').trim() || 'requested'
 }
 
+/** The exact metadata used by both MCP registration and the panel catalog. */
+function describeRemoteTool(module: MarketplaceModule, tool: RemoteToolDef): Omit<ProxiedTool, 'call'> {
+  return {
+    name: proxiedToolName(module.id, tool.name),
+    description: `[${module.name}] ${tool.description ?? tool.name}`,
+    inputSchema: tool.inputSchema,
+    annotations: tool.annotations
+  }
+}
+
 export const USER_AGENT = `toolbox-mcp/${appVersion()} (+https://github.com/acsdd/toolbox-mcp)`
 const SERIES_TTL_MS = 30 * 60 * 1000
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000
@@ -1606,10 +1616,7 @@ export function createServices(options: ServicesOptions = {}) {
     remotes.set(module.id, { module, connection, tools })
     remoteErrors.delete(module.id)
     const proxied: ProxiedTool[] = tools.map((tool) => ({
-      name: proxiedToolName(module.id, tool.name),
-      description: `[${module.name}] ${tool.description ?? tool.name}`,
-      inputSchema: tool.inputSchema,
-      annotations: tool.annotations,
+      ...describeRemoteTool(module, tool),
       call: (args) => remoteCall(module, tool.name, args)
     }))
     options.onRemoteTools?.(module.id, proxied)
@@ -1707,6 +1714,13 @@ export function createServices(options: ServicesOptions = {}) {
         error: entry ? null : (remoteErrors.get(id) ?? 'Remote server is not connected.')
       }
     })
+  }
+
+  /** Read-only metadata for the tools currently registered with the MCP server. */
+  function remoteToolMetadata(): Omit<ProxiedTool, 'call'>[] {
+    return [...remotes.values()].flatMap(({ module, tools }) =>
+      tools.map((tool) => describeRemoteTool(module, tool))
+    )
   }
 
   /**
@@ -1816,6 +1830,7 @@ export function createServices(options: ServicesOptions = {}) {
     marketplaceRefresh,
     remoteRestore,
     remoteStatus,
+    remoteToolMetadata,
     installedWidgets,
     exportWidgets,
     importWidgets

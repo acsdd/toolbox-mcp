@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { WIDGET_HOST_CSS } from '@toolbox/widgets'
 import { createServices, type Services } from './services.js'
 import { createTerminal, type Terminal } from './terminal.js'
-import { TOOL_GROUPS, catalogEntries } from './catalog.js'
+import { TOOL_GROUPS, catalogEntries, schemaParams } from './catalog.js'
 import { createActivity, type Activity } from './activity.js'
 import { appVersion } from './version.js'
 
@@ -1007,14 +1007,13 @@ function renderGmail(state) {
   var box = document.getElementById('gmail')
   var meta = document.getElementById('ov-gmail-meta')
   if (!state) { box.innerHTML = '<div class="wempty">No Gmail state.</div>'; return }
-  if (!state.configured) {
-    meta.textContent = 'not connected'
-    box.innerHTML = '<div class="wempty">No Gmail account is connected. An agent can connect one with <b>gmail_connect</b> using a 16-character App Password — it is stored only on this machine.</div>'
-    return
-  }
-  meta.textContent = state.unread + ' unread'
+  meta.textContent = state.configured ? state.unread + ' unread' : 'not connected'
   if (state.error) {
     box.innerHTML = '<div class="wempty">' + esc(state.error) + '</div>'
+    return
+  }
+  if (!state.configured) {
+    box.innerHTML = '<div class="wempty">No Gmail account is connected. An agent can connect one with <b>gmail_connect</b> using a 16-character App Password — it is stored only on this machine.</div>'
     return
   }
   var messages = state.messages || []
@@ -1921,6 +1920,7 @@ async function mfRunNow() {
   }
 }
 async function mfRemove(id, name, runtime) {
+  if (!confirm('Remove "' + name + '" from ' + rtLabel(runtime) + '? This cannot be undone.')) return
   mf.install[id] = { state: 'busy', message: 'removing…' }
   if (lastResult) renderGroups(lastResult)
   try {
@@ -2169,30 +2169,50 @@ function mpRenderDetail() {
     (m.credentialsRequired ? '<p class="mp-note">requires credentials after install</p>' : '') +
     (m.homepage ? '<a href="' + esc(m.homepage) + '" target="_blank" rel="noopener">homepage ↗</a>' : '')
 }
-async function mpInstall(id) {
+async function mpMutate(action, id, successMessage) {
+  var label = action === 'install' ? 'Install' : 'Uninstall'
   mp.busy = true
   mpRenderDetail()
-  var res = await fetch('/api/marketplace/install', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id })
-  })
-  var result = await res.json()
-  mp.busy = false
-  mp.note = result.error ? result.error
-    : [result.note].concat(result.missingCredentials && result.missingCredentials.length ? ['missing credentials: ' + result.missingCredentials.join(', ')] : []).filter(Boolean).join(' · ') || 'Installed.'
-  await mpLoad()
-  bootOverview().catch(function () {})
+  try {
+    var res = await fetch('/api/marketplace/' + action, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id })
+    })
+    var result = null
+    try {
+      result = await res.json()
+    } catch (error) {
+      if (res.ok) throw error
+    }
+    if (!res.ok) throw new Error(result && result.error ? result.error : 'HTTP ' + res.status)
+    if (result && result.error) {
+      mp.note = result.error
+      return
+    }
+    mp.note = action === 'install'
+      ? [(result && result.note)].concat(result && result.missingCredentials && result.missingCredentials.length ? ['missing credentials: ' + result.missingCredentials.join(', ')] : []).filter(Boolean).join(' · ') || successMessage
+      : successMessage
+    try {
+      await mpLoad()
+    } catch (error) {
+      mp.note += ' · List refresh failed: ' + String(error && error.message ? error.message : error) + '. Try again.'
+    }
+    bootOverview().catch(function () {})
+  } catch (error) {
+    mp.note = label + ' failed: ' + String(error && error.message ? error.message : error) + '. Try again.'
+  } finally {
+    mp.busy = false
+    mpRenderDetail()
+  }
+}
+async function mpInstall(id) {
+  await mpMutate('install', id, 'Installed.')
 }
 async function mpUninstall(id) {
-  mp.busy = true
-  mpRenderDetail()
-  var res = await fetch('/api/marketplace/uninstall', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id })
-  })
-  var result = await res.json()
-  mp.busy = false
-  mp.note = result.error || 'Uninstalled. Settings were kept.'
-  await mpLoad()
-  bootOverview().catch(function () {})
+  var module = mp.data && mp.data.modules.find(function (entry) { return entry.id === id })
+  var label = module ? module.name : id
+  var remoteNote = module && module.type === 'remote-server' ? ' Its remote tools will disconnect.' : ''
+  if (!confirm('Uninstall "' + label + '"?' + remoteNote + ' Widget settings are kept.')) return
+  await mpMutate('uninstall', id, 'Uninstalled. Settings were kept.')
 }
 
 /* ---- astrlink gateway ---- */
@@ -2702,7 +2722,15 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
               client: clientLaunch()
             },
             groups: TOOL_GROUPS,
-            tools: catalogEntries()
+            tools: [
+              ...catalogEntries(),
+              ...services.remoteToolMetadata().map((tool) => ({
+                name: tool.name,
+                group: 'remote' as const,
+                description: tool.description,
+                params: schemaParams(tool.inputSchema)
+              }))
+            ]
           }))
           return
         }

@@ -321,6 +321,69 @@ describe('panel tool catalog', () => {
     )
   })
 
+  it('adds connected remote tools with their real names and parameters, then removes them', async () => {
+    const registry = {
+      format: 'toolbox-marketplace',
+      formatVersion: 1,
+      updated: '2026-11-24T00:00:00.000Z',
+      modules: [{
+        id: 'cve-now', type: 'remote-server', name: 'cve.now', description: 'Vulnerability feed',
+        version: '1.0.0', author: 'Sazabi', categories: ['security'], tags: ['cve'],
+        homepage: 'https://example.com', endpoint: 'https://mcp.cve.now/mcp'
+      }]
+    }
+    const remoteServices = createServices({
+      fetchImpl: async (url) => Response.json(String(url).includes('/registry.json') ? registry : []),
+      remoteConnect: async (endpoint) => {
+        assert.equal(endpoint, 'https://mcp.cve.now/mcp')
+        return {
+          listTools: async () => [{
+            name: 'list_feed', description: 'Newest vulnerabilities',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Feed name' },
+                limit: { type: 'integer', description: 'Maximum results' }
+              },
+              required: ['name']
+            }
+          }],
+          callTool: async () => ({ content: [{ type: 'text', text: 'unused' }] }),
+          close: async () => {}
+        }
+      }
+    })
+    await remoteServices.init()
+    const remotePanel = await startPanel(remoteServices, { port: 0 })
+    const catalog = async () => {
+      const reply = await ask({ path: '/api/catalog', port: remotePanel.port })
+      assert.equal(reply.status, 200)
+      return JSON.parse(reply.body).tools as Array<{
+        name: string; group: string; description: string
+        params: Array<{ name: string; type: string; required: boolean; description: string }>
+      }>
+    }
+    try {
+      assert.equal((await catalog()).some((tool) => tool.name === 'cve_now_list_feed'), false)
+      await remoteServices.marketplaceInstall('cve-now')
+      const remote = (await catalog()).find((tool) => tool.name === 'cve_now_list_feed')
+      assert.deepEqual(remote, {
+        name: 'cve_now_list_feed',
+        group: 'remote',
+        description: '[cve.now] Newest vulnerabilities',
+        params: [
+          { name: 'name', type: 'string', required: true, description: 'Feed name' },
+          { name: 'limit', type: 'integer', required: false, description: 'Maximum results' }
+        ]
+      })
+      await remoteServices.marketplaceUninstall('cve-now')
+      assert.equal((await catalog()).some((tool) => tool.name === 'cve_now_list_feed'), false)
+    } finally {
+      remotePanel.close()
+      await remoteServices.marketplaceUninstall('cve-now').catch(() => {})
+    }
+  })
+
   it('describes the parameters of a tool that takes some', async () => {
     const reply = await ask({ path: '/api/catalog' })
     const data = JSON.parse(reply.body) as {

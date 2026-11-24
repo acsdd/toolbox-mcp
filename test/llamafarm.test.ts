@@ -660,6 +660,7 @@ describe('Model Farm setup panel', () => {
           : []
       },
       navigator: { clipboard: { writeText } },
+      confirm: () => true,
       EventSource: FakeEventSource,
       fetch: (url: string, init?: RequestInit) => url === '/api/llamafarm/install' ? reply(init)
         : readReply ? readReply(url, init) : Promise.resolve(Response.json(url === '/api/llamafarm/quants' ? { quants } : {})),
