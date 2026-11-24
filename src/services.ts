@@ -164,6 +164,8 @@ interface ServicesOptions {
   downloadFileImpl?: (url: string, target: string, onProgress?: (progress: DownloadProgress) => void, signal?: AbortSignal) => Promise<number>
   /** Home used to expand runtime model folders; injectable so tests never write into the real profile. */
   homeDir?: string
+  /** Settings persistence boundary; injectable so commit ordering and failures are exercised offline. */
+  saveSettingsImpl?: (settings: StoredSettings) => Promise<void>
 }
 
 export interface LlamafarmScoreInput {
@@ -377,6 +379,7 @@ export function createServices(options: ServicesOptions = {}) {
   const fetchOptions = { userAgent: USER_AGENT, fetchImpl: options.fetchImpl }
   const credentialStore = options.credentialStore ?? createNativeCredentialStore()
   const gmailInbox = options.gmailInboxImpl ?? ((email, password) => fetchGmailInbox(email, password))
+  const persistSettings = options.saveSettingsImpl ?? saveSettings
   const settings: { current: StoredSettings } = {
     current: {
       version: 2,
@@ -390,6 +393,38 @@ export function createServices(options: ServicesOptions = {}) {
       modelNotes: {}
     }
   }
+  let settingsQueue: Promise<void> = Promise.resolve()
+  let gmailMutationQueue: Promise<void> = Promise.resolve()
+
+  /** Keep credential changes and their settings commit in one ordered transaction. */
+  function withGmailMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = gmailMutationQueue.then(operation)
+    gmailMutationQueue = pending.then(() => undefined, () => undefined)
+    return pending
+  }
+
+  /**
+   * Commit one immutable settings candidate at a time. The candidate is built
+   * from the last successfully persisted snapshot, persisted first, and only
+   * then published to in-memory and derived state. A failed commit leaves the
+   * queue usable and the previously committed state untouched.
+   */
+  function commitSettings<T>(
+    mutate: (draft: StoredSettings) => T,
+    publish?: (draft: StoredSettings, result: T) => void
+  ): Promise<T> {
+    const operation = settingsQueue.then(async () => {
+      const draft = structuredClone(settings.current)
+      const result = mutate(draft)
+      await persistSettings(draft)
+      settings.current = draft
+      publish?.(draft, result)
+      return result
+    })
+    settingsQueue = operation.then(() => undefined, () => undefined)
+    return operation
+  }
+
   const crypto: CryptoState = {
     watchlist: [],
     coins: [],
@@ -415,6 +450,7 @@ export function createServices(options: ServicesOptions = {}) {
   let registryError: string | null = null
   let gateway: { status: GatewayStatus; fetchedAt: number } | null = null
   let runtimeReport: RuntimeReport | null = null
+  let runtimeDetectionVersion = 0
   /** Folder downloads tracked for the progress surface (point 4). */
   const downloads: FarmDownload[] = []
   const activeDownloads = new Map<string, AbortController>()
@@ -422,6 +458,7 @@ export function createServices(options: ServicesOptions = {}) {
   const remoteErrors = new Map<string, string>()
   const remoteConnectOperations = new Map<string, Promise<ProxiedTool[]>>()
   const remoteRecoveryOperations = new Map<string, Promise<void>>()
+  const marketplaceLifecycleQueues = new Map<string, Promise<void>>()
   const remoteTimeouts: RemoteTimeouts = {
     connectMs: options.remoteTimeouts?.connectMs ?? DEFAULT_REMOTE_TIMEOUTS.connectMs,
     listMs: options.remoteTimeouts?.listMs ?? DEFAULT_REMOTE_TIMEOUTS.listMs,
@@ -445,20 +482,21 @@ export function createServices(options: ServicesOptions = {}) {
     monitor = createResourceMonitor({ diskPath: settings.current.resource.diskPath })
     gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null }
 
-    if (loaded.legacyGmail) {
-      const ref = loaded.legacyGmail.credentialRef ?? randomUUID()
+    const legacyGmail = loaded.legacyGmail
+    if (legacyGmail) {
+      const ref = legacyGmail.credentialRef ?? randomUUID()
       try {
-        await credentialStore.set(ref, loaded.legacyGmail.password)
-        settings.current.gmail = {
-          email: loaded.legacyGmail.email,
-          credentialRef: ref,
-          notifications: loaded.legacyGmail.notifications
-        }
-        await saveSettings(settings.current)
+        await credentialStore.set(ref, legacyGmail.password)
+        await commitSettings((draft) => {
+          draft.gmail = {
+            email: legacyGmail.email,
+            credentialRef: ref,
+            notifications: legacyGmail.notifications
+          }
+        })
       } catch {
-        settings.current.gmail = null
         try {
-          await saveSettings(settings.current)
+          await commitSettings((draft) => { draft.gmail = null })
         } catch {
           throw new Error('Unable to remove the legacy Gmail password from settings. Secure migration failed; settings cleanup is required.')
         }
@@ -503,10 +541,14 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   async function cryptoSetWatchlist(value: unknown): Promise<CryptoState> {
-    crypto.watchlist = normalizeWatchlist(value)
-    crypto.coins = []
-    settings.current.cryptoWatchlist = [...crypto.watchlist]
-    await saveSettings(settings.current)
+    const watchlist = normalizeWatchlist(value)
+    await commitSettings(
+      (draft) => { draft.cryptoWatchlist = [...watchlist] },
+      (draft) => {
+        crypto.watchlist = [...draft.cryptoWatchlist]
+        crypto.coins = []
+      }
+    )
     return cryptoRefresh()
   }
 
@@ -519,57 +561,55 @@ export function createServices(options: ServicesOptions = {}) {
     const result = await gmailInbox(setup.email, setup.password).catch((cause) => {
       throw new Error(friendlyGmailError(cause))
     })
-    const previousAccount = settings.current.gmail
-    const credentialRef = previousAccount?.credentialRef ?? randomUUID()
-    let previousPassword: string | null = null
-    if (previousAccount) {
-      try {
-        previousPassword = await credentialStore.get(credentialRef)
-      } catch {
-        throw new Error('The operating system credential store is unavailable. Gmail was not connected; unlock the store and try again.')
+    return withGmailMutation(async () => {
+      const previousAccount = settings.current.gmail
+      const credentialRef = previousAccount?.credentialRef ?? randomUUID()
+      let previousPassword: string | null = null
+      if (previousAccount) {
+        try {
+          previousPassword = await credentialStore.get(credentialRef)
+        } catch {
+          throw new Error('The operating system credential store is unavailable. Gmail was not connected; unlock the store and try again.')
+        }
       }
-    }
-    await credentialStore.set(credentialRef, setup.password).catch(() => {
-      throw new Error('The operating system credential store is unavailable. Gmail was not connected; unlock the store and try again.')
+      await credentialStore.set(credentialRef, setup.password).catch(() => {
+        throw new Error('The operating system credential store is unavailable. Gmail was not connected; unlock the store and try again.')
+      })
+      try {
+        await commitSettings((draft) => {
+          draft.gmail = { email: setup.email, credentialRef, notifications: true }
+        })
+      } catch {
+        if (previousPassword === null) await credentialStore.delete(credentialRef).catch(() => {})
+        else await credentialStore.set(credentialRef, previousPassword).catch(() => {})
+        throw new Error('Gmail credentials were stored securely, but settings could not be saved. The connection was not completed.')
+      }
+      gmail = {
+        configured: true,
+        email: setup.email,
+        lastCheck: Date.now(),
+        unread: result.unread,
+        messages: result.messages,
+        error: null
+      }
+      return gmail
     })
-    const nextSettings: StoredSettings = {
-      ...settings.current,
-      gmail: { email: setup.email, credentialRef, notifications: true }
-    }
-    try {
-      await saveSettings(nextSettings)
-    } catch {
-      if (previousPassword === null) await credentialStore.delete(credentialRef).catch(() => {})
-      else await credentialStore.set(credentialRef, previousPassword).catch(() => {})
-      throw new Error('Gmail credentials were stored securely, but settings could not be saved. The connection was not completed.')
-    }
-    settings.current = nextSettings
-    gmail = {
-      configured: true,
-      email: setup.email,
-      lastCheck: Date.now(),
-      unread: result.unread,
-      messages: result.messages,
-      error: null
-    }
-    return gmail
   }
 
   async function gmailDisconnect(): Promise<GmailState> {
-    const account = settings.current.gmail
-    if (account) {
-      try {
-        await credentialStore.delete(account.credentialRef)
-      } catch {
-        gmail.error = 'The Gmail credential could not be removed from the operating system store. It remains configured.'
-        return gmail
+    return withGmailMutation(async () => {
+      const account = settings.current.gmail
+      await commitSettings(
+        (draft) => { draft.gmail = null },
+        () => { gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null } }
+      )
+      if (account) {
+        await credentialStore.delete(account.credentialRef).catch(() => {
+          gmail.error = 'Gmail is disconnected, but its credential could not be removed from the operating system store.'
+        })
       }
-    }
-    const nextSettings: StoredSettings = { ...settings.current, gmail: null }
-    await saveSettings(nextSettings)
-    settings.current = nextSettings
-    gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null }
-    return gmail
+      return gmail
+    })
   }
 
   async function gmailCheck(): Promise<GmailState> {
@@ -636,8 +676,8 @@ export function createServices(options: ServicesOptions = {}) {
    * field; unrecognized values fall back to defaults instead of being stored.
    */
   async function modelFarmSetPrefs(input: unknown): Promise<PanelSettings> {
-    settings.current.modelFarm = sanitizeModelFarmPrefs(input)
-    await saveSettings(settings.current)
+    const prefs = sanitizeModelFarmPrefs(input)
+    await commitSettings((draft) => { draft.modelFarm = prefs })
     return settingsSnapshot()
   }
 
@@ -650,11 +690,12 @@ export function createServices(options: ServicesOptions = {}) {
     const repo = typeof doc.repo === 'string' ? doc.repo.trim() : ''
     if (!repo || repo.length > NOTE_REPO_MAX_LENGTH) throw new Error('A valid model repo is required.')
     const note = typeof doc.note === 'string' ? doc.note.trim().slice(0, NOTE_MAX_LENGTH) : ''
-    const next = { ...settings.current.modelNotes }
-    if (note) next[repo] = note
-    else delete next[repo]
-    settings.current.modelNotes = sanitizeModelNotes(next)
-    await saveSettings(settings.current)
+    await commitSettings((draft) => {
+      const next = { ...draft.modelNotes }
+      if (note) next[repo] = note
+      else delete next[repo]
+      draft.modelNotes = sanitizeModelNotes(next)
+    })
     return settingsSnapshot()
   }
 
@@ -665,13 +706,14 @@ export function createServices(options: ServicesOptions = {}) {
    */
   async function recordInstall(result: LlamafarmInstallResult): Promise<LlamafarmInstallResult> {
     if (result.ok) {
-      settings.current.modelInstalls = recordModelInstall(settings.current.modelInstalls, {
-        repo: result.repo,
-        label: result.modelName ?? result.repo,
-        runtime: result.runtime.id,
-        installedAt: Date.now()
+      await commitSettings((draft) => {
+        draft.modelInstalls = recordModelInstall(draft.modelInstalls, {
+          repo: result.repo,
+          label: result.modelName ?? result.repo,
+          runtime: result.runtime.id,
+          installedAt: Date.now()
+        })
       })
-      await saveSettings(settings.current)
     }
     return result
   }
@@ -683,12 +725,15 @@ export function createServices(options: ServicesOptions = {}) {
   async function resourceSetSettings(input: unknown): Promise<PanelSettings> {
     const raw = (input ?? {}) as { diskPath?: unknown; showProcesses?: unknown }
     const diskPath = typeof raw.diskPath === 'string' ? raw.diskPath.trim() : ''
-    settings.current.resource = {
+    const resource: StoredSettings['resource'] = {
       ...(diskPath === '' ? {} : { diskPath }),
       showProcesses: raw.showProcesses !== false
     }
-    monitor = createResourceMonitor({ diskPath: settings.current.resource.diskPath })
-    await saveSettings(settings.current)
+    const nextMonitor = createResourceMonitor({ diskPath: resource.diskPath })
+    await commitSettings(
+      (draft) => { draft.resource = resource },
+      () => { monitor = nextMonitor }
+    )
     return settingsSnapshot()
   }
 
@@ -738,23 +783,32 @@ export function createServices(options: ServicesOptions = {}) {
           break
         case 'resource-monitor': {
           const resource = entry.settings as { diskPath?: string; showProcesses?: boolean }
-          settings.current.resource = {
+          const nextResource: StoredSettings['resource'] = {
             diskPath: resource.diskPath,
             showProcesses: resource.showProcesses !== false
           }
-          monitor = createResourceMonitor({ diskPath: resource.diskPath })
-          await saveSettings(settings.current)
+          const nextMonitor = createResourceMonitor({ diskPath: resource.diskPath })
+          await commitSettings(
+            (draft) => { draft.resource = nextResource },
+            () => { monitor = nextMonitor }
+          )
           applied.push('resource-monitor')
           break
         }
         case 'gmail-announcer': {
           // Bundle settings never carry credentials; any prior local credential is removed.
-          const previousCredentialRef = settings.current.gmail?.credentialRef
-          const nextSettings: StoredSettings = { ...settings.current, gmail: null }
-          await saveSettings(nextSettings)
-          settings.current = nextSettings
-          if (previousCredentialRef) await credentialStore.delete(previousCredentialRef)
-          gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null }
+          await withGmailMutation(async () => {
+            const previousCredentialRef = settings.current.gmail?.credentialRef
+            await commitSettings(
+              (draft) => { draft.gmail = null },
+              () => { gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null } }
+            )
+            if (previousCredentialRef) {
+              await credentialStore.delete(previousCredentialRef).catch(() => {
+                gmail.error = 'Gmail is disconnected, but its credential could not be removed from the operating system store.'
+              })
+            }
+          })
           missingCredentials.push(entry.credentialsRef ?? 'gmail/app-password')
           applied.push('gmail-announcer')
           break
@@ -768,6 +822,7 @@ export function createServices(options: ServicesOptions = {}) {
 
   function invalidateModelState(): void {
     modelStateVersion++
+    runtimeDetectionVersion++
     machine = null
     runtimeReport = null
   }
@@ -1389,9 +1444,10 @@ export function createServices(options: ServicesOptions = {}) {
     if (!force && runtimeReport && Date.now() - runtimeReport.detectedAt < RUNTIME_TTL_MS) {
       return { ...runtimeReport, active: settings.current.runtimes.active }
     }
+    const version = ++runtimeDetectionVersion
     const report = await detectRuntimes({ ...runtimeOptions, active: settings.current.runtimes.active })
-    runtimeReport = report
-    return report
+    if (version === runtimeDetectionVersion) runtimeReport = report
+    return { ...report, active: settings.current.runtimes.active }
   }
 
   /** Install a runtime from its official installer — Ollama, for now. */
@@ -1416,6 +1472,7 @@ export function createServices(options: ServicesOptions = {}) {
       ...runtimeOptions,
       ...(options.downloadFileImpl ? { download: options.downloadFileImpl } : {})
     })
+    runtimeDetectionVersion++
     runtimeReport = null
     return result
   }
@@ -1424,17 +1481,26 @@ export function createServices(options: ServicesOptions = {}) {
   async function runtimesUse(id: string): Promise<{ active: string | null; runtime: RuntimeStatus | null }> {
     const value = (id ?? '').trim()
     if (value === '' || value === 'none') {
-      settings.current.runtimes.active = null
-      await saveSettings(settings.current)
-      runtimeReport = null
+      await commitSettings(
+        (draft) => { draft.runtimes.active = null },
+        () => {
+          runtimeDetectionVersion++
+          runtimeReport = null
+        }
+      )
       return { active: null, runtime: null }
     }
     const descriptor = runtimeDescriptor(value)
     if (!descriptor) {
       throw new Error(`Unknown runtime "${value}".`)
     }
-    settings.current.runtimes.active = value
-    await saveSettings(settings.current)
+    await commitSettings(
+      (draft) => { draft.runtimes.active = value },
+      () => {
+        runtimeDetectionVersion++
+        runtimeReport = null
+      }
+    )
     const report = await runtimesDetect(true)
     return { active: value, runtime: report.runtimes.find((entry) => entry.id === value) ?? null }
   }
@@ -1739,6 +1805,17 @@ export function createServices(options: ServicesOptions = {}) {
     )
   }
 
+  /** Serialize install/uninstall transitions per module without blocking unrelated settings work. */
+  function withMarketplaceLifecycle<T>(moduleId: string, operation: () => Promise<T>): Promise<T> {
+    const pending = (marketplaceLifecycleQueues.get(moduleId) ?? Promise.resolve()).then(operation)
+    const tail = pending.then(() => undefined, () => undefined)
+    marketplaceLifecycleQueues.set(moduleId, tail)
+    void tail.then(() => {
+      if (marketplaceLifecycleQueues.get(moduleId) === tail) marketplaceLifecycleQueues.delete(moduleId)
+    })
+    return pending
+  }
+
   /**
    * Install a module: widget bundles are applied through the portable bundle
    * validator; remote servers connect and register proxied tools; credential-
@@ -1747,48 +1824,59 @@ export function createServices(options: ServicesOptions = {}) {
    */
   async function marketplaceInstall(id: unknown): Promise<MarketplaceInstallResult> {
     if (typeof id !== 'string' || id.trim() === '') throw new Error('A module id is required.')
-    await marketplaceRegistry()
-    const module = registry?.modules.find((m) => m.id === id.trim())
-    if (!module) throw new Error(`Unknown module "${id}". Refresh the marketplace and try again.`)
-    if (module.builtIn) throw new Error(`"${module.name}" is built in — nothing to install.`)
+    const moduleId = id.trim()
+    return withMarketplaceLifecycle(moduleId, async () => {
+      await marketplaceRegistry()
+      const module = registry?.modules.find((m) => m.id === moduleId)
+      if (!module) throw new Error(`Unknown module "${id}". Refresh the marketplace and try again.`)
+      if (module.builtIn) throw new Error(`"${module.name}" is built in — nothing to install.`)
 
-    let applied: string[] = []
-    let missingCredentials: string[] = []
-    let note: string | null = null
-    let remoteTools: string[] = []
-    if (module.type === 'remote-server') {
-      const tools = await remoteConnectModule(module)
-      remoteTools = tools.map((tool) => tool.name)
-      note = `Connected ${tools.length} remote tools from ${module.endpoint}. Tool arguments leave this machine.`
-    } else if (module.bundle) {
-      const result = await importWidgets({
-        format: 'toolbox-widgets',
-        formatVersion: 1,
-        widgets: [module.bundle]
-      })
-      applied = result.applied
-      missingCredentials = result.missingCredentials
-    }
-    if (module.credentialsRequired) {
-      note = `"${module.name}" needs credentials wired up locally before it can run.`
-    }
-    if (!settings.current.marketplace.installed.includes(module.id)) {
-      settings.current.marketplace.installed.push(module.id)
-      await saveSettings(settings.current)
-    }
-    return { installed: [...settings.current.marketplace.installed], applied, missingCredentials, note, remoteTools }
+      let applied: string[] = []
+      let missingCredentials: string[] = []
+      let note: string | null = null
+      let remoteTools: string[] = []
+      if (module.type === 'remote-server') {
+        const tools = await remoteConnectModule(module)
+        remoteTools = tools.map((tool) => tool.name)
+        note = `Connected ${tools.length} remote tools from ${module.endpoint}. Tool arguments leave this machine.`
+      } else if (module.bundle) {
+        const result = await importWidgets({
+          format: 'toolbox-widgets',
+          formatVersion: 1,
+          widgets: [module.bundle]
+        })
+        applied = result.applied
+        missingCredentials = result.missingCredentials
+      }
+      if (module.credentialsRequired) {
+        note = `"${module.name}" needs credentials wired up locally before it can run.`
+      }
+      let installed = [...settings.current.marketplace.installed]
+      if (!installed.includes(module.id)) {
+        installed = await commitSettings((draft) => {
+          if (!draft.marketplace.installed.includes(module.id)) draft.marketplace.installed.push(module.id)
+          return [...draft.marketplace.installed]
+        })
+      }
+      return { installed, applied, missingCredentials, note, remoteTools }
+    })
   }
 
   /** Uninstall marks the module removed; widget settings are left intact. */
   async function marketplaceUninstall(id: unknown): Promise<{ installed: string[] }> {
     if (typeof id !== 'string' || id.trim() === '') throw new Error('A module id is required.')
-    await marketplaceRegistry()
-    const module = registry?.modules.find((m) => m.id === id.trim())
-    if (module?.builtIn) throw new Error(`"${module.name}" is built in — it cannot be uninstalled.`)
-    await remoteDisconnectModule(id.trim())
-    settings.current.marketplace.installed = settings.current.marketplace.installed.filter((entry) => entry !== id.trim())
-    await saveSettings(settings.current)
-    return { installed: [...settings.current.marketplace.installed] }
+    const moduleId = id.trim()
+    return withMarketplaceLifecycle(moduleId, async () => {
+      await marketplaceRegistry()
+      const module = registry?.modules.find((m) => m.id === moduleId)
+      if (module?.builtIn) throw new Error(`"${module.name}" is built in — it cannot be uninstalled.`)
+      const installed = await commitSettings((draft) => {
+        draft.marketplace.installed = draft.marketplace.installed.filter((entry) => entry !== moduleId)
+        return [...draft.marketplace.installed]
+      })
+      await remoteDisconnectModule(moduleId)
+      return { installed }
+    })
   }
 
   async function marketplaceRefresh(): Promise<MarketplaceListResult> {
