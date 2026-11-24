@@ -460,7 +460,7 @@ ${WIDGET_HOST_CSS}
   .term-line { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); flex: 0 0 auto; }
   .term-line span { color: var(--accent); }
   .term-line input { flex: 1; min-height: 38px; border: 0; background: transparent; color: var(--text); font-size: .75rem; }
-  .term-line input:focus { outline: none; }
+  .term-line input:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
   .term-completion { padding: 8px 14px; border-top: 1px solid var(--border-soft); color: var(--muted); font-size: .6875rem; flex: 0 0 auto; }
   .term-completion[hidden] { display: none; }
   .term-completion b { color: var(--accent); font-weight: 500; }

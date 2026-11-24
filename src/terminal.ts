@@ -42,6 +42,7 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
   const platform = options.platform ?? process.platform
   const execFileImpl = options.execFileImpl ?? (execFile as unknown as CompletionExec)
   let child: ChildProcess | null = null
+  let stopping: ChildProcess | null = null
   let startedAt: number | null = null
   let buffer = ''
   let completionCwd = process.cwd()
@@ -57,31 +58,93 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
     return { running: child !== null, pid: child?.pid ?? null, startedAt }
   }
 
+  function errorText(cause: unknown): string {
+    const message = cause instanceof Error ? cause.message : String(cause)
+    return message.replace(/[\r\n]+/g, ' ').trim().slice(0, 240) || 'unknown error'
+  }
+
+  /** Clear and stop only the session that actually failed. */
+  function fail(session: ChildProcess, context: string, cause: unknown): void {
+    if (child !== session) return
+    child = null
+    startedAt = null
+    try { session.kill() } catch { /* The process may already be gone. */ }
+    append(`\r\n[${context}: ${errorText(cause)} — start again to reopen]\r\n`)
+  }
+
+  function write(session: ChildProcess, data: string, context: string): boolean {
+    if (!session.stdin?.writable) {
+      fail(session, context, new Error('stdin is not writable'))
+      return false
+    }
+    try {
+      session.stdin.write(data, (cause) => {
+        if (cause) fail(session, context, cause)
+      })
+    } catch (cause) {
+      fail(session, context, cause)
+      return false
+    }
+    return true
+  }
+
   function start(): TerminalState {
     if (child) return state()
+    // A replacement session owns all later callbacks and visible errors.
+    stopping = null
     const shell =
-      process.platform === 'win32'
+      platform === 'win32'
         ? { cmd: 'powershell.exe', args: ['-NoLogo', '-NoProfile'] }
         : { cmd: '/bin/sh', args: ['-i'] as string[] }
-    child = spawn(shell.cmd, shell.args, { windowsHide: true, env: process.env })
-    startedAt = Date.now()
-    child.stdout?.setEncoding('utf8')
-    child.stderr?.setEncoding('utf8')
-    child.stdout?.on('data', (chunk: string) => append(chunk))
-    child.stderr?.on('data', (chunk: string) => append(chunk))
-    child.on('exit', () => {
-      child = null
-      append('\r\n[session ended — start again to reopen]\r\n')
-    })
-    if (process.platform === 'win32') {
-      child.stdin?.write('[Console]::OutputEncoding = [Text.Encoding]::UTF8\r\n')
+    let session: ChildProcess
+    try {
+      session = spawn(shell.cmd, shell.args, { windowsHide: true, env: process.env })
+    } catch (cause) {
+      append(`\r\n[terminal could not start: ${errorText(cause)} — start again to reopen]\r\n`)
+      return state()
     }
-    append(`[terminal started: ${shell.cmd} — local session, be careful]\r\n`)
+    child = session
+    startedAt = Date.now()
+    session.on('error', (cause) => {
+      if (child === session) {
+        fail(session, 'terminal shell failed', cause)
+      } else if (stopping === session) {
+        stopping = null
+        append(`\r\n[session stop failed: ${errorText(cause)} — the process may still be running]\r\n`)
+      }
+    })
+    session.stdin?.on('error', (cause) => fail(session, 'terminal input failed', cause))
+    session.stdout?.setEncoding('utf8')
+    session.stderr?.setEncoding('utf8')
+    session.stdout?.on('error', (cause) => fail(session, 'terminal output failed', cause))
+    session.stderr?.on('error', (cause) => fail(session, 'terminal output failed', cause))
+    session.stdout?.on('data', (chunk: string) => {
+      if (child === session) append(chunk)
+    })
+    session.stderr?.on('data', (chunk: string) => {
+      if (child === session) append(chunk)
+    })
+    session.on('exit', () => {
+      if (child === session) {
+        child = null
+        startedAt = null
+        append('\r\n[session ended — start again to reopen]\r\n')
+      } else if (stopping === session) {
+        stopping = null
+        append('\r\n[session stopped — start again to reopen]\r\n')
+      }
+    })
+    if (platform === 'win32') {
+      write(session, '[Console]::OutputEncoding = [Text.Encoding]::UTF8\r\n', 'terminal encoding setup failed')
+    }
+    if (child === session) {
+      append(`[terminal started: ${shell.cmd} — local session, be careful]\r\n`)
+    }
     return state()
   }
 
   function input(data: string): TerminalState {
-    if (child?.stdin?.writable) child.stdin.write(data)
+    if (child) write(child, data, 'terminal input failed')
     return state()
   }
 
@@ -145,8 +208,21 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
   }
 
   function stop(): TerminalState {
-    child?.kill()
+    const session = child
+    if (!session) return state()
+    stopping = session
     child = null
+    startedAt = null
+    try {
+      if (!session.kill()) {
+        stopping = null
+        append('\r\n[session stop failed: kill signal was not sent — the process may still be running]\r\n')
+      }
+      // A successful kill is reported only when the child actually exits.
+    } catch (cause) {
+      stopping = null
+      append(`\r\n[session stop failed: ${errorText(cause)} — the process may still be running]\r\n`)
+    }
     return state()
   }
 
@@ -158,7 +234,7 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
   }
 
   process.once('exit', () => {
-    child?.kill()
+    try { child?.kill() } catch { /* The process may already be gone. */ }
   })
 
   return { start, input, complete, stop, state, subscribe, snapshot: () => buffer }

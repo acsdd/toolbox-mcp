@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
+import childProcess from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { syncBuiltinESMExports } from 'node:module'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { after, before, describe, it } from 'node:test'
+import { after, before, describe, it, mock, type TestContext } from 'node:test'
 import {
   DEFAULT_RUNTIME_ID,
   OLLAMA_SILENT_ARGS,
@@ -42,6 +45,36 @@ function tableFetch(routes: Record<string, unknown>): RuntimeFetch {
       text: async () => text
     } as RuntimeFetchResponse
   }
+}
+
+class FakeDetachedChild extends EventEmitter {
+  readonly spawned: Promise<void>
+  unreferenced = false
+  markSpawned!: () => void
+
+  constructor() {
+    super()
+    this.spawned = new Promise<void>((resolve) => { this.markSpawned = resolve })
+  }
+
+  unref(): void {
+    this.unreferenced = true
+  }
+}
+
+function fakeDetachedSpawn(t: TestContext, spawnError?: Error): FakeDetachedChild {
+  const child = new FakeDetachedChild()
+  const spawnMock = mock.method(childProcess, 'spawn', (() => {
+    child.markSpawned()
+    if (spawnError) queueMicrotask(() => child.emit('error', spawnError))
+    return child
+  }) as never)
+  syncBuiltinESMExports()
+  t.after(() => {
+    spawnMock.mock.restore()
+    syncBuiltinESMExports()
+  })
+  return child
 }
 
 describe('runtime registry', () => {
@@ -475,6 +508,82 @@ describe('starting a server runtime', () => {
     assert.match(result.message, /already answers/)
     assert.equal(launched, 0)
   })
+
+  it('returns a launcher failure immediately instead of a generic port timeout', async () => {
+    const llamacpp = runtimeDescriptor('llamacpp')
+    assert.ok(llamacpp)
+    const result = await startServerRuntime(llamacpp, '/models/model.gguf', {
+      fetchImpl: tableFetch({}),
+      launchImpl: async () => 'spawn EACCES',
+      startAttempts: 1,
+      startDelayMs: 0
+    })
+    assert.equal(result.ok, false)
+    assert.match(result.message, /EACCES/)
+    assert.match(result.message, /could not start|failed to start/i)
+  })
+
+  it('consumes asynchronous detached spawn errors and reports them', async (t) => {
+    const child = fakeDetachedSpawn(t)
+    const llamacpp = runtimeDescriptor('llamacpp')
+    assert.ok(llamacpp)
+    const pending = startServerRuntime(llamacpp, '/models/model.gguf', {
+      fetchImpl: tableFetch({}),
+      startAttempts: 1,
+      startDelayMs: 0
+    })
+    await child.spawned
+    child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }))
+
+    const result = await pending
+    assert.equal(result.ok, false)
+    assert.match(result.message, /ENOENT/)
+    assert.match(result.message, /could not start|failed to start/i)
+  })
+
+  it('waits for the detached spawn event and releases the child handle', async (t) => {
+    const child = fakeDetachedSpawn(t)
+    const llamacpp = runtimeDescriptor('llamacpp')
+    assert.ok(llamacpp)
+    let serving = false
+    const ready = tableFetch({
+      'http://127.0.0.1:8080/v1/models': { data: [{ id: 'model.gguf' }] },
+      'http://127.0.0.1:8080/': 'llama.cpp server'
+    })
+    const pending = startServerRuntime(llamacpp, '/models/model.gguf', {
+      fetchImpl: (url) => serving ? ready(url) : tableFetch({})(url),
+      startAttempts: 1,
+      startDelayMs: 0
+    })
+    let settled = false
+    void pending.then(() => { settled = true }, () => { settled = true })
+    await child.spawned
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(settled, false, 'launch must wait for the child spawn event')
+    serving = true
+    child.emit('spawn')
+
+    const result = await pending
+    assert.equal(result.ok, true)
+    assert.equal(child.unreferenced, true)
+  })
+
+  it('continues to accept a launcher that returns a child-process handle', async () => {
+    const llamacpp = runtimeDescriptor('llamacpp')
+    assert.ok(llamacpp)
+    const handle = {} as ReturnType<typeof childProcess.spawn>
+    const result = await startServerRuntime(llamacpp, '/models/model.gguf', {
+      fetchImpl: tableFetch({
+        'http://127.0.0.1:8080/v1/models': { data: [{ id: 'model.gguf' }] },
+        'http://127.0.0.1:8080/': 'llama.cpp server'
+      }),
+      launchImpl: async () => handle,
+      startAttempts: 1,
+      startDelayMs: 0
+    })
+
+    assert.equal(result.ok, true)
+  })
 })
 
 describe('installing Ollama', () => {
@@ -532,6 +641,112 @@ describe('installing Ollama', () => {
     assert.equal(result.action, 'failed')
     assert.match(result.message, /exited with code 3/)
     assert.equal(result.log, 'boom')
+  })
+
+  it('does not report serving success when only the CLI can be verified', async () => {
+    let probes = 0
+    const result = await installOllama({
+      platform: 'linux',
+      tempDir: home,
+      env: {},
+      homeDir: home,
+      execFileImpl: (_file, _args, _options, cb) => {
+        probes += 1
+        cb(probes === 1 ? new Error('not found') : null, 'ollama version 0.12.3', '')
+      },
+      fetchImpl: tableFetch({}),
+      download: async () => 10,
+      runInstaller: async () => ({ code: 0, output: 'installed' }),
+      startServer: async () => 'spawn ENOENT',
+      serveAttempts: 1,
+      serveDelayMs: 0
+    })
+
+    assert.equal(result.ok, false)
+    assert.equal(result.action, 'installed')
+    assert.equal(result.version, '0.12.3')
+    assert.match(result.message, /installed.*server.*did not answer/i)
+    assert.match(result.message, /ENOENT/)
+  })
+
+  it('retains a server launch error when the installed CLI has no readable version', async () => {
+    let probes = 0
+    const result = await installOllama({
+      platform: 'linux',
+      tempDir: home,
+      env: {},
+      homeDir: home,
+      execFileImpl: (_file, _args, _options, cb) => {
+        probes += 1
+        cb(probes === 1 ? new Error('not found') : null, 'ollama development build', '')
+      },
+      fetchImpl: tableFetch({}),
+      download: async () => 10,
+      runInstaller: async () => ({ code: 0, output: 'installed' }),
+      startServer: async () => 'spawn ENOENT',
+      serveAttempts: 1,
+      serveDelayMs: 0
+    })
+
+    assert.equal(result.ok, false)
+    assert.equal(result.version, null)
+    assert.match(result.message, /ENOENT/)
+    assert.match(result.message, /server/i)
+    assert.match(result.log, /ENOENT/)
+    assert.equal(result.action, 'installed')
+  })
+
+  it('confirms success only after the Ollama API answers', async () => {
+    let probes = 0
+    const result = await installOllama({
+      platform: 'linux',
+      tempDir: home,
+      env: {},
+      homeDir: home,
+      execFileImpl: (_file, _args, _options, cb) => {
+        probes += 1
+        cb(probes === 1 ? new Error('not found') : null, 'ollama version 0.12.3', '')
+      },
+      fetchImpl: tableFetch({ 'http://127.0.0.1:11434/api/version': { version: '0.12.3' } }),
+      download: async () => 10,
+      runInstaller: async () => ({ code: 0, output: 'installed' }),
+      startServer: async () => { throw new Error('must not launch an already-serving API') },
+      serveAttempts: 1,
+      serveDelayMs: 0
+    })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.version, '0.12.3')
+    assert.match(result.message, /installed and serving/)
+  })
+
+  it('starts a missing Ollama server and verifies the API before succeeding', async () => {
+    let probes = 0
+    let serving = false
+    let launches = 0
+    const result = await installOllama({
+      platform: 'linux',
+      tempDir: home,
+      env: {},
+      homeDir: home,
+      execFileImpl: (_file, _args, _options, cb) => {
+        probes += 1
+        cb(probes === 1 ? new Error('not found') : null, 'ollama version 0.12.3', '')
+      },
+      fetchImpl: async (url) => url.endsWith('/api/version') && serving
+        ? { ok: true, status: 200, json: async () => ({ version: '0.12.3' }), text: async () => '{"version":"0.12.3"}' }
+        : { ok: false, status: 503, json: async () => ({}), text: async () => '' },
+      download: async () => 10,
+      runInstaller: async () => ({ code: 0, output: 'installed' }),
+      startServer: async () => { launches += 1; serving = true; return null },
+      serveAttempts: 1,
+      serveDelayMs: 0
+    })
+
+    assert.equal(launches, 1)
+    assert.equal(result.ok, true)
+    assert.equal(result.version, '0.12.3')
+    assert.match(result.message, /installed and serving/)
   })
 
   it('uses the official install script on Linux', async () => {

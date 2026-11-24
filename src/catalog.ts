@@ -299,7 +299,7 @@ const TOOL_SPECS: Omit<ToolSpec, 'annotations'>[] = [
   {
     name: 'runtimes_download',
     group: 'runtimes',
-    description: 'Download a GGUF into a runtime\'s models folder without registering it with that runtime.',
+    description: 'Download a GGUF into a file-based runtime\'s models folder without registering it. Pull-based runtimes such as Ollama must use llamafarm_install instead.',
     shape: {
       repo: z.string().describe('HuggingFace repo id, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF"'),
       quant: z.string().optional().describe('Quantization tag, e.g. "Q4_K_M"'),

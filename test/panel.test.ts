@@ -132,6 +132,12 @@ describe('panel accessibility', () => {
     assert.match(reply.body, /a:focus-visible \{ outline: 1px solid var\(--accent\); outline-offset: 2px; \}/)
   })
 
+  it('keeps a visible keyboard focus ring on the terminal prompt', async () => {
+    const reply = await ask({ path: '/' })
+    assert.doesNotMatch(reply.body, /\.term-line input:focus \{[^}]*outline:\s*none/)
+    assert.match(reply.body, /\.term-line input:focus-visible \{[^}]*outline:\s*1px solid var\(--accent\);[^}]*outline-offset:\s*2px/)
+  })
+
   it('labels search fields and keeps toggle state on the scenario buttons', async () => {
     const reply = await ask({ path: '/' })
     assert.match(reply.body, /id="ov-tool-search" aria-label="Search MCP tools"/)

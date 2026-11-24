@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import type { FetchLike } from '@toolbox/widgets'
 import { createServices } from '../dist/services.js'
@@ -195,5 +195,86 @@ describe('runtime services', () => {
     assert.equal(result.ok, false)
     assert.equal(result.reason, 'not-found')
     assert.match(result.message, /not-a-runtime/)
+  })
+
+  for (const target of ['explicit', 'active'] as const) {
+    it(`rejects a direct GGUF download into the ${target} Ollama target before any transfer`, async () => {
+      let metadataRequests = 0
+      let ggufMetadataRequests = 0
+      const baseFetch = catalogFetch()
+      const baseGgufFetch = ggufFetch()
+      const downloads: string[] = []
+      const services = createServices({
+        fetchImpl: async (input) => {
+          metadataRequests += 1
+          return baseFetch(input)
+        },
+        runtimeFetchImpl: async (url) => {
+          ggufMetadataRequests += 1
+          return baseGgufFetch(url)
+        },
+        ...noExec,
+        downloadFileImpl: async (_url, targetPath) => {
+          downloads.push(targetPath)
+          await mkdir(dirname(targetPath), { recursive: true })
+          await writeFile(targetPath, Buffer.alloc(2048))
+          return 2048
+        }
+      })
+      await services.init()
+      if (target === 'active') {
+        const selected = await services.runtimesUse('ollama')
+        assert.equal(selected.active, 'ollama')
+      }
+      metadataRequests = 0
+      ggufMetadataRequests = 0
+      const historyBefore = (await services.settingsSnapshot()).modelInstalls
+      const repo = `acme/direct-${target}-GGUF`
+
+      const result = await services.runtimesDownload({
+        repo,
+        ...(target === 'explicit' ? { runtime: 'ollama' } : {})
+      })
+
+      assert.equal(result.ok, false)
+      assert.equal(result.reason, 'unsupported-runtime')
+      assert.equal(result.runtime.id, 'ollama')
+      assert.match(result.message, /Ollama.*pull|pulls models/i)
+      assert.match(result.message, /llamafarm_install/)
+      assert.equal(metadataRequests, 0)
+      assert.equal(ggufMetadataRequests, 0)
+      assert.deepEqual(downloads, [])
+      assert.deepEqual((await services.settingsSnapshot()).modelInstalls, historyBefore)
+    })
+  }
+
+  it('keeps direct GGUF downloads working for a file-based runtime', async () => {
+    const downloads: Array<{ url: string; target: string }> = []
+    const services = createServices({
+      fetchImpl: catalogFetch(),
+      runtimeFetchImpl: ggufFetch(),
+      ...noExec,
+      downloadFileImpl: async (url, target) => {
+        downloads.push({ url, target })
+        await mkdir(dirname(target), { recursive: true })
+        await writeFile(target, Buffer.alloc(2048))
+        return 2048
+      }
+    })
+    await services.init()
+
+    const result = await services.runtimesDownload({
+      repo: 'acme/direct-lmstudio-GGUF',
+      runtime: 'lmstudio'
+    })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.reason, 'installed')
+    assert.equal(result.runtime.id, 'lmstudio')
+    assert.ok(result.file)
+    assert.equal(result.file.bytes, 2048)
+    assert.ok(result.file.path.startsWith(join(home, '.lmstudio', 'models')))
+    assert.equal(downloads.length, 1)
+    assert.match(downloads[0].url, /resolve\/main\//)
   })
 })

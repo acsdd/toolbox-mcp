@@ -306,6 +306,7 @@ export type LlamafarmInstallReason =
   | 'runtime-missing'
   | 'insufficient-disk'
   | 'cancelled'
+  | 'unsupported-runtime'
 
 export interface LlamafarmInstallResult {
   ok: boolean
@@ -1464,6 +1465,21 @@ export function createServices(options: ServicesOptions = {}) {
     const repo = input.repo?.trim() ?? ''
     if (!repo) {
       throw new Error('A repo id is required, e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF".')
+    }
+    if (descriptor.accepts === 'pull') {
+      return {
+        ok: false,
+        repo,
+        reference: null,
+        modelName: null,
+        reason: 'unsupported-runtime',
+        message: `${descriptor.label} pulls models itself; its model directory is not a GGUF import folder. Use llamafarm_install with this repo instead.`,
+        output: '',
+        steps: [`Call llamafarm_install with repo "${repo}"${input.quant ? ` and quant "${input.quant}"` : ''}.`],
+        runtime: { id: descriptor.id, label: descriptor.label, baseUrl: null },
+        file: null,
+        astrlink: null
+      }
     }
     const cached = catalog?.models.find((entry) => entry.id.toLowerCase() === repo.toLowerCase()) ?? null
     const model =

@@ -135,6 +135,9 @@ export interface RuntimeOptions {
   timeoutMs?: number
 }
 
+/** A launcher may return an error string; legacy void/child-handle returns are ignored. */
+export type RuntimeLaunch = (file: string, args: string[]) => unknown
+
 export interface RuntimeInstallOptions extends RuntimeOptions {
   /** Runs a downloaded installer; injectable for tests. */
   runInstaller?: (file: string, args: string[], options: { timeoutMs: number }) => Promise<{ code: number | null; output: string }>
@@ -142,6 +145,11 @@ export interface RuntimeInstallOptions extends RuntimeOptions {
   download?: DownloadFn
   /** Where installers are staged. */
   tempDir?: string
+  /** Starts a background server; returns an error string when launch fails. */
+  startServer?: RuntimeLaunch
+  /** Serving-probe attempts and delay, shortened by deterministic tests. */
+  serveAttempts?: number
+  serveDelayMs?: number
 }
 
 // --- the registry ------------------------------------------------------------
@@ -761,14 +769,37 @@ async function runInstaller(
   })
 }
 
-/** Start a background server and let it outlive this call. */
-function startDetached(file: string, args: string[]): void {
-  try {
-    const child = spawn(file, args, { detached: true, stdio: 'ignore', windowsHide: true })
-    child.unref()
-  } catch {
-    // A runtime that will not start is reported by the follow-up probe.
-  }
+function processErrorText(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause)
+  return message.replace(/[\r\n]+/g, ' ').trim().slice(0, 240) || 'unknown error'
+}
+
+/** Start a background server and report whether the process actually spawned. */
+function startDetached(file: string, args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(file, args, { detached: true, stdio: 'ignore', windowsHide: true })
+    } catch (cause) {
+      resolve(processErrorText(cause))
+      return
+    }
+    let settled = false
+    const finish = (error: string | null): void => {
+      if (settled) return
+      settled = true
+      resolve(error)
+    }
+    // Node reports ENOENT/EACCES asynchronously. Keep this listener attached
+    // after spawn as well, so a later process error cannot become uncaught.
+    child.once('error', (cause) => finish(processErrorText(cause)))
+    child.once('spawn', () => finish(null))
+    try {
+      child.unref()
+    } catch (cause) {
+      finish(processErrorText(cause))
+    }
+  })
 }
 
 /** Wait for the Ollama API to answer; returns its version or null. */
@@ -879,38 +910,58 @@ export async function installOllama(options: RuntimeInstallOptions = {}): Promis
   const cliOptions: RuntimeOptions = { ...options }
   const after = await probeRuntimeCli(runtimeDescriptor('ollama') as RuntimeDescriptor, cliOptions)
 
-  // Make sure something is actually serving on 11434.
-  let serving = await waitForOllama(options, 3, 1000)
+  // Make sure something is actually serving on 11434. A working CLI alone
+  // does not mean the background server is available to Model Farm clients.
+  let serving = await waitForOllama(options, options.serveAttempts ?? 3, options.serveDelayMs ?? 1000)
+  let launchError: string | null = null
   if (!serving && (after.installed || existsSync(cliPath))) {
     const binary = existsSync(cliPath) ? cliPath : 'ollama'
+    const launch = options.startServer ?? startDetached
     steps.push('Start the Ollama server')
-    startDetached(binary, ['serve'])
-    serving = await waitForOllama(options, 20, 1500)
+    try {
+      const result = await launch(binary, ['serve'])
+      launchError = typeof result === 'string' ? result : null
+    } catch (cause) {
+      launchError = processErrorText(cause)
+    }
+    if (!launchError) {
+      serving = await waitForOllama(options, options.serveAttempts ?? 20, options.serveDelayMs ?? 1500)
+    }
   }
 
   const version = serving ?? after.version
   if (!version) {
+    const detail = launchError ? ` Server launch failed: ${launchError}.` : ''
     return {
       ok: false,
       id: 'ollama',
-      action: 'failed',
+      action: after.installed ? action : 'failed',
       version: null,
-      message: 'Ollama was installed but did not report a version. Open Ollama and try again.',
+      message: `Ollama was installed but did not report a version.${detail} Open Ollama and try again.`,
       steps,
-      log
+      log: [log, launchError ? `Server launch failed: ${launchError}` : ''].filter(Boolean).join('\n')
     }
   }
 
   await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
+  if (!serving) {
+    const detail = launchError ? ` Could not start the server: ${launchError}.` : ''
+    return {
+      ok: false,
+      id: 'ollama',
+      action: after.installed ? action : 'failed',
+      version: after.version,
+      message: `Ollama ${after.version} is installed, but its server did not answer on http://127.0.0.1:11434.${detail} Open Ollama and try again.`,
+      steps,
+      log: [log, launchError ? `Server launch failed: ${launchError}` : ''].filter(Boolean).join('\n')
+    }
+  }
   return {
     ok: true,
     id: 'ollama',
     action,
-    version,
-    message:
-      action === 'updated'
-        ? `Ollama ${version} is installed and serving on http://127.0.0.1:11434.`
-        : `Ollama ${version} is installed and serving on http://127.0.0.1:11434.`,
+    version: serving,
+    message: `Ollama ${serving} is installed and serving on http://127.0.0.1:11434.`,
     steps,
     log
   }
@@ -1048,8 +1099,8 @@ export function serverLaunchCommand(
 }
 
 export interface ServerStartOptions extends RuntimeOptions {
-  /** Starts the process; injectable so tests never spawn a real server. */
-  launchImpl?: (file: string, args: string[]) => void
+  /** Starts the process; returns an error string when launch fails. */
+  launchImpl?: RuntimeLaunch
   /** The Hugging Face repository that provides the tokenizer (vLLM). */
   tokenizer?: string | null
   /** How many times to look for the new server, and how long between looks. */
@@ -1111,7 +1162,22 @@ export async function startServerRuntime(
   }
 
   const launch = options.launchImpl ?? startDetached
-  launch(command.file, command.args)
+  let launchError: string | null = null
+  try {
+    const result = await launch(command.file, command.args)
+    launchError = typeof result === 'string' ? result : null
+  } catch (cause) {
+    launchError = processErrorText(cause)
+  }
+  if (launchError) {
+    return {
+      ok: false,
+      baseUrl: null,
+      message: `Could not start ${descriptor.label}: ${launchError}`,
+      steps: [command.display],
+      log: launchError
+    }
+  }
   const attempts = options.startAttempts ?? 25
   const delayMs = options.startDelayMs ?? 1000
   for (let attempt = 0; attempt < attempts; attempt += 1) {
