@@ -1,6 +1,6 @@
 {
   "name": "toolbox-mcp",
-  "version": "0.9.21",
+  "version": "0.9.22",
   "description": "Local-first MCP server for crypto watch, Gmail, resource monitoring, Model Farm scoring and the module marketplace, plus a localhost ops panel.",
   "author": "Alpha Team",
   "license": "MIT",

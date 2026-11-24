@@ -532,6 +532,7 @@ describe('connect an MCP client', () => {
     assert.match(get('ov-connect-meta')!.textContent, /client attached/)
     assert.equal(get('ov-connect-config')!.textContent, SERVER.client.config)
     assert.match(get('ov-connect-note')!.textContent, /mcpServers/)
+    assert.match(get('ov-connect-note')!.textContent, /own copy/)
   })
 
   it('says when a client is not attached yet', () => {

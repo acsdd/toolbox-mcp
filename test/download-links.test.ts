@@ -26,3 +26,18 @@ it('shows the ops panel in the readme', () => {
   const readme = readFileSync(join(process.cwd(), 'README.md'), 'utf8')
   assert.match(readme, /!\[[^\]]+\]\(docs\/panel-overview\.png\)/)
 })
+
+it('ships a client setup guide and links it from the pages', () => {
+  const guide = readFileSync(join(process.cwd(), 'docs/mcp-clients.md'), 'utf8')
+  assert.ok(guide.includes('## Claude Desktop'), 'the guide covers Claude Desktop')
+  assert.ok(guide.includes('## Cursor'), 'the guide covers Cursor')
+  assert.ok(guide.includes('## If the tools do not appear'), 'the guide has troubleshooting')
+  assert.match(guide, /mcpServers/)
+
+  const install = readFileSync(join(process.cwd(), 'docs/install.md'), 'utf8')
+  assert.match(install, /\(mcp-clients\.md\)/)
+  const html = readFileSync(join(process.cwd(), 'docs/index.html'), 'utf8')
+  assert.match(html, /docs\/mcp-clients\.md/)
+  const readme = readFileSync(join(process.cwd(), 'README.md'), 'utf8')
+  assert.match(readme, /\(docs\/mcp-clients\.md\)/)
+})

@@ -114,6 +114,11 @@ in Credential Manager yourself.
 
 ## Use the MCP tools from an MCP client
 
+The panel's **Connect an MCP client** card generates this configuration. The
+step-by-step version for Claude Desktop and Cursor is
+[Use the tools from an MCP client](mcp-clients.md); this section covers the
+installed-app details.
+
 ### From the installed app (no Node.js needed)
 
 The installed app ships its own Node runtime, so your client can launch the

@@ -554,7 +554,7 @@ ${WIDGET_HOST_CSS}
             <pre class="ov-connect-config" id="ov-connect-config" tabindex="0" aria-label="MCP client configuration"></pre>
             <div class="actions">
               <button class="btn" id="ov-connect-copy" onclick="ovCopyConnect()">Copy config</button>
-              <a class="btn" href="https://github.com/acsdd/toolbox-mcp/blob/main/docs/install.md#use-the-mcp-tools-from-an-mcp-client" target="_blank" rel="noopener">Client guide ↗</a>
+              <a class="btn" href="https://github.com/acsdd/toolbox-mcp/blob/main/docs/mcp-clients.md" target="_blank" rel="noopener">Client guide ↗</a>
               <span id="ov-connect-status" role="status" aria-live="polite"></span>
             </div>
           </div>
@@ -854,7 +854,10 @@ function renderConnect(server, attached) {
     return
   }
   meta.textContent = attached ? 'client attached' : 'panel only'
-  note.textContent = 'Paste this into the mcpServers configuration of your MCP client (Claude Desktop, Cursor, …). The paths are for this installation.'
+  note.textContent = (attached
+    ? 'Paste this into the mcpServers configuration of another MCP client'
+    : 'Paste this into the mcpServers configuration of your MCP client') +
+    ' (Claude Desktop, Cursor, …). Each client starts its own copy of the server; the paths are for this installation.'
   pre.textContent = client.config
   pre.classList.remove('hidden')
   if (copy) copy.classList.remove('hidden')
