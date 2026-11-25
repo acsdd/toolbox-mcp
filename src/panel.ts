@@ -14,6 +14,7 @@ import { createTerminal, type Terminal } from './terminal.js'
 import { TOOL_GROUPS, catalogEntries, schemaParams } from './catalog.js'
 import { createActivity, type Activity } from './activity.js'
 import { appVersion } from './version.js'
+import { createShutdown, watchShutdownSignals } from './lifecycle.js'
 
 const PANEL_PORT = Number(process.env.TOOLBOX_MCP_PORT ?? 3851)
 /** The repository the panel points at for source and issue reports. */
@@ -22,6 +23,8 @@ const REPO_URL = 'https://github.com/acsdd/toolbox-mcp'
 const MAX_BODY_BYTES = 1_000_000
 /** Upper bound for a body that is drained instead of buffered. */
 const MAX_DRAIN_BYTES = 10_000_000
+/** Give a local SSE client a brief chance to flush before sockets are forced closed. */
+const EVENT_STREAM_CLOSE_TIMEOUT_MS = 1000
 /** Only these hostnames may address the panel (loopback, by name or address). */
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
@@ -2615,7 +2618,7 @@ async function readJson<T>(req: import('node:http').IncomingMessage): Promise<T>
 
 export interface PanelHandle {
   port: number
-  close: () => void
+  close: () => Promise<void>
 }
 
 export interface PanelOptions {
@@ -2687,10 +2690,17 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
   const terminal = options.terminal ?? createTerminal()
   const activity = options.activity ?? createActivity(false)
   let panelPort = options.port ?? PANEL_PORT
+  let closing = false
+  let closePromise: Promise<void> | null = null
+  const eventStreams = new Set<{ cleanup: () => void; closed: Promise<void> }>()
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     void (async () => {
       try {
+        if (closing) {
+          send(res, 503, JSON.stringify({ error: 'The panel is shutting down.' }))
+          return
+        }
         // Only the panel's own browser origin may drive the local tools.
         if (!isPanelRequest(req, panelPort)) {
           send(res, 403, JSON.stringify({ error: 'Only local requests are accepted.' }))
@@ -2962,13 +2972,29 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
           })
           res.write('retry: 3000\n\n')
           const unsubscribe = terminal.subscribe((chunk) => {
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+            if (!res.writableEnded) res.write(`data: ${JSON.stringify(chunk)}\n\n`)
           })
-          const heartbeat = setInterval(() => res.write(': ping\n\n'), 15000)
-          req.on('close', () => {
+          const heartbeat = setInterval(() => {
+            if (!res.writableEnded) res.write(': ping\n\n')
+          }, 15000)
+          let resolveClosed!: () => void
+          const closed = new Promise<void>((resolve) => { resolveClosed = resolve })
+          let cleaned = false
+          let stream!: { cleanup: () => void; closed: Promise<void> }
+          const cleanup = () => {
+            if (cleaned) return
+            cleaned = true
             clearInterval(heartbeat)
             unsubscribe()
-          })
+            eventStreams.delete(stream)
+            if (!res.writableEnded) res.end()
+          }
+          stream = { cleanup, closed }
+          res.once('finish', resolveClosed)
+          res.once('close', resolveClosed)
+          req.once('close', cleanup)
+          res.once('close', cleanup)
+          eventStreams.add(stream)
           return
         }
 
@@ -2985,6 +3011,62 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
     })()
   })
 
+  async function closeEventStreams(): Promise<void> {
+    const streams = [...eventStreams]
+    for (const stream of streams) {
+      try { stream.cleanup() } catch { /* Continue closing the remaining streams. */ }
+    }
+    if (streams.length === 0) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.all(streams.map((stream) => stream.closed)),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, EVENT_STREAM_CLOSE_TIMEOUT_MS) })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  function closePanel(): Promise<void> {
+    if (closePromise) return closePromise
+    closing = true
+    let resolveClose!: () => void
+    let rejectClose!: (cause: unknown) => void
+    const sharedClose = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve
+      rejectClose = reject
+    })
+    closePromise = sharedClose
+    void (async () => {
+      const streamsClosed = closeEventStreams()
+      const listenerClosed = new Promise<void>((resolve, reject) => {
+        if (!server.listening) {
+          resolve()
+          return
+        }
+        server.close((cause) => cause ? reject(cause) : resolve())
+      })
+      let terminalClosed: Promise<void>
+      try {
+        terminalClosed = terminal.close()
+      } catch (cause) {
+        terminalClosed = Promise.reject(cause)
+      }
+      // End SSE responses cleanly before forcing any remaining sockets shut.
+      await streamsClosed
+      server.closeAllConnections()
+      const results = await Promise.allSettled([listenerClosed, terminalClosed])
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map((result) => result.reason)
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Panel shutdown failed: one or more resources could not close cleanly.')
+      }
+    })().then(resolveClose, rejectClose)
+    return sharedClose
+  }
+
   return new Promise((resolve, reject) => {
     // A second server — an MCP client launching the app while the panel is
     // already open — must not fail because the default port is taken.
@@ -2995,27 +3077,24 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
           start(0, false)
           return
         }
-        reject(cause)
+        void closePanel().catch(() => {}).then(() => reject(cause))
       }
       server.once('error', onError)
-      server.listen(port, '127.0.0.1', () => {
-        server.off('error', onError)
-        const address = server.address()
-        if (!address || typeof address === 'string') {
-          server.close()
-          reject(new Error('The panel did not obtain a TCP port.'))
-          return
-        }
-        panelPort = address.port
-        resolve({
-          port: address.port,
-          close: () => {
-            terminal.stop()
-            server.closeAllConnections()
-            server.close()
+      try {
+        server.listen(port, '127.0.0.1', () => {
+          server.off('error', onError)
+          const address = server.address()
+          if (!address || typeof address === 'string') {
+            void closePanel().catch(() => {}).then(() => reject(new Error('The panel did not obtain a TCP port.')))
+            return
           }
+          panelPort = address.port
+          resolve({ port: address.port, close: closePanel })
         })
-      })
+      } catch (cause) {
+        server.off('error', onError)
+        void closePanel().catch(() => {}).then(() => reject(cause))
+      }
     }
     start(options.port ?? PANEL_PORT, true)
   })
@@ -3023,8 +3102,25 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
 
 // `npm run panel` runs this file directly; the MCP server imports it instead.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const services = createServices()
-  await services.init()
-  const handle = await startPanel(services)
-  console.log(`Toolbox ops panel: http://127.0.0.1:${handle.port}`)
+  const shutdown = createShutdown()
+  watchShutdownSignals(shutdown)
+  const services = shutdown.own(createServices())
+  const startup = (async () => {
+    shutdown.assertOpen()
+    await services.init()
+    shutdown.assertOpen()
+    const handle = shutdown.own(await startPanel(services))
+    console.log(`Toolbox ops panel: http://127.0.0.1:${handle.port}`)
+  })()
+  shutdown.track(startup)
+  void startup.catch(async (cause: unknown) => {
+    if (shutdown.closing) return
+    try {
+      await shutdown.close()
+    } catch (closeError) {
+      console.error(closeError)
+    }
+    console.error(cause)
+    process.exitCode = 1
+  })
 }

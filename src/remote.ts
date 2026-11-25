@@ -30,12 +30,12 @@ export function proxiedToolAnnotations(annotations?: ToolAnnotations): ToolAnnot
 }
 
 export interface RemoteConnection {
-  listTools(): Promise<RemoteToolDef[]>
-  callTool(name: string, args: Record<string, unknown>): Promise<unknown>
+  listTools(signal?: AbortSignal): Promise<RemoteToolDef[]>
+  callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   close(): Promise<void>
 }
 
-export type RemoteConnect = (endpoint: string) => Promise<RemoteConnection>
+export type RemoteConnect = (endpoint: string, signal?: AbortSignal) => Promise<RemoteConnection>
 
 export interface RemoteTimeouts {
   connectMs: number
@@ -58,14 +58,52 @@ export class RemoteTimeoutError extends Error {
   }
 }
 
-export function withRemoteTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+export function withRemoteTimeout<T>(
+  operation: Promise<T> | ((signal: AbortSignal) => Promise<T>),
+  timeoutMs: number,
+  label: string,
+  signal?: AbortSignal
+): Promise<T> {
+  const controller = new AbortController()
   let timer: NodeJS.Timeout | undefined
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new RemoteTimeoutError(label, timeoutMs)), timeoutMs)
+  let abortHandler: (() => void) | undefined
+  let rejectInterruption!: (cause: unknown) => void
+  const interruption = new Promise<never>((_resolve, reject) => {
+    rejectInterruption = reject
   })
-  return Promise.race([operation, timeout]).finally(() => {
+  const interrupt = (cause: unknown): void => {
+    // Publish the stable timeout/shutdown reason before the operation's abort
+    // listener can reject with a transport-specific AbortError.
+    rejectInterruption(cause)
+    controller.abort(cause)
+  }
+  timer = setTimeout(() => interrupt(new RemoteTimeoutError(label, timeoutMs)), timeoutMs)
+  abortHandler = () => interrupt(
+    signal?.reason instanceof Error ? signal.reason : new Error('Remote operation was cancelled.')
+  )
+  if (signal?.aborted) {
+    interrupt(signal.reason instanceof Error ? signal.reason : new Error('Remote operation was cancelled.'))
+  } else {
+    signal?.addEventListener('abort', abortHandler, { once: true })
+  }
+
+  const cleanup = (): void => {
     if (timer) clearTimeout(timer)
-  })
+    if (abortHandler) signal?.removeEventListener('abort', abortHandler)
+  }
+  if (controller.signal.aborted) return interruption.finally(cleanup)
+
+  let pending: Promise<T>
+  try {
+    pending = typeof operation === 'function' ? operation(controller.signal) : operation
+  } catch (cause) {
+    cleanup()
+    // The factory may also have aborted the operation before throwing. Consume
+    // that interruption so its deadline cannot become an unhandled rejection.
+    void interruption.catch(() => {})
+    return Promise.reject(cause)
+  }
+  return Promise.race([pending, interruption]).finally(cleanup)
 }
 
 /** A tool exposed locally on behalf of a remote server. */
@@ -101,7 +139,7 @@ export interface ResolvedAddress {
   family: number
 }
 
-export type HostResolver = (host: string) => Promise<ResolvedAddress[]>
+export type HostResolver = (host: string, signal?: AbortSignal) => Promise<ResolvedAddress[]>
 
 // Two lists, because BlockList matches an IPv4 check against IPv6 rules as its
 // IPv4-mapped form — one shared list would block every IPv4 address.
@@ -146,7 +184,16 @@ export function isPublicAddress(address: string): boolean {
   return false
 }
 
-const defaultResolve: HostResolver = async (host) => lookup(host, { all: true, verbatim: true })
+const defaultResolve: HostResolver = async (host, signal) => {
+  const resolving = lookup(host, { all: true, verbatim: true })
+  if (!signal) return resolving
+  return new Promise<ResolvedAddress[]>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason)
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+    void resolving.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
 
 export interface RemoteEndpointPolicy {
   resolve?: HostResolver
@@ -156,7 +203,12 @@ export interface RemoteEndpointPolicy {
  * Validate and return the parsed endpoint. Throws RemoteEndpointError when the
  * endpoint is not public HTTPS; callers surface the message to the user.
  */
-export async function assertRemoteEndpointAllowed(endpoint: string, policy: RemoteEndpointPolicy = {}): Promise<URL> {
+export async function assertRemoteEndpointAllowed(
+  endpoint: string,
+  policy: RemoteEndpointPolicy = {},
+  signal?: AbortSignal
+): Promise<URL> {
+  signal?.throwIfAborted()
   let url: URL
   try {
     url = new URL(endpoint)
@@ -179,11 +231,13 @@ export async function assertRemoteEndpointAllowed(endpoint: string, policy: Remo
   }
   let addresses: ResolvedAddress[]
   try {
-    addresses = await (policy.resolve ?? defaultResolve)(host)
+    addresses = await (policy.resolve ?? defaultResolve)(host, signal)
   } catch (cause) {
+    if (signal?.aborted) throw signal.reason
     const reason = cause instanceof Error ? cause.message : String(cause)
     throw new RemoteEndpointError(`Could not resolve "${host}": ${reason}`)
   }
+  signal?.throwIfAborted()
   if (!addresses.length) throw new RemoteEndpointError(`"${host}" did not resolve to any address.`)
   const blocked = addresses.find((entry) => !isPublicAddress(entry.address))
   if (blocked) {
@@ -198,16 +252,57 @@ export function remoteClientInfo(): { name: string; version: string } {
 }
 
 /** Default factory: a real MCP client over streamable HTTP, public HTTPS only. */
-export const connectRemote: RemoteConnect = async (endpoint) => {
-  const url = await assertRemoteEndpointAllowed(endpoint)
+export const connectRemote: RemoteConnect = async (endpoint, signal) => {
+  const url = await assertRemoteEndpointAllowed(endpoint, {}, signal)
+  signal?.throwIfAborted()
   const client = new Client(remoteClientInfo())
-  await client.connect(new StreamableHTTPClientTransport(url))
+  const transport = new StreamableHTTPClientTransport(url)
+  // Client.connect accepts a request signal in SDK 1.32, but closing the owned
+  // transport is what aborts the underlying HTTP fetch and SSE stream. Observe
+  // the underlying close even when the caller's deadline has already expired.
+  let transportClose: Promise<void> | null = null
+  const closeTransport = (): Promise<void> => {
+    if (!transportClose) {
+      try {
+        transportClose = Promise.resolve(transport.close())
+      } catch (cause) {
+        transportClose = Promise.reject(cause)
+      }
+      void transportClose.catch(() => {})
+    }
+    return transportClose
+  }
+  const abortTransport = (): void => { void closeTransport() }
+  signal?.addEventListener('abort', abortTransport, { once: true })
+  try {
+    await client.connect(transport, { signal })
+    signal?.throwIfAborted()
+  } catch (cause) {
+    try {
+      await withRemoteTimeout(
+        () => closeTransport(),
+        DEFAULT_REMOTE_TIMEOUTS.closeMs,
+        'transport close'
+      )
+    } catch (cleanupCause) {
+      const detail = [cause, cleanupCause]
+        .map((error) => error instanceof Error ? error.message : String(error))
+        .join('; ')
+      throw new AggregateError(
+        [cause, cleanupCause],
+        `Remote connection failed and transport cleanup did not finish. ${detail}`
+      )
+    }
+    throw cause
+  } finally {
+    signal?.removeEventListener('abort', abortTransport)
+  }
   return {
-    listTools: async () => {
+    listTools: async (requestSignal) => {
       const tools: RemoteToolDef[] = []
       let cursor: string | undefined
       do {
-        const page = await client.listTools(cursor ? { cursor } : {})
+        const page = await client.listTools(cursor ? { cursor } : {}, { signal: requestSignal })
         for (const tool of page.tools) {
           tools.push({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, annotations: tool.annotations })
         }
@@ -215,7 +310,11 @@ export const connectRemote: RemoteConnect = async (endpoint) => {
       } while (cursor)
       return tools
     },
-    callTool: (name, args) => client.callTool({ name, arguments: args }),
+    callTool: (name, args, requestSignal) => client.callTool(
+      { name, arguments: args },
+      undefined,
+      { signal: requestSignal }
+    ),
     close: () => client.close()
   }
 }

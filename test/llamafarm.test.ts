@@ -23,7 +23,8 @@ function servedPanelPage(): Promise<string> {
     try {
       return await (await fetch(`http://127.0.0.1:${panel.port}/`)).text()
     } finally {
-      panel.close()
+      await panel.close()
+      await services.close()
     }
   })()
   return panelPage
@@ -488,10 +489,11 @@ describe('panel', () => {
         assert.equal(page.status, 200)
         assert.match(await page.text(), /MODEL WANTS/)
       } finally {
-        second.close()
+        await second.close()
       }
     } finally {
-      first.close()
+      await first.close()
+      await services.close()
     }
   })
 
@@ -591,7 +593,8 @@ describe('panel', () => {
       const stopped = await (await fetch(`${base}/api/terminal/stop`, { method: 'POST' })).json() as { running: boolean }
       assert.equal(stopped.running, false)
     } finally {
-      panel.close()
+      await panel.close()
+      await services.close()
     }
   })
 })

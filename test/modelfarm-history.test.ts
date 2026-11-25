@@ -198,7 +198,8 @@ describe('install history: panel API', () => {
       assert.equal(history.length, 1)
       assert.equal(history[0].repo, QWEN_REPO)
     } finally {
-      panel.close()
+      await panel.close()
+      await services.close()
     }
   })
 
@@ -213,7 +214,8 @@ describe('install history: panel API', () => {
       assert.match(page.body, /mf-recent/)
       assert.match(page.body, /mfLoadRecent/)
     } finally {
-      panel.close()
+      await panel.close()
+      await services.close()
     }
   })
 })

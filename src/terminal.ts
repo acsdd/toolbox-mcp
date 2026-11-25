@@ -36,17 +36,37 @@ type CompletionExec = (
   args: string[],
   options: { windowsHide: boolean; timeout: number; maxBuffer: number; cwd?: string },
   callback: (error: Error | null, stdout: string, stderr: string) => void
-) => void
+) => ChildProcess | undefined
 
-export function createTerminal(options: { platform?: NodeJS.Platform | string; execFileImpl?: CompletionExec } = {}) {
+export interface TerminalOptions {
+  platform?: NodeJS.Platform | string
+  execFileImpl?: CompletionExec
+  /** Maximum wait for graceful exit before the direct child is force-killed. */
+  stopTimeoutMs?: number
+}
+
+const DEFAULT_STOP_TIMEOUT_MS = 1500
+
+export function createTerminal(options: TerminalOptions = {}) {
   const platform = options.platform ?? process.platform
   const execFileImpl = options.execFileImpl ?? (execFile as unknown as CompletionExec)
+  const stopTimeoutMs = typeof options.stopTimeoutMs === 'number' && Number.isFinite(options.stopTimeoutMs)
+    ? Math.max(0, options.stopTimeoutMs)
+    : DEFAULT_STOP_TIMEOUT_MS
   let child: ChildProcess | null = null
   let stopping: ChildProcess | null = null
   let startedAt: number | null = null
   let buffer = ''
   let completionCwd = process.cwd()
+  let closed = false
+  let closePromise: Promise<void> | null = null
+  let processExitHandler: (() => void) | null = null
   const listeners = new Set<(chunk: string) => void>()
+  const completionChildren = new Set<ChildProcess>()
+  // UI state follows only the newest shell; ownership follows every spawned
+  // shell until an observed exit/close, including stopped or failed sessions.
+  const sessions = new Set<ChildProcess>()
+  const terminationRequested = new WeakSet<ChildProcess>()
 
   function append(chunk: string): void {
     buffer = (buffer + chunk).slice(-MAX_BUFFER_CHARS)
@@ -68,7 +88,9 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
     if (child !== session) return
     child = null
     startedAt = null
-    try { session.kill() } catch { /* The process may already be gone. */ }
+    try {
+      if (session.kill()) terminationRequested.add(session)
+    } catch { /* The process may already be gone. */ }
     append(`\r\n[${context}: ${errorText(cause)} — start again to reopen]\r\n`)
   }
 
@@ -89,7 +111,7 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
   }
 
   function start(): TerminalState {
-    if (child) return state()
+    if (closed || child) return state()
     // A replacement session owns all later callbacks and visible errors.
     stopping = null
     const shell =
@@ -104,9 +126,12 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
       return state()
     }
     child = session
+    sessions.add(session)
     startedAt = Date.now()
     session.on('error', (cause) => {
-      if (child === session) {
+      if (closed) {
+        stopping = null
+      } else if (child === session) {
         fail(session, 'terminal shell failed', cause)
       } else if (stopping === session) {
         stopping = null
@@ -125,7 +150,10 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
       if (child === session) append(chunk)
     })
     session.on('exit', () => {
-      if (child === session) {
+      sessions.delete(session)
+      if (closed) {
+        stopping = null
+      } else if (child === session) {
         child = null
         startedAt = null
         append('\r\n[session ended — start again to reopen]\r\n')
@@ -134,6 +162,7 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
         append('\r\n[session stopped — start again to reopen]\r\n')
       }
     })
+    session.on('close', () => sessions.delete(session))
     if (platform === 'win32') {
       write(session, '[Console]::OutputEncoding = [Text.Encoding]::UTF8\r\n', 'terminal encoding setup failed')
     }
@@ -158,6 +187,7 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
       replacementLength: 0
     })
     if (platform !== 'win32') return Promise.resolve(empty(false))
+    if (closed) return Promise.resolve(empty(true))
     if (safeLine.length > MAX_COMPLETION_INPUT_CHARS) return Promise.resolve(empty(true, MAX_COMPLETION_INPUT_CHARS))
 
     // The user's command is base64 data inside a constant PowerShell program,
@@ -174,7 +204,7 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
     const encodedScript = Buffer.from(script, 'utf16le').toString('base64')
 
     return new Promise((resolve) => {
-      execFileImpl('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript], {
+      const completion = execFileImpl('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript], {
         windowsHide: true,
         // A cold host (first PowerShell start, antivirus scanning, a busy
         // machine) can take a while to answer; the tab-completion hint is
@@ -183,7 +213,7 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
         maxBuffer: 64 * 1024,
         cwd: completionCwd
       }, (error, stdout) => {
-        if (error) { resolve(empty(true)); return }
+        if (error || closed) { resolve(empty(true)); return }
         try {
           const parsed = JSON.parse(stdout.trim()) as {
             candidates?: unknown
@@ -204,6 +234,17 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
           resolve(empty(true))
         }
       })
+      if (completion) {
+        completionChildren.add(completion)
+        const release = (): void => {
+          completionChildren.delete(completion)
+          resolve(empty(true))
+        }
+        completion.once('exit', release)
+        completion.once('close', release)
+        completion.once('error', () => resolve(empty(true)))
+        if (closed) void waitForSessionExit(completion, 'completion process').catch(() => {})
+      }
     })
   }
 
@@ -214,30 +255,155 @@ export function createTerminal(options: { platform?: NodeJS.Platform | string; e
     child = null
     startedAt = null
     try {
-      if (!session.kill()) {
-        stopping = null
+      if (!session.kill('SIGTERM')) {
         append('\r\n[session stop failed: kill signal was not sent — the process may still be running]\r\n')
+      } else {
+        terminationRequested.add(session)
       }
       // A successful kill is reported only when the child actually exits.
     } catch (cause) {
-      stopping = null
       append(`\r\n[session stop failed: ${errorText(cause)} — the process may still be running]\r\n`)
     }
     return state()
   }
 
+  function signalSession(session: ChildProcess, signal: NodeJS.Signals, context: string): void {
+    try {
+      if (!session.kill(signal)) {
+        append(`\r\n[${context}: kill signal was not sent — the process may still be running]\r\n`)
+      }
+    } catch (cause) {
+      append(`\r\n[${context}: ${errorText(cause)} — the process may still be running]\r\n`)
+    }
+  }
+
+  /** Resolve only after the owned process has actually reported its exit. */
+  function waitForSessionExit(
+    session: ChildProcess,
+    label: string,
+    initialSignalSent = false
+  ): Promise<void> {
+    if (session.exitCode != null || session.signalCode != null) return Promise.resolve()
+    return new Promise<void>((resolve, reject) => {
+      let settled = false
+      let forceTimer: ReturnType<typeof setTimeout> | undefined
+      let finishTimer: ReturnType<typeof setTimeout> | undefined
+      const finish = (cause?: unknown): void => {
+        if (settled) return
+        settled = true
+        if (forceTimer) clearTimeout(forceTimer)
+        if (finishTimer) clearTimeout(finishTimer)
+        session.off('exit', onExit)
+        session.off('close', onExit)
+        if (cause) reject(cause)
+        else resolve()
+      }
+      const onExit = (): void => finish()
+      session.once('exit', onExit)
+      session.once('close', onExit)
+      if (session.exitCode != null || session.signalCode != null) {
+        finish()
+        return
+      }
+      forceTimer = setTimeout(() => {
+        append(`\r\n[${label} did not exit after stop timeout — forcing termination]\r\n`)
+        signalSession(session, 'SIGKILL', `${label} force-kill failed`)
+        // A broken process handle must not hang shutdown forever, but a timer
+        // is not evidence of exit: only the exit event may complete cleanup.
+        finishTimer = setTimeout(
+          () => finish(new Error(`${label} did not exit after force-kill.`)),
+          Math.max(1, Math.min(stopTimeoutMs, 250))
+        )
+      }, stopTimeoutMs)
+      if (!initialSignalSent) signalSession(session, 'SIGTERM', `${label} stop failed`)
+    })
+  }
+
+  function finishClose(): void {
+    child = null
+    stopping = null
+    startedAt = null
+    sessions.clear()
+    completionChildren.clear()
+    listeners.clear()
+    if (processExitHandler) {
+      process.removeListener('exit', processExitHandler)
+      processExitHandler = null
+    }
+  }
+
+  /** Final shutdown: stop new work, then await every shell we still own. */
+  function close(): Promise<void> {
+    if (closePromise) return closePromise
+    closed = true
+    let resolveClose!: () => void
+    let rejectClose!: (cause: unknown) => void
+    const closing = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve
+      rejectClose = reject
+    })
+    // Publish the shared promise before stopping so re-entrant close calls
+    // from output subscribers cannot start a second cleanup.
+    closePromise = closing
+    void (async () => {
+      const errors: unknown[] = []
+      try {
+        const active = child
+        if (active) stop()
+        const ownedSessions = [...sessions]
+        const waiting: Promise<void>[] = ownedSessions.map((session) =>
+          waitForSessionExit(session, 'session', terminationRequested.has(session))
+        )
+        const completions = [...completionChildren]
+        for (const completion of completions) {
+          waiting.push(waitForSessionExit(completion, 'completion process'))
+        }
+        const results = await Promise.allSettled(waiting)
+        for (const result of results) {
+          if (result.status === 'rejected') errors.push(result.reason)
+        }
+        // A resolved wait observed exit/close; a rejected wait already has a
+        // cleanup failure. Neither should be retried indefinitely.
+        for (const completion of completions) completionChildren.delete(completion)
+        // A custom exec implementation can return its child after a re-entrant
+        // close call. Drain any such late completion before releasing hooks.
+        while (completionChildren.size > 0) {
+          const pending = [...completionChildren]
+          const late = await Promise.allSettled(
+            pending.map((completion) => waitForSessionExit(completion, 'completion process'))
+          )
+          for (const result of late) {
+            if (result.status === 'rejected') errors.push(result.reason)
+          }
+          for (const completion of pending) completionChildren.delete(completion)
+        }
+      } finally {
+        finishClose()
+      }
+      if (errors.length > 0) {
+        throw new AggregateError(errors, `Terminal shutdown failed: ${errors.map(errorText).join('; ')}`)
+      }
+    })().then(resolveClose, rejectClose)
+    return closing
+  }
+
   /** Subscribe to output; replays the buffered history first. */
   function subscribe(listener: (chunk: string) => void): () => void {
+    if (closed) return () => {}
     listeners.add(listener)
     if (buffer) listener(buffer)
     return () => listeners.delete(listener)
   }
 
-  process.once('exit', () => {
-    try { child?.kill() } catch { /* The process may already be gone. */ }
-  })
+  processExitHandler = () => {
+    for (const session of new Set([...sessions, ...completionChildren])) {
+      if (!session) continue
+      try { session.kill() } catch { /* The process may already be gone. */ }
+    }
+  }
+  process.once('exit', processExitHandler)
 
-  return { start, input, complete, stop, state, subscribe, snapshot: () => buffer }
+  return { start, input, complete, stop, close, state, subscribe, snapshot: () => buffer }
 }
 
 export type Terminal = ReturnType<typeof createTerminal>

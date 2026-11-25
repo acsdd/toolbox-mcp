@@ -12,12 +12,15 @@ import { jsonSchemaToZodShape, proxiedToolAnnotations } from './remote.js'
 import { appVersion } from './version.js'
 import { TOOL_CATALOG } from './catalog.js'
 import { createActivity } from './activity.js'
+import { createShutdown, watchShutdownSignals } from './lifecycle.js'
 
-const server = new McpServer({ name: 'toolbox-mcp', version: appVersion() })
+const shutdown = createShutdown()
+watchShutdownSignals(shutdown, { stdin: process.stdin })
+const server = shutdown.own(new McpServer({ name: 'toolbox-mcp', version: appVersion() }))
 
 // Remote-server marketplace modules register their tools here at runtime.
 const remoteRegistrations = new Map<string, RegisteredTool[]>()
-const services = createServices({
+const services = shutdown.own(createServices({
   onRemoteTools: (moduleId, tools) => {
     remoteRegistrations.get(moduleId)?.forEach((tool) => tool.remove())
     remoteRegistrations.set(
@@ -37,8 +40,7 @@ const services = createServices({
     remoteRegistrations.get(moduleId)?.forEach((tool) => tool.remove())
     remoteRegistrations.delete(moduleId)
   }
-})
-await services.init()
+}))
 
 /**
  * Whether a tool payload describes a failure rather than data.
@@ -205,34 +207,53 @@ const handlers: Record<string, ToolHandler> = {
   }
 }
 
-const activity = createActivity(true)
+const startup = (async () => {
+  shutdown.assertOpen()
+  await services.init()
+  shutdown.assertOpen()
+  const activity = createActivity(true)
 
-for (const spec of TOOL_CATALOG) {
-  const handler = handlers[spec.name]
-  if (!handler) throw new Error(`No handler for the ${spec.name} tool.`)
-  server.tool(spec.name, spec.description, spec.shape, spec.annotations, async (args) => {
-    const started = Date.now()
-    try {
-      const result = await handler((args ?? {}) as ToolArgs)
-      activity.record(spec.name, result.isError !== true, Date.now() - started)
-      return result
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause)
-      activity.record(spec.name, false, Date.now() - started, message)
-      throw cause
-    }
-  })
-}
+  for (const spec of TOOL_CATALOG) {
+    const handler = handlers[spec.name]
+    if (!handler) throw new Error(`No handler for the ${spec.name} tool.`)
+    server.tool(spec.name, spec.description, spec.shape, spec.annotations, async (args) => {
+      const started = Date.now()
+      try {
+        const result = await handler((args ?? {}) as ToolArgs)
+        activity.record(spec.name, result.isError !== true, Date.now() - started)
+        return result
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause)
+        activity.record(spec.name, false, Date.now() - started, message)
+        throw cause
+      }
+    })
+  }
 
-await server.connect(new StdioServerTransport())
+  await server.connect(new StdioServerTransport())
+  shutdown.assertOpen()
+  const panel = shutdown.own(await startPanel(services, { activity }))
+  console.error(`toolbox-mcp ready. Ops panel: http://127.0.0.1:${panel.port}/`)
 
-const panel = await startPanel(services, { activity })
-console.error(`toolbox-mcp ready. Ops panel: http://127.0.0.1:${panel.port}/`)
+  const restored = await services.remoteRestore()
+  for (const entry of restored.connected) {
+    console.error(`remote ${entry.id}: ${entry.tools} tools connected`)
+  }
+  for (const entry of restored.failed) {
+    console.error(`remote ${entry.id}: reconnect failed — ${entry.error}`)
+  }
+})()
 
-const restored = await services.remoteRestore()
-for (const entry of restored.connected) {
-  console.error(`remote ${entry.id}: ${entry.tools} tools connected`)
-}
-for (const entry of restored.failed) {
-  console.error(`remote ${entry.id}: reconnect failed — ${entry.error}`)
-}
+// A panel created just as shutdown starts is closed by own(); tracking startup
+// makes the final close wait for that late cleanup instead of leaking it.
+shutdown.track(startup)
+void startup.catch(async (cause: unknown) => {
+  if (shutdown.closing) return // EOF/signal cancellation is an expected exit.
+  try {
+    await shutdown.close()
+  } catch (closeError) {
+    console.error(closeError)
+  }
+  console.error(cause)
+  process.exitCode = 1
+})

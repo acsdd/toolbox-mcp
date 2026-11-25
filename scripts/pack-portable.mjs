@@ -40,6 +40,7 @@ await cp(join(root, 'dist'), join(appDir, 'dist'), {
   }
 })
 await copyFile(join(root, 'scripts/desktop.cjs'), join(appDir, 'scripts/desktop.cjs'))
+await copyFile(join(root, 'scripts/desktop-main.cjs'), join(appDir, 'scripts/desktop-main.cjs'))
 
 async function copyModules(source, destination, excludeWidgets = false) {
   const excluded = new Set(['.bin', '.package-lock.json', '@types', 'typescript', 'undici-types'])
@@ -80,7 +81,12 @@ await writeFile(join(appDir, 'package.json'), JSON.stringify({
     asar: true,
     compression: 'maximum',
     directories: { output: buildDir },
-    files: ['dist/**/*.js', 'scripts/desktop.cjs', 'package.json'],
+    files: [
+      'dist/**/*.js',
+      'scripts/desktop.cjs',
+      'scripts/desktop-main.cjs',
+      'package.json'
+    ],
     win: { icon: join(toolchain, 'build/icon.png'), target: [{ target: 'portable', arch: ['x64'] }, { target: 'nsis', arch: ['x64'] }] },
     portable: { artifactName: 'ModelFarm-Portable-${version}.${ext}' },
     nsis: {

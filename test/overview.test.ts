@@ -6,7 +6,7 @@ import { startPanel } from '../dist/panel.js'
 import { createServices } from '../dist/services.js'
 
 let services: ReturnType<typeof createServices>
-let panel: { port: number; close: () => void }
+let panel: { port: number; close: () => Promise<void> }
 let page = ''
 
 interface Element {
@@ -57,8 +57,9 @@ before(async () => {
   })
 })
 
-after(() => {
-  panel.close()
+after(async () => {
+  await panel.close()
+  await services.close()
 })
 
 const SCRIPT = /<script>([\s\S]*?)<\/script>/.exec(page)?.[1]

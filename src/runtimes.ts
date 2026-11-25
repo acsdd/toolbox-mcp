@@ -11,7 +11,7 @@
  * It can also install Ollama itself, always from the official installer, so
  * the result is a fresh version rather than whatever was on the machine.
  */
-import { execFile, spawn } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream, existsSync, statSync } from 'node:fs'
 import { link, mkdir, rm, stat, statfs } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -120,9 +120,9 @@ export type DownloadFn = (
 export type RuntimeExec = (
   file: string,
   args: string[],
-  options: { timeout: number; windowsHide: boolean; maxBuffer?: number },
+  options: { timeout: number; windowsHide: boolean; maxBuffer?: number; signal?: AbortSignal },
   cb: (error: Error | null, stdout: string, stderr: string) => void
-) => void
+) => ChildProcess | void
 
 export interface RuntimeOptions {
   fetchImpl?: RuntimeFetch
@@ -131,8 +131,10 @@ export interface RuntimeOptions {
   arch?: string
   env?: NodeJS.ProcessEnv
   homeDir?: string
-  /** How long a single probe may take. */
+  /** How long a single probe may run. */
   timeoutMs?: number
+  /** Cancels owned downloads, installer children and readiness probes. */
+  signal?: AbortSignal
 }
 
 /** A launcher may return an error string; legacy void/child-handle returns are ignored. */
@@ -140,7 +142,7 @@ export type RuntimeLaunch = (file: string, args: string[]) => unknown
 
 export interface RuntimeInstallOptions extends RuntimeOptions {
   /** Runs a downloaded installer; injectable for tests. */
-  runInstaller?: (file: string, args: string[], options: { timeoutMs: number }) => Promise<{ code: number | null; output: string }>
+  runInstaller?: (file: string, args: string[], options: { timeoutMs: number; signal?: AbortSignal }) => Promise<{ code: number | null; output: string }>
   /** Downloads a URL to a file; injectable for tests. */
   download?: DownloadFn
   /** Where installers are staged. */
@@ -398,8 +400,10 @@ export function parseVersionBanner(output: string): string | null {
 
 async function tryJson(url: string, options: RuntimeOptions): Promise<unknown | null> {
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as RuntimeFetch)
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? 1200)
+  const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout
   try {
-    const response = await fetchImpl(url, { signal: AbortSignal.timeout(options.timeoutMs ?? 1200) })
+    const response = await fetchImpl(url, { signal })
     if (!response.ok) return null
     return await response.json()
   } catch {
@@ -409,8 +413,10 @@ async function tryJson(url: string, options: RuntimeOptions): Promise<unknown | 
 
 async function tryText(url: string, options: RuntimeOptions): Promise<string | null> {
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as RuntimeFetch)
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? 1200)
+  const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout
   try {
-    const response = await fetchImpl(url, { signal: AbortSignal.timeout(options.timeoutMs ?? 1200) })
+    const response = await fetchImpl(url, { signal })
     if (!response.ok) return null
     return (await response.text()).slice(0, 400)
   } catch {
@@ -494,6 +500,13 @@ export async function probePort(port: number, options: RuntimeOptions = {}): Pro
   return null
 }
 
+class RuntimeCliExitObservationError extends Error {
+  constructor() {
+    super('Runtime CLI did not exit after SIGKILL.')
+    this.name = 'RuntimeCliExitObservationError'
+  }
+}
+
 /**
  * Probe a runtime's CLI for a version.
  *
@@ -505,21 +518,93 @@ export async function probeRuntimeCli(
   descriptor: RuntimeDescriptor,
   options: RuntimeOptions = {}
 ): Promise<{ installed: boolean; version: string | null; path: string | null }> {
-  if (!descriptor.cli) return { installed: false, version: null, path: null }
+  if (!descriptor.cli || options.signal?.aborted) return { installed: false, version: null, path: null }
   const execImpl = options.execFileImpl ?? (execFile as unknown as RuntimeExec)
-  const result = await new Promise<{ ok: boolean; stdout: string; stderr: string }>((resolve) => {
+  const result = await new Promise<{ ok: boolean; stdout: string; stderr: string }>((resolve, reject) => {
+    let settled = false
+    let terminating = false
+    let spawnReturned = false
+    let callbackReceived = false
+    let child: ChildProcess | undefined
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    let observationTimer: ReturnType<typeof setTimeout> | undefined
+    const finish = (value: { ok: boolean; stdout: string; stderr: string }, cause?: unknown): void => {
+      if (settled) return
+      settled = true
+      if (killTimer) clearTimeout(killTimer)
+      if (observationTimer) clearTimeout(observationTimer)
+      options.signal?.removeEventListener('abort', cancel)
+      if (child) child.removeListener('close', onClose)
+      if (cause !== undefined) reject(cause)
+      else resolve(value)
+    }
+    const cancel = (): void => {
+      if (settled || terminating || !spawnReturned) return
+      if (!child) {
+        finish({ ok: false, stdout: '', stderr: '' })
+        return
+      }
+      terminating = true
+      try {
+        child.kill()
+      } catch {
+        // A failed kill still needs an observed close or a bounded failure.
+      }
+      killTimer = setTimeout(() => {
+        try {
+          child?.kill('SIGKILL')
+        } catch {
+          // The process may already be gone; keep waiting for its close event.
+        }
+        observationTimer = setTimeout(() => {
+          finish({ ok: false, stdout: '', stderr: '' }, new RuntimeCliExitObservationError())
+        }, 2000)
+        observationTimer.unref?.()
+      }, 2000)
+      killTimer.unref?.()
+    }
+    const onClose = (): void => {
+      if (options.signal?.aborted || terminating) finish({ ok: false, stdout: '', stderr: '' })
+    }
+    options.signal?.addEventListener('abort', cancel, { once: true })
     try {
-      execImpl(
+      const spawned = execImpl(
         descriptor.cli as string,
         descriptor.cliArgs ?? ['--version'],
-        { timeout: options.timeoutMs ?? 5000, windowsHide: true, maxBuffer: 1024 * 1024 },
-        (error, stdout, stderr) => resolve({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' })
+        {
+          timeout: options.timeoutMs ?? 5000,
+          windowsHide: true,
+          maxBuffer: 1024 * 1024,
+          ...(options.signal ? { signal: options.signal } : {})
+        },
+        (error, stdout, stderr) => {
+          callbackReceived = true
+          if (options.signal?.aborted) {
+            // The exec callback is not proof that an owned child exited.
+            if (spawnReturned && !child) finish({ ok: false, stdout: '', stderr: '' })
+            return
+          }
+          finish({
+            ok: !error,
+            stdout: stdout ?? '',
+            stderr: stderr ?? ''
+          })
+        }
       )
+      spawnReturned = true
+      if (!settled && spawned && typeof spawned === 'object' && 'kill' in spawned) {
+        child = spawned
+        child.once('close', onClose)
+      }
+      if (options.signal?.aborted) {
+        if (child) cancel()
+        else if (callbackReceived) finish({ ok: false, stdout: '', stderr: '' })
+      }
     } catch {
-      resolve({ ok: false, stdout: '', stderr: '' })
+      finish({ ok: false, stdout: '', stderr: '' })
     }
   })
-  if (!result.ok) return { installed: false, version: null, path: null }
+  if (!result.ok || options.signal?.aborted) return { installed: false, version: null, path: null }
   // Some runtimes print their banner on stderr (llama-server does).
   const output = `${result.stdout}\n${result.stderr}`
   return { installed: true, version: parseVersion(output) ?? parseVersionBanner(output), path: null }
@@ -581,7 +666,11 @@ export async function detectRuntimes(options: RuntimeOptions & { active?: string
   )
 
   const runtimes: RuntimeStatus[] = []
+  if (options.signal?.aborted) {
+    return { runtimes, active: options.active ?? null, detectedAt: Date.now(), platform }
+  }
   for (const descriptor of RUNTIME_REGISTRY) {
+    if (options.signal?.aborted) break
     const probe = probes.find((entry) => entry?.port === descriptor.port) ?? null
     const owner = probe?.identity ?? null
     const others = RUNTIME_REGISTRY.filter(
@@ -599,6 +688,7 @@ export async function detectRuntimes(options: RuntimeOptions & { active?: string
     const ownsProbe = probe !== null && !claimedByOther && !unnamedSharedPort
 
     const cli = await probeRuntimeCli(descriptor, options)
+    if (options.signal?.aborted) break
     const binary = findRuntimeBinary(descriptor, options)
 
     let note = descriptor.note
@@ -721,20 +811,78 @@ export async function downloadFile(
   return info.size
 }
 
+export class InstallerExitObservationError extends Error {
+  readonly output: string
+
+  constructor(output: string) {
+    super('Installer did not exit after SIGKILL.')
+    this.name = 'InstallerExitObservationError'
+    this.output = output
+  }
+}
+
+class InstallerTimeoutError extends Error {
+  readonly output: string
+
+  constructor(output: string) {
+    super('Installer timed out.')
+    this.name = 'InstallerTimeoutError'
+    this.output = output
+  }
+}
+
 async function runInstaller(
   file: string,
   args: string[],
-  options: { timeoutMs: number }
+  options: { timeoutMs: number; signal?: AbortSignal }
 ): Promise<{ code: number | null; output: string }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let output = ''
     let settled = false
-    const finish = (code: number | null): void => {
+    let terminating = false
+    let timedOut = false
+    let child: ReturnType<typeof spawn> | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let abortTimer: ReturnType<typeof setTimeout> | undefined
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    const finish = (code: number | null, cause?: unknown): void => {
       if (settled) return
       settled = true
-      resolve({ code, output })
+      if (timer) clearTimeout(timer)
+      if (abortTimer) clearTimeout(abortTimer)
+      if (killTimer) clearTimeout(killTimer)
+      options.signal?.removeEventListener('abort', cancel)
+      if (cause !== undefined) reject(cause)
+      else resolve({ code, output })
     }
-    let child: ReturnType<typeof spawn>
+    const terminate = (): void => {
+      if (settled || terminating) return
+      terminating = true
+      if (timer) clearTimeout(timer)
+      try {
+        child?.kill()
+      } catch {
+        // A failed kill still needs an observed close or a bounded failure.
+      }
+      abortTimer = setTimeout(() => {
+        try {
+          child?.kill('SIGKILL')
+        } catch {
+          // The process may already be gone; keep waiting for its close event.
+        }
+        killTimer = setTimeout(() => {
+          output += '\nInstaller did not exit after SIGKILL.'
+          finish(null, new InstallerExitObservationError(output))
+        }, 2000)
+        killTimer.unref?.()
+      }, 2000)
+      abortTimer.unref?.()
+    }
+    const cancel = (): void => {
+      if (settled || terminating) return
+      output += '\nInstaller cancelled.'
+      terminate()
+    }
     try {
       child = spawn(file, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     } catch (cause) {
@@ -742,14 +890,10 @@ async function runInstaller(
       finish(null)
       return
     }
-    const timer = setTimeout(() => {
-      try {
-        child.kill()
-      } catch {
-        // The process may already be gone.
-      }
+    timer = setTimeout(() => {
       output += '\nInstaller timed out.'
-      finish(null)
+      timedOut = true
+      terminate()
     }, options.timeoutMs)
     child.stdout?.on('data', (chunk: Buffer | string) => {
       output += chunk.toString()
@@ -758,14 +902,17 @@ async function runInstaller(
       output += chunk.toString()
     })
     child.on('error', (error) => {
-      clearTimeout(timer)
-      output += error.message
-      finish(null)
+      // Spawn failures are normally followed by close. Other child errors do
+      // not prove the process exited, so retain ownership until close or the
+      // bounded termination path reports an observation failure.
+      output += `\n${error.message}`
     })
     child.on('close', (code) => {
-      clearTimeout(timer)
-      finish(code)
+      if (timedOut) finish(null, new InstallerTimeoutError(output))
+      else finish(code)
     })
+    options.signal?.addEventListener('abort', cancel, { once: true })
+    if (options.signal?.aborted) cancel()
   })
 }
 
@@ -802,14 +949,42 @@ function startDetached(file: string, args: string[]): Promise<string | null> {
   })
 }
 
+function runtimeDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+    const done = (): void => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, delayMs)
+    signal?.addEventListener('abort', done, { once: true })
+    if (signal?.aborted) done()
+  })
+}
+
 /** Wait for the Ollama API to answer; returns its version or null. */
-async function waitForOllama(options: RuntimeOptions, attempts: number, delayMs: number): Promise<string | null> {
+async function waitForOllama(options: RuntimeInstallOptions, attempts: number, delayMs: number): Promise<string | null> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (options.signal?.aborted) return null
     const payload = await tryJson('http://127.0.0.1:11434/api/version', options)
+    if (options.signal?.aborted) return null
     if (payload && typeof payload === 'object' && 'version' in payload) {
       return String((payload as { version: unknown }).version)
     }
-    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer)
+        options.signal?.removeEventListener('abort', done)
+        resolve()
+      }
+      const timer = setTimeout(done, delayMs)
+      options.signal?.addEventListener('abort', done, { once: true })
+      if (options.signal?.aborted) done()
+    })
   }
   return null
 }
@@ -828,142 +1003,172 @@ export async function installOllama(options: RuntimeInstallOptions = {}): Promis
   const tempRoot = options.tempDir ?? path.join(os.tmpdir(), 'toolbox-mcp-install')
   const steps: string[] = []
   let log = ''
-
-  const before = await probeRuntimeCli(runtimeDescriptor('ollama') as RuntimeDescriptor, options)
-  const action: RuntimeInstallResult['action'] = before.installed ? 'updated' : 'installed'
+  let beforeVersion: string | null = null
+  const cancelled = (): RuntimeInstallResult => ({
+    ok: false,
+    id: 'ollama',
+    action: 'failed',
+    version: beforeVersion,
+    message: 'Ollama installation was cancelled.',
+    steps,
+    log
+  })
 
   try {
-    if (platform === 'win32') {
-      const target = path.join(tempRoot, 'OllamaSetup.exe')
-      steps.push(`Download ${OLLAMA_WINDOWS_INSTALLER}`)
-      await download(OLLAMA_WINDOWS_INSTALLER, target)
-      steps.push(`Run the installer silently (${OLLAMA_SILENT_ARGS.join(' ')})`)
-      const result = await installer(target, OLLAMA_SILENT_ARGS, { timeoutMs: 15 * 60 * 1000 })
-      log = result.output
-      if (result.code !== 0) {
-        return {
-          ok: false,
-          id: 'ollama',
-          action: 'failed',
-          version: before.version,
-          message: `The Ollama installer exited with code ${result.code}.`,
-          steps,
-          log
+    if (options.signal?.aborted) return cancelled()
+    const before = await probeRuntimeCli(runtimeDescriptor('ollama') as RuntimeDescriptor, options)
+    beforeVersion = before.version
+    const action: RuntimeInstallResult['action'] = before.installed ? 'updated' : 'installed'
+    if (options.signal?.aborted) return cancelled()
+
+    try {
+      if (platform === 'win32') {
+        const target = path.join(tempRoot, 'OllamaSetup.exe')
+        steps.push(`Download ${OLLAMA_WINDOWS_INSTALLER}`)
+        await download(OLLAMA_WINDOWS_INSTALLER, target, undefined, options.signal)
+        if (options.signal?.aborted) return cancelled()
+        steps.push(`Run the installer silently (${OLLAMA_SILENT_ARGS.join(' ')})`)
+        const result = await installer(target, OLLAMA_SILENT_ARGS, { timeoutMs: 15 * 60 * 1000, signal: options.signal })
+        log = result.output
+        if (options.signal?.aborted) return cancelled()
+        if (result.code !== 0) {
+          return {
+            ok: false,
+            id: 'ollama',
+            action: 'failed',
+            version: before.version,
+            message: `The Ollama installer exited with code ${result.code}.`,
+            steps,
+            log
+          }
+        }
+      } else if (platform === 'darwin') {
+        const target = path.join(tempRoot, 'Ollama-darwin.zip')
+        steps.push(`Download ${OLLAMA_MACOS_APP}`)
+        await download(OLLAMA_MACOS_APP, target, undefined, options.signal)
+        if (options.signal?.aborted) return cancelled()
+        const appDir = path.join(home, 'Applications')
+        steps.push('Unpack the app into ~/Applications')
+        await mkdir(appDir, { recursive: true })
+        const unpack = await installer('/usr/bin/unzip', ['-q', '-o', target, '-d', appDir], { timeoutMs: 10 * 60 * 1000, signal: options.signal })
+        log = unpack.output
+        if (options.signal?.aborted) return cancelled()
+        if (unpack.code !== 0) {
+          return {
+            ok: false,
+            id: 'ollama',
+            action: 'failed',
+            version: before.version,
+            message: 'Could not unpack the Ollama app.',
+            steps,
+            log
+          }
+        }
+      } else {
+        const target = path.join(tempRoot, 'install.sh')
+        steps.push(`Download ${OLLAMA_LINUX_SCRIPT}`)
+        await download(OLLAMA_LINUX_SCRIPT, target, undefined, options.signal)
+        if (options.signal?.aborted) return cancelled()
+        steps.push('Run the official install script (it may ask for sudo)')
+        const result = await installer('/bin/sh', [target], { timeoutMs: 15 * 60 * 1000, signal: options.signal })
+        log = result.output
+        if (options.signal?.aborted) return cancelled()
+        if (result.code !== 0) {
+          return {
+            ok: false,
+            id: 'ollama',
+            action: 'failed',
+            version: before.version,
+            message: `The Ollama install script exited with code ${result.code}.`,
+            steps,
+            log
+          }
         }
       }
-    } else if (platform === 'darwin') {
-      const target = path.join(tempRoot, 'Ollama-darwin.zip')
-      steps.push(`Download ${OLLAMA_MACOS_APP}`)
-      await download(OLLAMA_MACOS_APP, target)
-      const appDir = path.join(home, 'Applications')
-      steps.push('Unpack the app into ~/Applications')
-      await mkdir(appDir, { recursive: true })
-      const unpack = await installer('/usr/bin/unzip', ['-q', '-o', target, '-d', appDir], { timeoutMs: 10 * 60 * 1000 })
-      log = unpack.output
-      if (unpack.code !== 0) {
-        return {
-          ok: false,
-          id: 'ollama',
-          action: 'failed',
-          version: before.version,
-          message: 'Could not unpack the Ollama app.',
-          steps,
-          log
-        }
+    } catch (cause) {
+      if (options.signal?.aborted) {
+        if (cause instanceof InstallerExitObservationError) throw cause
+        return cancelled()
       }
-    } else {
-      const target = path.join(tempRoot, 'install.sh')
-      steps.push(`Download ${OLLAMA_LINUX_SCRIPT}`)
-      await download(OLLAMA_LINUX_SCRIPT, target)
-      steps.push('Run the official install script (it may ask for sudo)')
-      const result = await installer('/bin/sh', [target], { timeoutMs: 15 * 60 * 1000 })
-      log = result.output
-      if (result.code !== 0) {
-        return {
-          ok: false,
-          id: 'ollama',
-          action: 'failed',
-          version: before.version,
-          message: `The Ollama install script exited with code ${result.code}.`,
-          steps,
-          log
-        }
+      return {
+        ok: false,
+        id: 'ollama',
+        action: 'failed',
+        version: before.version,
+        message: cause instanceof Error ? cause.message : String(cause),
+        steps,
+        log: [log, cause instanceof InstallerExitObservationError ? cause.output : ''].filter(Boolean).join('\n')
       }
     }
-  } catch (cause) {
+
+    // The installer may have replaced the binary in place; find it again.
+    const cliPath =
+      platform === 'win32'
+        ? path.join(env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local'), 'Programs', 'Ollama', 'ollama.exe')
+        : '/usr/local/bin/ollama'
+    const cliOptions: RuntimeOptions = { ...options }
+    const after = await probeRuntimeCli(runtimeDescriptor('ollama') as RuntimeDescriptor, cliOptions)
+    if (options.signal?.aborted) return cancelled()
+
+    // Make sure something is actually serving on 11434. A working CLI alone
+    // does not mean the background server is available to Model Farm clients.
+    let serving = await waitForOllama(options, options.serveAttempts ?? 3, options.serveDelayMs ?? 1000)
+    if (options.signal?.aborted) return cancelled()
+    let launchError: string | null = null
+    if (!serving && (after.installed || existsSync(cliPath))) {
+      if (options.signal?.aborted) return cancelled()
+      const binary = existsSync(cliPath) ? cliPath : 'ollama'
+      const launch = options.startServer ?? startDetached
+      steps.push('Start the Ollama server')
+      try {
+        const result = await launch(binary, ['serve'])
+        launchError = typeof result === 'string' ? result : null
+      } catch (cause) {
+        launchError = processErrorText(cause)
+      }
+      if (options.signal?.aborted) return cancelled()
+      if (!launchError) {
+        serving = await waitForOllama(options, options.serveAttempts ?? 20, options.serveDelayMs ?? 1500)
+        if (options.signal?.aborted) return cancelled()
+      }
+    }
+
+    const version = serving ?? after.version
+    if (!version) {
+      const detail = launchError ? ` Server launch failed: ${launchError}.` : ''
+      return {
+        ok: false,
+        id: 'ollama',
+        action: after.installed ? action : 'failed',
+        version: null,
+        message: `Ollama was installed but did not report a version.${detail} Open Ollama and try again.`,
+        steps,
+        log: [log, launchError ? `Server launch failed: ${launchError}` : ''].filter(Boolean).join('\n')
+      }
+    }
+    if (!serving) {
+      const detail = launchError ? ` Could not start the server: ${launchError}.` : ''
+      return {
+        ok: false,
+        id: 'ollama',
+        action: after.installed ? action : 'failed',
+        version: after.version,
+        message: `Ollama ${after.version} is installed, but its server did not answer on http://127.0.0.1:11434.${detail} Open Ollama and try again.`,
+        steps,
+        log: [log, launchError ? `Server launch failed: ${launchError}` : ''].filter(Boolean).join('\n')
+      }
+    }
     return {
-      ok: false,
+      ok: true,
       id: 'ollama',
-      action: 'failed',
-      version: before.version,
-      message: cause instanceof Error ? cause.message : String(cause),
+      action,
+      version: serving,
+      message: `Ollama ${serving} is installed and serving on http://127.0.0.1:11434.`,
       steps,
       log
     }
-  }
-
-  // The installer may have replaced the binary in place; find it again.
-  const cliPath =
-    platform === 'win32'
-      ? path.join(env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local'), 'Programs', 'Ollama', 'ollama.exe')
-      : '/usr/local/bin/ollama'
-  const cliOptions: RuntimeOptions = { ...options }
-  const after = await probeRuntimeCli(runtimeDescriptor('ollama') as RuntimeDescriptor, cliOptions)
-
-  // Make sure something is actually serving on 11434. A working CLI alone
-  // does not mean the background server is available to Model Farm clients.
-  let serving = await waitForOllama(options, options.serveAttempts ?? 3, options.serveDelayMs ?? 1000)
-  let launchError: string | null = null
-  if (!serving && (after.installed || existsSync(cliPath))) {
-    const binary = existsSync(cliPath) ? cliPath : 'ollama'
-    const launch = options.startServer ?? startDetached
-    steps.push('Start the Ollama server')
-    try {
-      const result = await launch(binary, ['serve'])
-      launchError = typeof result === 'string' ? result : null
-    } catch (cause) {
-      launchError = processErrorText(cause)
-    }
-    if (!launchError) {
-      serving = await waitForOllama(options, options.serveAttempts ?? 20, options.serveDelayMs ?? 1500)
-    }
-  }
-
-  const version = serving ?? after.version
-  if (!version) {
-    const detail = launchError ? ` Server launch failed: ${launchError}.` : ''
-    return {
-      ok: false,
-      id: 'ollama',
-      action: after.installed ? action : 'failed',
-      version: null,
-      message: `Ollama was installed but did not report a version.${detail} Open Ollama and try again.`,
-      steps,
-      log: [log, launchError ? `Server launch failed: ${launchError}` : ''].filter(Boolean).join('\n')
-    }
-  }
-
-  await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
-  if (!serving) {
-    const detail = launchError ? ` Could not start the server: ${launchError}.` : ''
-    return {
-      ok: false,
-      id: 'ollama',
-      action: after.installed ? action : 'failed',
-      version: after.version,
-      message: `Ollama ${after.version} is installed, but its server did not answer on http://127.0.0.1:11434.${detail} Open Ollama and try again.`,
-      steps,
-      log: [log, launchError ? `Server launch failed: ${launchError}` : ''].filter(Boolean).join('\n')
-    }
-  }
-  return {
-    ok: true,
-    id: 'ollama',
-    action,
-    version: serving,
-    message: `Ollama ${serving} is installed and serving on http://127.0.0.1:11434.`,
-    steps,
-    log
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -986,17 +1191,23 @@ export async function resolveGgufFile(
   quant?: string | null,
   options: RuntimeOptions = {}
 ): Promise<GgufFile | null> {
+  options.signal?.throwIfAborted()
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as RuntimeFetch)
   const url = `https://huggingface.co/api/models/${repoId
     .split('/')
     .map(encodeURIComponent)
     .join('/')}?blobs=true`
+  const timeout = AbortSignal.timeout(15000)
+  const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout
   let detail: { siblings?: Array<{ rfilename: string; size?: number; lfs?: { size?: number } }> }
   try {
-    const response = await fetchImpl(url, { signal: AbortSignal.timeout(15000) })
+    const response = await fetchImpl(url, { signal })
+    options.signal?.throwIfAborted()
     if (!response.ok) return null
     detail = (await response.json()) as typeof detail
-  } catch {
+    options.signal?.throwIfAborted()
+  } catch (cause) {
+    if (options.signal?.aborted) throw options.signal.reason
     return null
   }
   const files = (detail.siblings ?? []).filter((file) => file.rfilename.toLowerCase().endsWith('.gguf'))
@@ -1137,8 +1348,16 @@ export async function startServerRuntime(
   }
   const command = serverLaunchCommand(descriptor, modelPath, options.tokenizer)
   const what = path.basename(modelPath)
+  const cancelled = (): ServerStartResult => ({
+    ok: false,
+    baseUrl: null,
+    message: `${descriptor.label} startup was cancelled.`,
+    steps: [],
+    log: ''
+  })
 
   const busy = await probePort(descriptor.port, options)
+  if (options.signal?.aborted) return cancelled()
   if (busy) {
     if (busy.models.some((model) => modelKey(model.name) === modelKey(modelPath))) {
       return {
@@ -1169,6 +1388,7 @@ export async function startServerRuntime(
   } catch (cause) {
     launchError = processErrorText(cause)
   }
+  if (options.signal?.aborted) return cancelled()
   if (launchError) {
     return {
       ok: false,
@@ -1181,8 +1401,10 @@ export async function startServerRuntime(
   const attempts = options.startAttempts ?? 25
   const delayMs = options.startDelayMs ?? 1000
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    await runtimeDelay(delayMs, options.signal)
+    if (options.signal?.aborted) return cancelled()
     const probe = await probePort(descriptor.port, options)
+    if (options.signal?.aborted) return cancelled()
     if (probe) {
       // A neighbour that grabbed the port first is not our server.
       if (probe.identity && probe.identity !== descriptor.id) {

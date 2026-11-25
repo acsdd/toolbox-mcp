@@ -35,15 +35,15 @@ no Node.js and no administrator rights.
 
 | Build | What it is | Size |
 | --- | --- | --- |
-| [`ModelFarm-Setup-0.9.25.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.25/ModelFarm-Setup-0.9.25.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
-| [`ModelFarm-Portable-0.9.25.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.25/ModelFarm-Portable-0.9.25.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
+| [`ModelFarm-Setup-0.9.26.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.26/ModelFarm-Setup-0.9.26.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
+| [`ModelFarm-Portable-0.9.26.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.26/ModelFarm-Portable-0.9.26.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
 
 Install, update, roll back and uninstall are described in
 [docs/install.md](docs/install.md). Older builds are on the
 [releases page](https://github.com/acsdd/toolbox-mcp/releases). The binaries are
 not code-signed, so Windows SmartScreen shows an "unverified publisher" warning
 on first start. Each release ships
-[`SHA256SUMS.txt`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.25/SHA256SUMS.txt)
+[`SHA256SUMS.txt`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.26/SHA256SUMS.txt)
 so a download can be checked with `sha256sum -c SHA256SUMS.txt`.
 
 Part of the Toolbox family:
@@ -332,7 +332,7 @@ present with its dependencies installed.
 
 ```bash
 npm install
-npm run portable      # → dist/ModelFarm-Portable-0.9.25.exe + dist/ModelFarm-Setup-0.9.25.exe
+npm run portable      # → dist/ModelFarm-Portable-0.9.26.exe + dist/ModelFarm-Setup-0.9.26.exe
 ```
 
 Smoke-test the packaged app before shipping it — point the script at the
@@ -367,11 +367,11 @@ the widget core repo, so **the widget core has to be published first**:
 ```bash
 npm run portable
 npm run release:notes -- --to HEAD --out release-notes.md
-git tag v0.9.25
+git tag v0.9.26
 git push origin main --tags
-gh release create v0.9.25 \
-  dist/ModelFarm-Portable-0.9.25.exe dist/ModelFarm-Setup-0.9.25.exe dist/SHA256SUMS.txt \
-  --title "Model Farm 0.9.25" --notes-file docs/release-notes-0.9.25.md
+gh release create v0.9.26 \
+  dist/ModelFarm-Portable-0.9.26.exe dist/ModelFarm-Setup-0.9.26.exe dist/SHA256SUMS.txt \
+  --title "Model Farm 0.9.26" --notes-file docs/release-notes-0.9.26.md
 ```
 
 `npm run portable` writes `dist/SHA256SUMS.txt` itself, so the checksum file in

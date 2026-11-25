@@ -362,6 +362,143 @@ describe('detection', () => {
     assert.equal(missing.version, null)
   })
 
+  it('cancels an owned CLI probe and waits for its observed close', async () => {
+    const descriptor = runtimeDescriptor('ollama')
+    assert.ok(descriptor)
+    const controller = new AbortController()
+    const signals: Array<NodeJS.Signals | undefined> = []
+    const child = Object.assign(new EventEmitter(), {
+      kill(signal?: NodeJS.Signals) {
+        signals.push(signal)
+        return true
+      }
+    })
+    let finish!: (error: Error | null, stdout: string, stderr: string) => void
+    const probing = probeRuntimeCli(descriptor, {
+      signal: controller.signal,
+      timeoutMs: 1000,
+      execFileImpl: (_file, _args, _options, callback) => {
+        finish = callback
+        return child as never
+      }
+    })
+
+    controller.abort(new Error('shutdown'))
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      assert.deepEqual(signals, [undefined], 'shutdown must terminate the probe child')
+    } finally {
+      child.emit('close', null, 'SIGTERM')
+      finish(new Error('probe aborted'), '', '')
+    }
+    assert.deepEqual(await probing, { installed: false, version: null, path: null })
+  })
+
+  it('owns a CLI child returned after cancellation starts', async () => {
+    const descriptor = runtimeDescriptor('ollama')
+    assert.ok(descriptor)
+    const controller = new AbortController()
+    const signals: Array<NodeJS.Signals | undefined> = []
+    const child = Object.assign(new EventEmitter(), {
+      kill(signal?: NodeJS.Signals) {
+        signals.push(signal)
+        return true
+      }
+    })
+    const probing = probeRuntimeCli(descriptor, {
+      signal: controller.signal,
+      execFileImpl: () => {
+        controller.abort(new Error('shutdown'))
+        return child as never
+      }
+    })
+    void probing.catch(() => {})
+
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.deepEqual(signals, [undefined], 'a late child handle must still be terminated')
+    child.emit('close', null, 'SIGTERM')
+    assert.deepEqual(await probing, { installed: false, version: null, path: null })
+  })
+
+  it('force-kills an aborted CLI probe and waits for its observed close', { timeout: 2000 }, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const descriptor = runtimeDescriptor('ollama')
+    assert.ok(descriptor)
+    const controller = new AbortController()
+    const signals: Array<NodeJS.Signals | undefined> = []
+    let settled = false
+    const child = Object.assign(new EventEmitter(), {
+      kill(signal?: NodeJS.Signals) {
+        signals.push(signal)
+        return true
+      }
+    })
+    const probing = probeRuntimeCli(descriptor, {
+      signal: controller.signal,
+      execFileImpl: () => child as never
+    })
+    void probing.then(() => { settled = true }, () => { settled = true })
+
+    controller.abort(new Error('shutdown'))
+    t.mock.timers.tick(2000)
+    await Promise.resolve()
+    assert.deepEqual(signals, [undefined, 'SIGKILL'])
+    assert.equal(settled, false, 'sending SIGKILL is not evidence that the CLI exited')
+
+    child.emit('close', null, 'SIGKILL')
+    assert.deepEqual(await probing, { installed: false, version: null, path: null })
+  })
+
+  it('reports a bounded failure when a force-killed CLI probe never closes', { timeout: 2000 }, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const descriptor = runtimeDescriptor('ollama')
+    assert.ok(descriptor)
+    const controller = new AbortController()
+    const signals: Array<NodeJS.Signals | undefined> = []
+    const child = Object.assign(new EventEmitter(), {
+      kill(signal?: NodeJS.Signals) {
+        signals.push(signal)
+        return true
+      }
+    })
+    const probing = probeRuntimeCli(descriptor, {
+      signal: controller.signal,
+      execFileImpl: () => child as never
+    })
+    void probing.catch(() => {})
+
+    controller.abort(new Error('shutdown'))
+    t.mock.timers.tick(2000)
+    t.mock.timers.tick(2000)
+    await assert.rejects(probing, (error: unknown) => {
+      assert.ok(error instanceof Error)
+      assert.equal(error.name, 'RuntimeCliExitObservationError')
+      assert.match(error.message, /did not exit after SIGKILL/i)
+      return true
+    })
+    assert.deepEqual(signals, [undefined, 'SIGKILL'])
+  })
+
+  it('stops launching CLI probes when shutdown starts during detection', async () => {
+    const controller = new AbortController()
+    let cliProbes = 0
+    const report = await detectRuntimes({
+      active: null,
+      env: {},
+      homeDir: '/home/vrm',
+      fetchImpl: tableFetch({}),
+      signal: controller.signal,
+      execFileImpl: (_file, _args, _options, callback) => {
+        cliProbes++
+        callback(new Error('not found'), '', '')
+        if (cliProbes === 1) controller.abort(new Error('shutdown'))
+      }
+    })
+
+    assert.equal(cliProbes, 1, 'detection must not start another CLI after cancellation')
+    assert.equal(report.runtimes.length, 0, 'cancelled detection must not publish a partial report')
+  })
+
   it('reads a version that a runtime prints on stderr', async () => {
     const descriptor = runtimeDescriptor('llamacpp')
     assert.ok(descriptor)
@@ -523,6 +660,30 @@ describe('starting a server runtime', () => {
     assert.match(result.message, /could not start|failed to start/i)
   })
 
+  it('stops readiness polling when shutdown aborts the launch delay', async () => {
+    const llamacpp = runtimeDescriptor('llamacpp')
+    assert.ok(llamacpp)
+    const controller = new AbortController()
+    let probes = 0
+    const result = await startServerRuntime(llamacpp, '/models/model.gguf', {
+      signal: controller.signal,
+      fetchImpl: async () => {
+        probes += 1
+        return { ok: false, status: 503, json: async () => ({}), text: async () => '' }
+      },
+      launchImpl: () => {
+        controller.abort()
+        return null
+      },
+      startAttempts: 1,
+      startDelayMs: 20
+    })
+
+    assert.equal(result.ok, false)
+    assert.match(result.message, /cancelled/i)
+    assert.equal(probes, 3, 'shutdown must prevent probes after the readiness delay')
+  })
+
   it('consumes asynchronous detached spawn errors and reports them', async (t) => {
     const child = fakeDetachedSpawn(t)
     const llamacpp = runtimeDescriptor('llamacpp')
@@ -624,6 +785,398 @@ describe('installing Ollama', () => {
     // No Ollama on the test machine means no version could be confirmed.
     assert.equal(result.ok, false)
     assert.equal(result.action, 'failed')
+  })
+
+  it('cancels an in-progress installer download and removes staged files', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'toolbox-mcp-install-cancel-'))
+    const controller = new AbortController()
+    let notifyStarted!: () => void
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve })
+    let receivedSignal: AbortSignal | undefined
+    let installerRuns = 0
+    const target = join(tempRoot, 'OllamaSetup.exe')
+
+    try {
+      const installing = installOllama({
+        platform: 'win32',
+        tempDir: tempRoot,
+        signal: controller.signal,
+        env: {},
+        homeDir: tempRoot,
+        execFileImpl: (_file, _args, _options, cb) => cb(new Error('not found'), '', ''),
+        fetchImpl: tableFetch({}),
+        download: async (_url, file, _progress, signal) => {
+          receivedSignal = signal
+          await mkdir(tempRoot, { recursive: true })
+          await writeFile(file, 'partial installer')
+          notifyStarted()
+          if (!signal) return 11
+          await new Promise<number>((_resolve, reject) => {
+            if (signal.aborted) reject(signal.reason)
+            else signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+          })
+          return 11
+        },
+        runInstaller: async () => {
+          installerRuns += 1
+          return { code: 3, output: 'must not run' }
+        }
+      } as Parameters<typeof installOllama>[0] & { signal?: AbortSignal })
+
+      await started
+      controller.abort()
+      const result = await installing
+
+      assert.equal(result.ok, false)
+      assert.equal(result.action, 'failed')
+      assert.equal(receivedSignal, controller.signal)
+      assert.equal(installerRuns, 0)
+      await assert.rejects(() => stat(target))
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('does not launch a detached server after shutdown aborts installation', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'toolbox-mcp-install-abort-'))
+    const controller = new AbortController()
+    let probes = 0
+    let serverLaunches = 0
+    const target = join(tempRoot, 'OllamaSetup.exe')
+
+    try {
+      const result = await installOllama({
+        platform: 'win32',
+        tempDir: tempRoot,
+        signal: controller.signal,
+        env: {},
+        homeDir: tempRoot,
+        execFileImpl: (_file, _args, _options, cb) => {
+          probes += 1
+          cb(probes === 1 ? new Error('not found') : null, 'ollama version 0.12.3', '')
+        },
+        fetchImpl: tableFetch({}),
+        download: async (_url, file) => {
+          await mkdir(tempRoot, { recursive: true })
+          await writeFile(file, 'installer')
+          return 8
+        },
+        runInstaller: async () => {
+          controller.abort()
+          return { code: 0, output: 'installed' }
+        },
+        startServer: async () => {
+          serverLaunches += 1
+          return 'spawn failed'
+        },
+        serveAttempts: 1,
+        serveDelayMs: 0
+      } as Parameters<typeof installOllama>[0] & { signal?: AbortSignal })
+
+      assert.equal(result.ok, false)
+      assert.equal(result.action, 'failed')
+      assert.equal(probes, 1)
+      assert.equal(serverLaunches, 0)
+      await assert.rejects(() => stat(target))
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('cancels an in-flight readiness probe without launching a server', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'toolbox-mcp-install-probe-'))
+    const controller = new AbortController()
+    let probes = 0
+    let readinessSignal: AbortSignal | undefined
+    let serverLaunches = 0
+    const notServing: RuntimeFetchResponse = {
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+      text: async () => ''
+    }
+
+    try {
+      const result = await installOllama({
+        platform: 'win32',
+        tempDir: tempRoot,
+        signal: controller.signal,
+        timeoutMs: 20,
+        env: {},
+        homeDir: tempRoot,
+        execFileImpl: (_file, _args, _options, cb) => {
+          probes += 1
+          cb(probes === 1 ? new Error('not found') : null, 'ollama version 0.12.3', '')
+        },
+        fetchImpl: async (_url, init) => {
+          readinessSignal = init?.signal ?? undefined
+          controller.abort()
+          if (readinessSignal?.aborted) throw readinessSignal.reason
+          await new Promise<void>((_resolve, reject) => {
+            readinessSignal?.addEventListener('abort', () => reject(readinessSignal?.reason), { once: true })
+          })
+          return notServing
+        },
+        download: async (_url, file) => {
+          await mkdir(tempRoot, { recursive: true })
+          await writeFile(file, 'installer')
+          return 8
+        },
+        runInstaller: async () => ({ code: 0, output: 'installed' }),
+        startServer: async () => {
+          serverLaunches += 1
+          return 'must not launch'
+        },
+        serveAttempts: 1,
+        serveDelayMs: 0
+      } as Parameters<typeof installOllama>[0] & { signal?: AbortSignal })
+
+      assert.equal(result.ok, false)
+      assert.equal(result.action, 'failed')
+      assert.equal(readinessSignal?.aborted, true)
+      assert.equal(serverLaunches, 0)
+      await assert.rejects(() => stat(join(tempRoot, 'OllamaSetup.exe')))
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('kills an owned installer process when shutdown aborts it', async (t) => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'toolbox-mcp-install-child-'))
+    const controller = new AbortController()
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      killed: false,
+      kill() {
+        this.killed = true
+        queueMicrotask(() => child.emit('close', null))
+        return true
+      }
+    })
+    const spawnMock = mock.method(childProcess, 'spawn', (() => {
+      controller.abort()
+      queueMicrotask(() => child.emit('close', 0))
+      return child
+    }) as never)
+    syncBuiltinESMExports()
+    t.after(() => {
+      spawnMock.mock.restore()
+      syncBuiltinESMExports()
+    })
+    let serverLaunches = 0
+
+    try {
+      const result = await installOllama({
+        platform: 'win32',
+        tempDir: tempRoot,
+        signal: controller.signal,
+        env: {},
+        homeDir: tempRoot,
+        execFileImpl: (_file, _args, _options, cb) => cb(new Error('not found'), '', ''),
+        fetchImpl: tableFetch({}),
+        download: async (_url, file) => {
+          await mkdir(tempRoot, { recursive: true })
+          await writeFile(file, 'installer')
+          return 8
+        },
+        startServer: async () => {
+          serverLaunches += 1
+          return 'must not launch'
+        },
+        serveAttempts: 1,
+        serveDelayMs: 0
+      } as Parameters<typeof installOllama>[0] & { signal?: AbortSignal })
+
+      assert.equal(result.ok, false)
+      assert.equal(result.action, 'failed')
+      assert.equal(child.killed, true)
+      assert.equal(serverLaunches, 0)
+      await assert.rejects(() => stat(join(tempRoot, 'OllamaSetup.exe')))
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('does not report success when a timed-out installer later exits zero', { timeout: 5000 }, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const tempRoot = await mkdtemp(join(tmpdir(), 'toolbox-mcp-install-timeout-'))
+    const signals: Array<NodeJS.Signals | undefined> = []
+    let notifyStarted!: () => void
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve })
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill(signal?: NodeJS.Signals) {
+        signals.push(signal)
+        return true
+      }
+    })
+    const spawnMock = mock.method(childProcess, 'spawn', (() => {
+      notifyStarted()
+      return child
+    }) as never)
+    syncBuiltinESMExports()
+    t.after(() => {
+      spawnMock.mock.restore()
+      syncBuiltinESMExports()
+    })
+    let serverLaunches = 0
+
+    try {
+      const installing = installOllama({
+        platform: 'win32',
+        tempDir: tempRoot,
+        env: {},
+        homeDir: tempRoot,
+        execFileImpl: (_file, _args, _options, cb) => cb(new Error('not found'), '', ''),
+        fetchImpl: tableFetch({
+          'http://127.0.0.1:11434/api/version': { version: '0.12.3' }
+        }),
+        download: async (_url, file) => {
+          await mkdir(tempRoot, { recursive: true })
+          await writeFile(file, 'installer')
+          return 8
+        },
+        startServer: async () => {
+          serverLaunches += 1
+          return 'must not launch'
+        },
+        serveAttempts: 1,
+        serveDelayMs: 0
+      })
+      await started
+      t.mock.timers.tick(15 * 60 * 1000)
+      assert.deepEqual(signals, [undefined])
+      child.emit('close', 0)
+      const result = await installing
+
+      assert.equal(result.ok, false)
+      assert.equal(result.action, 'failed')
+      assert.match(result.message, /timed out/i)
+      assert.equal(serverLaunches, 0)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('waits for an aborted installer to close after force-kill', { timeout: 2000 }, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const tempRoot = await mkdtemp(join(tmpdir(), 'toolbox-mcp-install-observe-'))
+    const controller = new AbortController()
+    const signals: Array<NodeJS.Signals | undefined> = []
+    let notifyStarted!: () => void
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve })
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill(signal?: NodeJS.Signals) {
+        signals.push(signal)
+        return true
+      }
+    })
+    const spawnMock = mock.method(childProcess, 'spawn', (() => {
+      notifyStarted()
+      return child
+    }) as never)
+    syncBuiltinESMExports()
+    t.after(() => {
+      spawnMock.mock.restore()
+      syncBuiltinESMExports()
+    })
+
+    try {
+      let settled = false
+      const installing = installOllama({
+        platform: 'win32',
+        tempDir: tempRoot,
+        signal: controller.signal,
+        env: {},
+        homeDir: tempRoot,
+        execFileImpl: (_file, _args, _options, cb) => cb(new Error('not found'), '', ''),
+        fetchImpl: tableFetch({}),
+        download: async (_url, file) => {
+          await mkdir(tempRoot, { recursive: true })
+          await writeFile(file, 'installer')
+          return 8
+        },
+        startServer: async () => 'must not launch',
+        serveAttempts: 1,
+        serveDelayMs: 0
+      } as Parameters<typeof installOllama>[0] & { signal?: AbortSignal })
+      void installing.then(() => { settled = true }, () => { settled = true })
+      await started
+      controller.abort()
+      t.mock.timers.tick(2000)
+      const waitDeadline = Date.now() + 250
+      await new Promise<void>((resolve) => {
+        const check = (): void => {
+          if (settled || Date.now() >= waitDeadline) resolve()
+          else setImmediate(check)
+        }
+        check()
+      })
+
+      assert.deepEqual(signals, [undefined, 'SIGKILL'])
+      assert.equal(settled, false, 'sending SIGKILL is not evidence that the installer exited')
+      child.emit('close', null)
+      const result = await installing
+      assert.equal(result.action, 'failed')
+      assert.match(result.message, /cancelled/i)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('reports a bounded failure when a force-killed installer never closes', { timeout: 5000 }, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const tempRoot = await mkdtemp(join(tmpdir(), 'toolbox-mcp-install-stuck-'))
+    const controller = new AbortController()
+    let notifyStarted!: () => void
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve })
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill() { return true }
+    })
+    const spawnMock = mock.method(childProcess, 'spawn', (() => {
+      notifyStarted()
+      return child
+    }) as never)
+    syncBuiltinESMExports()
+    t.after(() => {
+      spawnMock.mock.restore()
+      syncBuiltinESMExports()
+    })
+
+    try {
+      const installing = installOllama({
+        platform: 'win32',
+        tempDir: tempRoot,
+        signal: controller.signal,
+        env: {},
+        homeDir: tempRoot,
+        execFileImpl: (_file, _args, _options, cb) => cb(new Error('not found'), '', ''),
+        fetchImpl: tableFetch({}),
+        download: async (_url, file) => {
+          await mkdir(tempRoot, { recursive: true })
+          await writeFile(file, 'installer')
+          return 8
+        }
+      } as Parameters<typeof installOllama>[0] & { signal?: AbortSignal })
+      await started
+      controller.abort()
+      t.mock.timers.tick(2000)
+      t.mock.timers.tick(2000)
+      await assert.rejects(installing, (error: unknown) => {
+        assert.ok(error instanceof Error)
+        assert.equal(error.name, 'InstallerExitObservationError')
+        assert.match(error.message, /did not exit after SIGKILL/i)
+        return true
+      })
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
   })
 
   it('reports the exit code of a failing installer', async () => {
@@ -774,6 +1327,37 @@ describe('installing Ollama', () => {
 })
 
 describe('weights for a runtime that cannot pull', () => {
+  it('cancels GGUF metadata resolution with the supplied shutdown signal', async () => {
+    const controller = new AbortController()
+    let requestSignal: AbortSignal | undefined
+    let release!: (response: RuntimeFetchResponse) => void
+    const resolving = resolveGgufFile('owner/repo', 'Q4_K_M', {
+      signal: controller.signal,
+      fetchImpl: async (_url, init) => {
+        const signal = init?.signal ?? undefined
+        requestSignal = signal
+        return new Promise<RuntimeFetchResponse>((resolve, reject) => {
+          release = resolve
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      }
+    })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    controller.abort(new Error('shutdown'))
+
+    try {
+      const outcome = await Promise.race([
+        resolving.then(() => 'resolved', (error: unknown) => `rejected: ${String(error)}`),
+        new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 50))
+      ])
+      assert.match(outcome, /rejected:.*shutdown/)
+      assert.equal(requestSignal?.aborted, true)
+    } finally {
+      release({ ok: true, status: 200, json: async () => ({ siblings: [] }), text: async () => '' })
+      await resolving.catch(() => {})
+    }
+  })
+
   it('finds the GGUF file of a repo', async () => {
     const file = await resolveGgufFile('bartowski/Llama-3.2-3B-Instruct-GGUF', 'Q4_K_M', {
       fetchImpl: tableFetch({

@@ -125,15 +125,16 @@ require(path.join(appRoot, 'scripts/desktop.cjs')).then(async (window) => {
   fs.writeFileSync(path.join(docs, 'panel-overview.png'), (await window.webContents.capturePage()).toPNG())
   console.log(JSON.stringify({ ok: true, port: new URL(origin).port, scorecardRows: rendered.rows, sandbox: true, overviewTools: overview.tools, screenshot }))
   clearTimeout(watchdog)
-  // Closing the last window must close the owned HTTP listener too.
-  app.once('before-quit', (event) => {
-    event.preventDefault()
+  // Observe after the production before-quit cleanup has finished. Preventing
+  // quit here would let the smoke test exit Electron before services drain.
+  app.once('will-quit', () => {
     setImmediate(async () => {
       try {
         await fetch(origin, { signal: AbortSignal.timeout(1000) })
         console.error('Panel remained open after closing the window')
         app.exit(1)
       } catch {
+        clearTimeout(watchdog)
         app.exit(0)
       }
     })

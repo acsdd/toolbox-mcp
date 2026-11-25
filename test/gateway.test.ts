@@ -138,7 +138,8 @@ describe('gateway panel api', () => {
       const refreshed = await (await fetch(`${base}/api/gateway/refresh`, { method: 'POST' })).json() as { availability: string }
       assert.equal(refreshed.availability, 'ready')
     } finally {
-      panel.close()
+      await panel.close()
+      await services.close()
     }
   })
 })

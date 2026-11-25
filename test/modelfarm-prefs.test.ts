@@ -245,7 +245,8 @@ describe('Model Farm preferences: panel API', () => {
       assert.equal(bad.status, 200)
       assert.deepEqual(JSON.parse(bad.body).modelFarm, DEFAULT_PREFS)
     } finally {
-      panel.close()
+      await panel.close()
+      await services.close()
     }
   })
 
@@ -261,7 +262,8 @@ describe('Model Farm preferences: panel API', () => {
       assert.match(page.body, /mfRestorePrefs/)
       assert.match(page.body, /\/api\/settings\/modelfarm/)
     } finally {
-      panel.close()
+      await panel.close()
+      await services.close()
     }
   })
 })

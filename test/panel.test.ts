@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict'
-import { request as httpRequest } from 'node:http'
+import http, { request as httpRequest } from 'node:http'
+import { syncBuiltinESMExports } from 'node:module'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { after, before, describe, it } from 'node:test'
+import { after, before, describe, it, mock } from 'node:test'
 import { clientLaunch, startPanel } from '../dist/panel.js'
 import { createServices } from '../dist/services.js'
 import type { Terminal } from '../dist/terminal.js'
 
 let home = ''
 let services: ReturnType<typeof createServices>
-let panel: { port: number; close: () => void }
+let panel: { port: number; close: () => Promise<void> }
 
 interface Reply {
   status: number
@@ -51,6 +52,30 @@ function ask(options: {
   })
 }
 
+/** A stand-in shell session: it records what the panel asked of it. */
+function fakeTerminal(overrides: Partial<Terminal> = {}): { terminal: Terminal; completions: { line: string; cursor: number }[]; inputs: string[] } {
+  const completions: { line: string; cursor: number }[] = []
+  const inputs: string[] = []
+  const terminal: Terminal = {
+    start: () => ({ running: true, pid: 4242, startedAt: 0 }),
+    stop: () => ({ running: false, pid: null, startedAt: null }),
+    close: async () => {},
+    state: () => ({ running: false, pid: null, startedAt: null }),
+    input: (data: string) => {
+      inputs.push(data)
+      return { running: false, pid: null, startedAt: null }
+    },
+    complete: async (line: string, cursor: number) => {
+      completions.push({ line, cursor })
+      return { supported: true, candidates: ['Get-ChildItem', 'Get-ChildItemProperty'], replacementIndex: 0, replacementLength: 7 }
+    },
+    subscribe: () => () => {},
+    snapshot: () => '',
+    ...overrides
+  }
+  return { terminal, completions, inputs }
+}
+
 before(async () => {
   home = await mkdtemp(join(tmpdir(), 'toolbox-mcp-panel-'))
   process.env.TOOLBOX_MCP_HOME = home
@@ -62,7 +87,8 @@ before(async () => {
 })
 
 after(async () => {
-  panel.close()
+  await panel.close()
+  await services.close()
   delete process.env.TOOLBOX_MCP_HOME
   await rm(home, { recursive: true, force: true })
 })
@@ -252,6 +278,109 @@ describe('panel body handling', () => {
   })
 })
 
+describe('panel shutdown', () => {
+  it('aggregates listener and terminal cleanup failures', async (t) => {
+    const realCreateServer = http.createServer
+    const createServerMock = mock.method(http, 'createServer', ((...args: unknown[]) => {
+      const server = Reflect.apply(realCreateServer, http, args) as http.Server
+      const close = server.close.bind(server)
+      server.close = ((callback?: (error?: Error) => void) => {
+        close(() => callback?.(new Error('listener cleanup failed')))
+        return server
+      }) as http.Server['close']
+      return server
+    }) as never)
+    syncBuiltinESMExports()
+    t.after(() => {
+      createServerMock.mock.restore()
+      syncBuiltinESMExports()
+    })
+    const fake = fakeTerminal({ close: async () => { throw new Error('terminal cleanup failed') } })
+    const scoped = await startPanel(services, { port: 0, terminal: fake.terminal })
+
+    await assert.rejects(() => scoped.close(), (error: unknown) => {
+      assert.ok(error instanceof AggregateError)
+      assert.equal(error.errors.length, 2)
+      const messages = error.errors.map((cause) => String(cause))
+      assert.ok(messages.some((message) => message.includes('listener cleanup failed')))
+      assert.ok(messages.some((message) => message.includes('terminal cleanup failed')))
+      return true
+    })
+  })
+
+  it('close is shared, waits for terminal cleanup, and releases its listener', async () => {
+    let release: () => void = () => {}
+    const terminalClosed = new Promise<void>((resolve) => { release = resolve })
+    const fake = fakeTerminal({ close: () => terminalClosed })
+    const scoped = await startPanel(services, { port: 0, terminal: fake.terminal })
+
+    const first = scoped.close()
+    const second = scoped.close()
+    assert.ok(first instanceof Promise)
+    assert.equal(first, second)
+
+    let closed = false
+    void first.then(() => { closed = true })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(closed, false, 'panel close must await the owned terminal')
+
+    release()
+    await first
+    const rebound = await startPanel(services, { port: scoped.port })
+    await rebound.close()
+  })
+
+  it('unsubscribes the terminal event stream when the panel closes', async () => {
+    let unsubscribed = 0
+    const fake = fakeTerminal({ subscribe: () => () => { unsubscribed += 1 } })
+    const scoped = await startPanel(services, { port: 0, terminal: fake.terminal })
+    let ready: () => void = () => {}
+    const responseReady = new Promise<void>((resolve) => { ready = resolve })
+    const responseClosed = new Promise<void>((resolve, reject) => {
+      const req = httpRequest(
+        { host: '127.0.0.1', port: scoped.port, path: '/api/terminal/events', method: 'GET' },
+        (res) => {
+          res.on('data', () => {})
+          res.once('close', resolve)
+          res.once('error', reject)
+          res.once('data', ready)
+        }
+      )
+      req.on('error', reject)
+      req.end()
+    })
+
+    await responseReady
+    const closing = scoped.close()
+    await responseClosed
+    await closing
+    assert.equal(unsubscribed, 1)
+  })
+
+  it('cleans up its terminal before rejecting a listener startup failure', async () => {
+    let release: () => void = () => {}
+    const terminalClosed = new Promise<void>((resolve) => { release = resolve })
+    const fake = fakeTerminal({ close: () => terminalClosed })
+    let settled = false
+    const outcome = startPanel(services, { port: -1, terminal: fake.terminal }).then(
+      () => null,
+      (cause: unknown) => {
+        settled = true
+        return cause
+      }
+    )
+
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    const settledBeforeCleanup = settled
+    release()
+    const cause = await outcome
+
+    assert.equal(settledBeforeCleanup, false, 'startup failure must wait for owned cleanup')
+    assert.ok(cause instanceof Error)
+    assert.match(cause.message, /port|range/i)
+  })
+})
+
 describe('panel settings editing', () => {
   it('reads the current settings', async () => {
     const reply = await ask({ path: '/api/settings' })
@@ -385,8 +514,9 @@ describe('panel tool catalog', () => {
       await remoteServices.marketplaceUninstall('cve-now')
       assert.equal((await catalog()).some((tool) => tool.name === 'cve_now_list_feed'), false)
     } finally {
-      remotePanel.close()
+      await remotePanel.close()
       await remoteServices.marketplaceUninstall('cve-now').catch(() => {})
+      await remoteServices.close()
     }
   })
 
@@ -456,35 +586,12 @@ describe('panel activity recorder', () => {
       assert.deepEqual(data.calls[1].tool, 'crypto_status')
       assert.deepEqual(data.perTool.map((tool) => tool.tool).sort(), ['crypto_status', 'llamafarm_score'])
     } finally {
-      attached.close()
+      await attached.close()
     }
   })
 })
 
 describe('panel terminal completion route', () => {
-  /** A stand-in shell session: it records what the panel asked of it. */
-  function fakeTerminal(overrides: Partial<Terminal> = {}): { terminal: Terminal; completions: { line: string; cursor: number }[]; inputs: string[] } {
-    const completions: { line: string; cursor: number }[] = []
-    const inputs: string[] = []
-    const terminal: Terminal = {
-      start: () => ({ running: true, pid: 4242, startedAt: 0 }),
-      stop: () => ({ running: false, pid: null, startedAt: null }),
-      state: () => ({ running: false, pid: null, startedAt: null }),
-      input: (data: string) => {
-        inputs.push(data)
-        return { running: false, pid: null, startedAt: null }
-      },
-      complete: async (line: string, cursor: number) => {
-        completions.push({ line, cursor })
-        return { supported: true, candidates: ['Get-ChildItem', 'Get-ChildItemProperty'], replacementIndex: 0, replacementLength: 7 }
-      },
-      subscribe: () => () => {},
-      snapshot: () => '',
-      ...overrides
-    }
-    return { terminal, completions, inputs }
-  }
-
   it('returns bounded shell completion candidates without executing the typed command', async () => {
     const fake = fakeTerminal()
     const scoped = await startPanel(services, { port: 0, terminal: fake.terminal })
@@ -502,7 +609,7 @@ describe('panel terminal completion route', () => {
       assert.deepEqual(fake.completions, [{ line: 'Get-Chi', cursor: 7 }])
       assert.deepEqual(fake.inputs, [], 'the typed command must not be executed')
     } finally {
-      scoped.close()
+      await scoped.close()
     }
   })
 
@@ -519,7 +626,7 @@ describe('panel terminal completion route', () => {
       assert.equal(data.supported, false)
       assert.deepEqual(data.candidates, [])
     } finally {
-      scoped.close()
+      await scoped.close()
     }
   })
 })
@@ -817,7 +924,7 @@ describe('panel port conflicts', () => {
       assert.notEqual(second.port, panel.port)
       assert.ok(second.port > 0)
     } finally {
-      second.close()
+      await second.close()
     }
   })
 })

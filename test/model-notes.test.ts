@@ -133,7 +133,8 @@ describe('model notes: service and panel API', () => {
       assert.equal(bad.status, 400)
       assert.ok(JSON.parse(bad.body).error)
     } finally {
-      panel.close()
+      await panel.close()
+      await services.close()
     }
   })
 })

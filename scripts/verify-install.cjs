@@ -14,6 +14,7 @@
  *   - the packaged server answers an initialize / tools/list handshake
  *   - a read-only tool call succeeds
  *   - the ops panel the server starts answers on its own port
+ *   - closing stdin lets the packaged server exit naturally with status 0
  *
  * It never touches the settings of the real profile: the server runs with a
  * throwaway TOOLBOX_MCP_HOME and a throwaway panel port.
@@ -23,8 +24,7 @@ const fs = require('node:fs')
 const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
-const { Client } = require('@modelcontextprotocol/sdk/client/index.js')
-const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js')
+const { probeMcpStdio } = require('./stdio-probe.cjs')
 
 const installDir = path.resolve(
   process.argv[2] ?? path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Model Farm')
@@ -47,6 +47,20 @@ function freePort() {
   })
 }
 
+async function readPanelCatalog(origin, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${origin}/api/catalog`, { signal: AbortSignal.timeout(500) })
+      if (response.status === 200) return response.json()
+    } catch {
+      // The MCP handshake and panel startup are separate asynchronous steps.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw new Error(`Panel did not answer on ${origin} within ${timeoutMs}ms.`)
+}
+
 async function main() {
   assert.ok(fs.existsSync(exe), `missing ${exe}`)
   assert.ok(fs.existsSync(asar), `missing ${asar}`)
@@ -54,51 +68,44 @@ async function main() {
   const port = await freePort()
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'modelfarm-install-'))
 
-  const transport = new StdioClientTransport({
-    command: exe,
-    args: [entry],
-    env: {
-      ELECTRON_RUN_AS_NODE: '1',
-      TOOLBOX_MCP_PORT: String(port),
-      TOOLBOX_MCP_HOME: path.join(home, 'settings')
-    }
-  })
-  const client = new Client({ name: 'modelfarm-install-probe', version: '1.0.0' })
-
-  let childPid = null
   try {
-    await client.connect(transport)
-    // Read the pid while the transport is open; closing it clears the handle.
-    childPid = transport.pid
-    const { tools } = await client.listTools()
-    assert.ok(tools.length >= 30, `expected the full tool surface, saw ${tools.length}`)
+    const result = await probeMcpStdio({
+      command: exe,
+      args: [entry],
+      env: {
+        ELECTRON_RUN_AS_NODE: '1',
+        TOOLBOX_MCP_PORT: String(port),
+        TOOLBOX_MCP_HOME: path.join(home, 'settings')
+      },
+      inspect: async ({ tools, request }) => {
+        assert.ok(tools.length >= 30, `expected the full tool surface, saw ${tools.length}`)
 
-    const call = await client.callTool({ name: 'runtimes_detect', arguments: {} })
-    assert.notEqual(call.isError, true, `runtimes_detect failed: ${JSON.stringify(call.content)}`)
+        const call = await request('tools/call', { name: 'runtimes_detect', arguments: {} })
+        assert.notEqual(call.isError, true, `runtimes_detect failed: ${JSON.stringify(call.content)}`)
 
-    const panel = await fetch(`http://127.0.0.1:${port}/api/catalog`)
-    assert.equal(panel.status, 200, `panel answered ${panel.status}`)
-    const catalog = await panel.json()
-    assert.equal(catalog.tools.length, tools.length, 'panel and MCP server disagree on the tool count')
+        const origin = `http://127.0.0.1:${port}`
+        const catalog = await readPanelCatalog(origin)
+        assert.equal(catalog.tools.length, tools.length, 'panel and MCP server disagree on the tool count')
+        return catalog
+      }
+    })
+
+    const catalog = result.inspection
+    await assert.rejects(fetch(`http://127.0.0.1:${port}/api/catalog`, { signal: AbortSignal.timeout(1_000) }))
 
     console.log(`INSTALL_DIR=${installDir}`)
-    console.log(`TOOL_COUNT=${tools.length}`)
+    console.log(`TOOL_COUNT=${result.catalog.tools.length}`)
     console.log(`PANEL_PORT=${port}`)
     console.log(`PANEL_TOOL_COUNT=${catalog.tools.length}`)
     console.log('READ_ONLY_CALL=ok')
+    console.log('NATURAL_STDIN_EOF_EXIT=ok')
     console.log('MCP_CLIENT_JOURNEY=ok')
   } finally {
-    await client.close().catch(() => {})
-    // Windows keeps the Electron-as-Node child alive after stdin closes, so a
-    // finished probe would otherwise leave an MCP server and its panel behind.
-    if (childPid) {
-      try { process.kill(childPid) } catch { /* already gone */ }
-    }
     fs.rmSync(home, { recursive: true, force: true })
   }
 }
 
 main().catch((error) => {
   console.error(error)
-  process.exit(1)
+  process.exitCode = 1
 })

@@ -30,8 +30,6 @@ import {
   parseBundle,
   planOllamaInstall,
   probeOllamaCli,
-  pullIntoOllama,
-  runOllamaCommand,
   scoreModels,
   searchCatalog,
   searchModules,
@@ -69,10 +67,15 @@ import { basename, extname, join } from 'node:path'
 import { DEFAULT_MODEL_FARM_PREFS, NOTE_MAX_LENGTH, NOTE_REPO_MAX_LENGTH, cleanStaleTempFiles, loadCatalogCache, loadSettings, recordModelInstall, sanitizeModelFarmPrefs, sanitizeModelNotes, saveCatalogCache, saveSettings, type ModelFarmPrefs, type ModelInstallRecord, type StoredSettings } from './config.js'
 import { createNativeCredentialStore, type CredentialStore } from './credentials.js'
 import {
+  OllamaExitObservationError,
+  pullIntoOwnedOllama,
+  runOwnedOllamaCommand,
+  type OllamaSpawnLike
+} from './ollama-process.js'
+import {
   connectRemote,
   DEFAULT_REMOTE_TIMEOUTS,
   proxiedToolName,
-  RemoteTimeoutError,
   withRemoteTimeout,
   type ProxiedTool,
   type RemoteConnect,
@@ -95,6 +98,7 @@ import {
   startServerRuntime,
   type DownloadProgress,
   type RuntimeFetch,
+  type RuntimeInstallOptions,
   type RuntimeInstallResult,
   type RuntimeReport,
   type RuntimeStatus
@@ -147,7 +151,9 @@ interface ServicesOptions {
   /** Pulls a model into the local Ollama runtime (injectable for tests). */
   pullModel?: (reference: string) => Promise<PullResult>
   /** Runs an arbitrary Ollama subcommand (injectable for tests). */
-  runOllama?: (args: string[]) => Promise<PullResult>
+  runOllama?: (args: string[], signal?: AbortSignal) => Promise<PullResult>
+  /** Spawn boundary for owned Ollama commands (injectable so shutdown is tested offline). */
+  spawnOllamaImpl?: OllamaSpawnLike
   /** Remote MCP connection factory (injectable for tests). */
   remoteConnect?: RemoteConnect
   /** Bounded operation deadlines for remote MCP servers. */
@@ -162,6 +168,8 @@ interface ServicesOptions {
   freeDiskImpl?: (directory: string) => Promise<number | null>
   /** Downloads a URL to a file (injectable for tests); may report progress and honour cancellation. */
   downloadFileImpl?: (url: string, target: string, onProgress?: (progress: DownloadProgress) => void, signal?: AbortSignal) => Promise<number>
+  /** Official runtime installer boundary; injectable so shutdown is exercised without installing software. */
+  installRuntimeImpl?: (options: RuntimeInstallOptions) => Promise<RuntimeInstallResult>
   /** Home used to expand runtime model folders; injectable so tests never write into the real profile. */
   homeDir?: string
   /** Settings persistence boundary; injectable so commit ordering and failures are exercised offline. */
@@ -376,7 +384,6 @@ export interface PanelSettings {
 }
 
 export function createServices(options: ServicesOptions = {}) {
-  const fetchOptions = { userAgent: USER_AGENT, fetchImpl: options.fetchImpl }
   const credentialStore = options.credentialStore ?? createNativeCredentialStore()
   const gmailInbox = options.gmailInboxImpl ?? ((email, password) => fetchGmailInbox(email, password))
   const persistSettings = options.saveSettingsImpl ?? saveSettings
@@ -395,6 +402,135 @@ export function createServices(options: ServicesOptions = {}) {
   }
   let settingsQueue: Promise<void> = Promise.resolve()
   let gmailMutationQueue: Promise<void> = Promise.resolve()
+  let initPromise: Promise<void> | null = null
+  let closing = false
+  let closePromise: Promise<void> | null = null
+  const shutdownController = new AbortController()
+  const fetchImpl = options.fetchImpl ?? (globalThis.fetch as FetchLike)
+  const shutdownFetch: FetchLike = (input, init) => {
+    const signals = [init?.signal, shutdownController.signal].filter(
+      (signal): signal is AbortSignal => signal != null
+    )
+    return fetchImpl(input, {
+      ...init,
+      ...(signals.length > 0 ? { signal: AbortSignal.any(signals) } : {})
+    })
+  }
+  const fetchOptions = { userAgent: USER_AGENT, fetchImpl: shutdownFetch }
+  const modelFetchOptions = { fetchImpl: shutdownFetch }
+
+  function assertAccepting(): void {
+    if (closing) throw new Error('toolbox-mcp is shutting down')
+  }
+
+  /** Admit public asynchronous work synchronously, before it can perform I/O. */
+  function admit<Args extends unknown[], Result>(
+    operation: (...args: Args) => Promise<Result>
+  ): (...args: Args) => Promise<Result> {
+    return async (...args: Args): Promise<Result> => {
+      assertAccepting()
+      const admitted = operation(...args)
+      admittedOperations.add(admitted)
+      void admitted.then(
+        () => admittedOperations.delete(admitted),
+        () => admittedOperations.delete(admitted)
+      )
+      return admitted
+    }
+  }
+
+  function close(): Promise<void> {
+    if (closePromise) return closePromise
+    closing = true
+    let resolveClose!: () => void
+    let rejectClose!: (cause: unknown) => void
+    const closingPromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve
+      rejectClose = reject
+    })
+    // Publish the shared promise before invoking any user/provider cleanup.
+    closePromise = closingPromise
+    shutdownController.abort(new Error('toolbox-mcp is shutting down'))
+    for (const controller of activeDownloads.values()) controller.abort()
+    for (const entry of downloads) {
+      if (entry.status !== 'downloading') continue
+      settleDownload(entry, 'cancelled')
+      entry.error = 'Download cancelled by shutdown.'
+    }
+    const ownedRemotes = [...remotes.entries()]
+    remotes.clear()
+    remoteErrors.clear()
+    const admitted = [
+      ...downloadOperations,
+      ...runtimeInstallOperations,
+      ...remoteConnectOperations.values(),
+      ...remoteRecoveryOperations.values(),
+      ...registryOperations,
+      ...marketplaceLifecycleQueues.values(),
+      ...(initPromise ? [initPromise] : [])
+    ]
+    const remoteClosures = ownedRemotes.map(([id, entry]) => {
+      try {
+        options.onRemoteRemoved?.(id)
+      } catch {
+        // One observer must not prevent the remaining transports from closing.
+      }
+      return trackRemoteCleanup(entry.module, entry.connection)
+    })
+    void (async () => {
+      const errors: unknown[] = []
+      const closures = await Promise.allSettled(remoteClosures)
+      for (let index = 0; index < closures.length; index++) {
+        const result = closures[index]!
+        remoteCleanupOperations.delete(remoteClosures[index]!)
+        if (result.status === 'rejected') errors.push(result.reason)
+      }
+      await Promise.allSettled(admitted)
+      // An admitted operation can finish a connect or cleanup after the first
+      // snapshot. Drain until every late resource has also been released.
+      while (
+        admittedOperations.size > 0 ||
+        remoteCleanupOperations.size > 0 ||
+        remoteTransportOperations.size > 0
+      ) {
+        const cleanups = new Set<Promise<unknown>>(remoteCleanupOperations)
+        const pending = [...admittedOperations, ...cleanups]
+        const results = await Promise.allSettled(pending)
+        for (let index = 0; index < results.length; index++) {
+          const result = results[index]!
+          if (result.status === 'rejected' && cleanups.has(pending[index]!)) {
+            errors.push(result.reason)
+          }
+        }
+        for (const cleanup of remoteCleanupOperations) {
+          if (cleanups.has(cleanup)) remoteCleanupOperations.delete(cleanup)
+        }
+        if (remoteTransportOperations.size > 0) {
+          try {
+            // Deadline races reject on shutdown, but a signal-ignoring provider
+            // can leave the underlying promise pending forever. Bound that
+            // observation window; late resolutions still own their cleanup.
+            await withRemoteTimeout(
+              Promise.allSettled([...remoteTransportOperations]),
+              remoteTimeouts.closeMs,
+              'transport cleanup'
+            )
+          } catch (cause) {
+            errors.push(cause)
+            remoteTransportOperations.clear()
+            break
+          }
+        }
+      }
+      await settingsQueue
+      await gmailMutationQueue
+      errors.push(...runtimeInstallShutdownErrors, ...ollamaShutdownErrors)
+      if (errors.length > 0) {
+        throw new AggregateError(errors, `Services shutdown failed: ${errors.map((error) => error instanceof Error ? error.message : String(error)).join('; ')}`)
+      }
+    })().then(resolveClose, rejectClose)
+    return closingPromise
+  }
 
   /** Keep credential changes and their settings commit in one ordered transaction. */
   function withGmailMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -413,6 +549,7 @@ export function createServices(options: ServicesOptions = {}) {
     mutate: (draft: StoredSettings) => T,
     publish?: (draft: StoredSettings, result: T) => void
   ): Promise<T> {
+    assertAccepting()
     const operation = settingsQueue.then(async () => {
       const draft = structuredClone(settings.current)
       const result = mutate(draft)
@@ -453,11 +590,20 @@ export function createServices(options: ServicesOptions = {}) {
   let runtimeDetectionVersion = 0
   /** Folder downloads tracked for the progress surface (point 4). */
   const downloads: FarmDownload[] = []
+  const admittedOperations = new Set<Promise<unknown>>()
   const activeDownloads = new Map<string, AbortController>()
+  const downloadOperations = new Set<Promise<void>>()
+  const runtimeInstallOperations = new Set<Promise<void>>()
+  const runtimeInstallShutdownErrors = new Set<unknown>()
+  const ollamaShutdownErrors = new Set<unknown>()
   const remotes = new Map<string, { module: MarketplaceModule; connection: RemoteConnection; tools: RemoteToolDef[] }>()
   const remoteErrors = new Map<string, string>()
   const remoteConnectOperations = new Map<string, Promise<ProxiedTool[]>>()
   const remoteRecoveryOperations = new Map<string, Promise<void>>()
+  const remoteCleanupOperations = new Set<Promise<void>>()
+  const remoteCloseOperations = new Set<Promise<void>>()
+  const remoteTransportOperations = new Set<Promise<unknown>>()
+  const registryOperations = new Set<Promise<void>>()
   const marketplaceLifecycleQueues = new Map<string, Promise<void>>()
   const remoteTimeouts: RemoteTimeouts = {
     connectMs: options.remoteTimeouts?.connectMs ?? DEFAULT_REMOTE_TIMEOUTS.connectMs,
@@ -466,62 +612,69 @@ export function createServices(options: ServicesOptions = {}) {
     closeMs: options.remoteTimeouts?.closeMs ?? DEFAULT_REMOTE_TIMEOUTS.closeMs
   }
   const remoteConnect = options.remoteConnect ?? connectRemote
-  const detectOptions = { fetchImpl: options.fetchImpl, execFileImpl: options.execFileImpl }
+  const installRuntime = options.installRuntimeImpl ?? installOllama
+  const detectOptions = { fetchImpl: shutdownFetch, execFileImpl: options.execFileImpl }
   const execFileImpl = options.execFileImpl ?? (execFile as unknown as ExecFileLike)
   const runtimeOptions = {
     fetchImpl: options.runtimeFetchImpl ?? (globalThis.fetch as RuntimeFetch),
     execFileImpl: options.execFileImpl as never,
+    signal: shutdownController.signal,
     ...(options.homeDir ? { homeDir: options.homeDir } : {})
   }
 
-  async function init(): Promise<void> {
-    await cleanStaleTempFiles()
-    const loaded = await loadSettings()
-    settings.current = loaded.settings
-    crypto.watchlist = normalizeWatchlist(settings.current.cryptoWatchlist)
-    monitor = createResourceMonitor({ diskPath: settings.current.resource.diskPath })
-    gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null }
+  function init(): Promise<void> {
+    if (closing) return Promise.reject(new Error('toolbox-mcp is shutting down'))
+    if (initPromise) return initPromise
+    initPromise = (async () => {
+      await cleanStaleTempFiles()
+      const loaded = await loadSettings()
+      settings.current = loaded.settings
+      crypto.watchlist = normalizeWatchlist(settings.current.cryptoWatchlist)
+      monitor = createResourceMonitor({ diskPath: settings.current.resource.diskPath })
+      gmail = { configured: false, email: '', lastCheck: null, unread: 0, messages: [], error: null }
 
-    const legacyGmail = loaded.legacyGmail
-    if (legacyGmail) {
-      const ref = legacyGmail.credentialRef ?? randomUUID()
-      try {
-        await credentialStore.set(ref, legacyGmail.password)
-        await commitSettings((draft) => {
-          draft.gmail = {
-            email: legacyGmail.email,
-            credentialRef: ref,
-            notifications: legacyGmail.notifications
-          }
-        })
-      } catch {
+      const legacyGmail = loaded.legacyGmail
+      if (legacyGmail) {
+        const ref = legacyGmail.credentialRef ?? randomUUID()
         try {
-          await commitSettings((draft) => { draft.gmail = null })
+          await credentialStore.set(ref, legacyGmail.password)
+          await commitSettings((draft) => {
+            draft.gmail = {
+              email: legacyGmail.email,
+              credentialRef: ref,
+              notifications: legacyGmail.notifications
+            }
+          })
         } catch {
-          throw new Error('Unable to remove the legacy Gmail password from settings. Secure migration failed; settings cleanup is required.')
+          try {
+            await commitSettings((draft) => { draft.gmail = null })
+          } catch {
+            throw new Error('Unable to remove the legacy Gmail password from settings. Secure migration failed; settings cleanup is required.')
+          }
+          await credentialStore.delete(ref).catch(() => {})
+          gmail.error = 'The legacy Gmail password could not be migrated securely and was removed from settings. Reconnect Gmail to continue.'
         }
-        await credentialStore.delete(ref).catch(() => {})
-        gmail.error = 'The legacy Gmail password could not be migrated securely and was removed from settings. Reconnect Gmail to continue.'
       }
-    }
 
-    const account = settings.current.gmail
-    if (account) {
-      gmail.email = account.email
-      try {
-        const password = await credentialStore.get(account.credentialRef)
-        gmail.configured = password !== null
-        gmail.error = password === null ? 'Gmail credentials are missing from secure storage. Reconnect Gmail to continue.' : null
-      } catch {
-        gmail.configured = false
-        gmail.error = 'The operating system credential store is unavailable. Unlock it or reconnect Gmail to continue.'
+      const account = settings.current.gmail
+      if (account) {
+        gmail.email = account.email
+        try {
+          const password = await credentialStore.get(account.credentialRef)
+          gmail.configured = password !== null
+          gmail.error = password === null ? 'Gmail credentials are missing from secure storage. Reconnect Gmail to continue.' : null
+        } catch {
+          gmail.configured = false
+          gmail.error = 'The operating system credential store is unavailable. Unlock it or reconnect Gmail to continue.'
+        }
       }
-    }
 
-    const cached = await loadCatalogCache()
-    if (cached) {
-      catalog = { models: cached.models.filter(isCatalogModel), fetchedAt: cached.fetchedAt }
-    }
+      const cached = await loadCatalogCache()
+      if (cached) {
+        catalog = { models: cached.models.filter(isCatalogModel), fetchedAt: cached.fetchedAt }
+      }
+    })()
+    return initPromise
   }
 
   async function cryptoRefresh(): Promise<CryptoState> {
@@ -549,6 +702,7 @@ export function createServices(options: ServicesOptions = {}) {
         crypto.coins = []
       }
     )
+    assertAccepting()
     return cryptoRefresh()
   }
 
@@ -820,6 +974,36 @@ export function createServices(options: ServicesOptions = {}) {
 
   // --- llamafarm: model catalog + fit scoring --------------------------------
 
+  function rememberOllamaShutdownError(cause: unknown): void {
+    // Normal cancellation belongs to the caller. Failure to observe an owned
+    // child's exit is a cleanup failure and must make service shutdown fail.
+    if (closing && cause instanceof OllamaExitObservationError) ollamaShutdownErrors.add(cause)
+  }
+
+  async function runDefaultOllama(args: string[]): Promise<PullResult> {
+    try {
+      return await runOwnedOllamaCommand(args, {
+        signal: shutdownController.signal,
+        spawnImpl: options.spawnOllamaImpl
+      })
+    } catch (cause) {
+      rememberOllamaShutdownError(cause)
+      throw cause
+    }
+  }
+
+  async function pullDefaultOllama(reference: string): Promise<PullResult> {
+    try {
+      return await pullIntoOwnedOllama(reference, {
+        signal: shutdownController.signal,
+        spawnImpl: options.spawnOllamaImpl
+      })
+    } catch (cause) {
+      rememberOllamaShutdownError(cause)
+      throw cause
+    }
+  }
+
   function invalidateModelState(): void {
     modelStateVersion++
     runtimeDetectionVersion++
@@ -831,6 +1015,7 @@ export function createServices(options: ServicesOptions = {}) {
     if (!machine || forceDetect) {
       const version = modelStateVersion
       const detected = await detectMachine(detectOptions)
+      assertAccepting()
       // A transfer/removal may have finished while this snapshot was in flight.
       if (version !== modelStateVersion) return llamafarmStatus()
       machine = detected
@@ -875,12 +1060,15 @@ export function createServices(options: ServicesOptions = {}) {
       models = await fetchCatalog({
         formats: ['gguf'],
         perTask: CATALOG_PER_TASK,
-        fetchImpl: options.fetchImpl
+        ...modelFetchOptions
       })
+      assertAccepting()
       fetchedAt = Date.now()
       catalogError = null
       await saveCatalogCache({ models, fetchedAt }).catch(() => {})
+      assertAccepting()
     } catch (cause) {
+      assertAccepting()
       catalogError = cause instanceof Error ? cause.message : String(cause)
       models = catalog?.models ?? []
       fetchedAt = catalog?.fetchedAt ?? null
@@ -900,11 +1088,13 @@ export function createServices(options: ServicesOptions = {}) {
   async function installedNames(runtime: string): Promise<string[]> {
     if (runtime === 'ollama') {
       const profile = await llamafarmStatus()
+      assertAccepting()
       return profile.ollama.models.map((entry) => entry.name)
     }
     const descriptor = runtimeDescriptor(runtime)
     if (!descriptor) return []
     const result = await listRuntimeModels(descriptor, runtimeOptions)
+    assertAccepting()
     return result.models.map((entry) => entry.name)
   }
 
@@ -939,6 +1129,7 @@ export function createServices(options: ServicesOptions = {}) {
   async function llamafarmScore(input: LlamafarmScoreInput): Promise<LlamafarmScoreResult> {
     const runtime = activeScoreRuntime()
     const [profile, { models, fetchedAt, error }] = await Promise.all([llamafarmStatus(), llamafarmCatalog()])
+    assertAccepting()
     const search = input.search?.trim().toLowerCase() ?? ''
     const filtered = models.filter((model) => {
       if (search && !model.id.toLowerCase().includes(search) && !model.label.toLowerCase().includes(search)) {
@@ -950,7 +1141,9 @@ export function createServices(options: ServicesOptions = {}) {
     })
     const scored = scoreModels({ models: filtered, machine: profile, scenario: input.scenario, runtime })
     const visible = input.onlyReachable ? scored.filter((m) => m.verdict !== 'red' || m.hints.length > 0) : scored
-    const groups = groupByTask(markInstalled(visible, await installedNames(runtime.id), runtime.id))
+    const names = await installedNames(runtime.id)
+    assertAccepting()
+    const groups = groupByTask(markInstalled(visible, names, runtime.id))
     return {
       machine: profile,
       machineGrade: gradeMachine(profile, input.scenario),
@@ -968,6 +1161,7 @@ export function createServices(options: ServicesOptions = {}) {
     const query = input.query?.trim() ?? ''
     const scenario = input.scenario ?? 'now'
     const profile = await llamafarmStatus()
+    assertAccepting()
     const base = {
       query,
       scenario,
@@ -980,12 +1174,16 @@ export function createServices(options: ServicesOptions = {}) {
     if (!query) return base
     let models: CatalogModel[]
     try {
-      models = await searchCatalog(query, { fetchImpl: options.fetchImpl })
+      models = await searchCatalog(query, modelFetchOptions)
+      assertAccepting()
     } catch (cause) {
+      assertAccepting()
       return { ...base, error: cause instanceof Error ? cause.message : String(cause) }
     }
     const scored = scoreModels({ models, machine: profile, scenario, runtime })
-    const groups = groupByTask(markInstalled(scored, await installedNames(runtime.id), runtime.id))
+    const names = await installedNames(runtime.id)
+    assertAccepting()
+    const groups = groupByTask(markInstalled(scored, names, runtime.id))
     return { ...base, groups, total: scored.length }
   }
 
@@ -993,9 +1191,11 @@ export function createServices(options: ServicesOptions = {}) {
   async function llamafarmQuants(repo: string): Promise<LlamafarmQuantsResult> {
     const id = normalizeRepoId(repo ?? '')
     try {
-      const quants = await listGgufQuants(id, { fetchImpl: options.fetchImpl })
+      const quants = await listGgufQuants(id, modelFetchOptions)
+      assertAccepting()
       return { repo: id, quants, error: null }
     } catch (cause) {
+      assertAccepting()
       return { repo: id, quants: [], error: cause instanceof Error ? cause.message : String(cause) }
     }
   }
@@ -1004,8 +1204,11 @@ export function createServices(options: ServicesOptions = {}) {
   async function llamafarmRunNow(): Promise<LlamafarmRunNowResult> {
     const runtime = activeScoreRuntime()
     const [profile, { models }] = await Promise.all([llamafarmStatus(), llamafarmCatalog()])
+    assertAccepting()
     const scored = scoreModels({ models, machine: profile, scenario: 'now', runtime })
-    const groups = groupByTask(markInstalled(scored, await installedNames(runtime.id), runtime.id))
+    const names = await installedNames(runtime.id)
+    assertAccepting()
+    const groups = groupByTask(markInstalled(scored, names, runtime.id))
     const picks: LlamafarmRunNowResult['picks'] = []
     for (const group of groups) {
       const green = group.models.filter((model) => model.verdict === 'green')
@@ -1079,10 +1282,10 @@ export function createServices(options: ServicesOptions = {}) {
     if (!target) {
       return { ok: false, removed: null, reason: 'not-found', message: 'That model is not installed locally.', output: '' }
     }
-    const runner = options.runOllama ?? ((args: string[]) => runOllamaCommand(args))
+    const runner = options.runOllama ?? runDefaultOllama
     let result
     try {
-      result = await runner(['rm', target])
+      result = await runner(['rm', target], shutdownController.signal)
     } catch (cause) {
       return { ok: false, removed: null, reason: 'failed', message: cause instanceof Error ? cause.message : String(cause), output: '' }
     }
@@ -1096,8 +1299,12 @@ export function createServices(options: ServicesOptions = {}) {
   /** Re-detect the machine and force a catalog refetch. */
   async function llamafarmRefresh(): Promise<{ machine: MachineProfile; catalog: number }> {
     await llamafarmStatus(true)
+    assertAccepting()
     const { models } = await llamafarmCatalog(true)
-    return { machine: await llamafarmStatus(), catalog: models.length }
+    assertAccepting()
+    const machine = await llamafarmStatus()
+    assertAccepting()
+    return { machine, catalog: models.length }
   }
 
   /**
@@ -1108,13 +1315,16 @@ export function createServices(options: ServicesOptions = {}) {
   async function llamafarmGrade(input: LlamafarmGradeInput): Promise<LlamafarmGradeResult> {
     const scenario = input.scenario ?? 'now'
     const profile = await llamafarmStatus()
+    assertAccepting()
     const machineGrade = gradeMachine(profile, scenario)
     const base = { machine: profile, machineGrade, scenario, model: null, grade: null, error: null }
     if (!input.repo) return base
     let model: CatalogModel | null
     try {
-      model = await fetchModelById(input.repo, { fetchImpl: options.fetchImpl })
+      model = await fetchModelById(input.repo, modelFetchOptions)
+      assertAccepting()
     } catch (cause) {
+      assertAccepting()
       return { ...base, error: cause instanceof Error ? cause.message : String(cause) }
     }
     if (!model) {
@@ -1133,6 +1343,7 @@ export function createServices(options: ServicesOptions = {}) {
    * per process is started with it.
    */
   async function llamafarmInstall(input: LlamafarmInstallInput): Promise<LlamafarmInstallResult> {
+    assertAccepting()
     const repo = input.repo?.trim() ?? ''
     const runtimeId = (input.runtime ?? settings.current.runtimes.active ?? DEFAULT_RUNTIME_ID).trim() || DEFAULT_RUNTIME_ID
     const descriptor = runtimeDescriptor(runtimeId)
@@ -1161,11 +1372,13 @@ export function createServices(options: ServicesOptions = {}) {
     let model: CatalogModel | null = cached ?? null
     if (!model) {
       try {
-        model = await fetchModelById(repo, { fetchImpl: options.fetchImpl })
+        model = await fetchModelById(repo, modelFetchOptions)
       } catch (cause) {
+        assertAccepting()
         return failure('not-found', cause instanceof Error ? cause.message : String(cause))
       }
     }
+    assertAccepting()
     if (!model) {
       return failure('not-found', `No GGUF weights found for ${repo}.`)
     }
@@ -1188,14 +1401,16 @@ export function createServices(options: ServicesOptions = {}) {
     const requested = (input.quant ?? '').trim()
     if (requested && requested.toUpperCase() !== (model.quantLabel ?? '').toUpperCase()) {
       try {
-        const quants = await listGgufQuants(model.id, { fetchImpl: options.fetchImpl })
+        const quants = await listGgufQuants(model.id, modelFetchOptions)
         const match = quants.find((q) => (q.quant ?? '').toUpperCase() === requested.toUpperCase())
         if (match && match.sizeBytes > 0) neededBytes = match.sizeBytes
       } catch {
         // Keep the catalog default size when the quant listing is unavailable.
       }
     }
+    assertAccepting()
     const cli = await probeOllamaCli(execFileImpl)
+    assertAccepting()
     if (!cli.installed) {
       return failure('ollama-missing', 'Ollama is not installed on this machine.', {
         reference: plan.reference,
@@ -1206,6 +1421,7 @@ export function createServices(options: ServicesOptions = {}) {
 
     const directory = runtimeModelsDir(descriptor, runtimeOptions)!
     const available = await (options.freeDiskImpl ?? freeDiskBytes)(directory).catch(() => null)
+    assertAccepting()
     const short = diskShortfall(available, neededBytes)
     if (short !== null && short > 0) {
       return failure('insufficient-disk', `Not enough disk at ${directory} for ${model.id}: ${diskShortfallLabel(short)}.`)
@@ -1236,17 +1452,17 @@ export function createServices(options: ServicesOptions = {}) {
       if (split) {
         const directory = mkdtempSync(join(tmpdir(), 'toolbox-mcp-'))
         const modelfilePath = join(directory, 'Modelfile')
-        const runner = options.runOllama ?? ((args: string[]) => runOllamaCommand(args))
+        const runner = options.runOllama ?? runDefaultOllama
         writeFileSync(modelfilePath, buildModelfile(plan.reference, { numGpu: input.offload }), 'utf8')
-        result = await runner(['create', plan.modelName, '--file', modelfilePath])
+        result = await runner(['create', plan.modelName, '--file', modelfilePath], shutdownController.signal)
         if (!result.ok && isQuantTagRejection(result.output)) {
           const fallback = latestReference(plan.reference)
           writeFileSync(modelfilePath, buildModelfile(fallback, { numGpu: input.offload }), 'utf8')
-          result = await runner(['create', plan.modelName, '--file', modelfilePath])
+          result = await runner(['create', plan.modelName, '--file', modelfilePath], shutdownController.signal)
           effectiveReference = fallback
         }
       } else {
-        const pull = options.pullModel ?? ((reference: string) => pullIntoOllama(reference))
+        const pull = options.pullModel ?? pullDefaultOllama
         result = await pull(plan.reference)
         effectiveReference = result.reference ?? plan.reference
       }
@@ -1260,6 +1476,7 @@ export function createServices(options: ServicesOptions = {}) {
       })
     }
 
+    assertAccepting()
     if (!result.ok) {
       settleDownload(pullEntry, 'error')
       pullEntry.error = result.error ?? 'The Ollama runtime refused the install.'
@@ -1312,6 +1529,7 @@ export function createServices(options: ServicesOptions = {}) {
     model: CatalogModel,
     quant: string | null
   ): Promise<LlamafarmInstallResult> {
+    assertAccepting()
     const failure = (reason: LlamafarmInstallReason, message: string, extra: Partial<LlamafarmInstallResult> = {}): LlamafarmInstallResult => ({
       ok: false,
       repo: model.id,
@@ -1335,11 +1553,14 @@ export function createServices(options: ServicesOptions = {}) {
       if (!gguf) return failure('not-found', `No GGUF file found for ${model.id}.`)
       destination = ggufDirectory(gguf, directory)
     } catch (cause) {
+      if (closing) throw cause
       return failure('failed', cause instanceof Error ? cause.message : String(cause))
     }
+    assertAccepting()
 
     // Probe the same namespaced destination that will receive the model.
     const available = await (options.freeDiskImpl ?? freeDiskBytes)(destination).catch(() => null)
+    assertAccepting()
     const short = diskShortfall(available, gguf.sizeBytes)
     if (short !== null && short > 0) {
       return failure('insufficient-disk', `Not enough disk at ${directory} for ${model.id}: ${diskShortfallLabel(short)}.`)
@@ -1368,7 +1589,7 @@ export function createServices(options: ServicesOptions = {}) {
     activeDownloads.set(key, controller)
     let downloaded: { path: string; bytes: number }
     try {
-      downloaded = await downloadGguf(gguf, directory, {
+      const transfer = downloadGguf(gguf, directory, {
         ...runtimeOptions,
         ...(options.downloadFileImpl ? { download: options.downloadFileImpl } : {}),
         signal: controller.signal,
@@ -1378,6 +1599,11 @@ export function createServices(options: ServicesOptions = {}) {
           entry.percent = entry.totalBytes ? Math.min(100, Math.round((progress.receivedBytes / entry.totalBytes) * 100)) : 0
         }
       })
+      const settled = transfer.then(() => undefined, () => undefined)
+      downloadOperations.add(settled)
+      void settled.then(() => downloadOperations.delete(settled))
+      downloaded = await transfer
+      assertAccepting()
       settleDownload(entry, 'done')
       entry.percent = 100
       entry.receivedBytes = downloaded.bytes
@@ -1387,7 +1613,7 @@ export function createServices(options: ServicesOptions = {}) {
       if (controller.signal.aborted) {
         // llamafarmCancel may already have settled the entry as cancelled.
         if (entry.status === 'downloading') settleDownload(entry, 'cancelled')
-        entry.error = 'Download cancelled by user.'
+        entry.error = closing ? 'Download cancelled by shutdown.' : 'Download cancelled by user.'
         return failure('cancelled', entry.error)
       }
       settleDownload(entry, 'error')
@@ -1404,10 +1630,12 @@ export function createServices(options: ServicesOptions = {}) {
     if (descriptor.accepts === 'server') {
       // A local GGUF carries no tokenizer config for vLLM; the Hub repository
       // it came from does.
+      assertAccepting()
       const started = await startServerRuntime(descriptor, downloaded.path, {
         ...runtimeOptions,
         ...(descriptor.id === 'vllm' ? { tokenizer: model.id } : {})
       })
+      assertAccepting()
       baseUrl = started.baseUrl
       steps.push(...started.steps)
       if (!started.ok) steps.push(started.message)
@@ -1418,6 +1646,7 @@ export function createServices(options: ServicesOptions = {}) {
     }
 
     const openaiBase = baseUrl ? providerBaseUrl({ api: descriptor.api, baseUrl }) : null
+    assertAccepting()
     invalidateModelState()
 
     return recordInstall({
@@ -1446,12 +1675,14 @@ export function createServices(options: ServicesOptions = {}) {
     }
     const version = ++runtimeDetectionVersion
     const report = await detectRuntimes({ ...runtimeOptions, active: settings.current.runtimes.active })
+    assertAccepting()
     if (version === runtimeDetectionVersion) runtimeReport = report
     return { ...report, active: settings.current.runtimes.active }
   }
 
   /** Install a runtime from its official installer — Ollama, for now. */
   async function runtimesInstall(id: string): Promise<RuntimeInstallResult> {
+    assertAccepting()
     const runtime = (id ?? '').trim() || DEFAULT_RUNTIME_ID
     const descriptor = runtimeDescriptor(runtime)
     if (!descriptor) {
@@ -1468,12 +1699,29 @@ export function createServices(options: ServicesOptions = {}) {
         log: ''
       }
     }
-    const result = await installOllama({
+    const operation = installRuntime({
       ...runtimeOptions,
-      ...(options.downloadFileImpl ? { download: options.downloadFileImpl } : {})
+      ...(options.downloadFileImpl ? { download: options.downloadFileImpl } : {}),
+      signal: shutdownController.signal
     })
-    runtimeDetectionVersion++
-    runtimeReport = null
+    const settled = operation.then(() => undefined, (cause: unknown) => {
+      // Normal installer failures belong to the caller. A failure while
+      // shutting down means owned-process cleanup did not finish and must make
+      // shutdown fail rather than disappear behind the always-fulfilled tracker.
+      if (closing) runtimeInstallShutdownErrors.add(cause)
+    })
+    runtimeInstallOperations.add(settled)
+    void settled.then(() => runtimeInstallOperations.delete(settled))
+    let result: RuntimeInstallResult
+    try {
+      result = await operation
+    } finally {
+      runtimeInstallOperations.delete(settled)
+    }
+    if (!closing) {
+      runtimeDetectionVersion++
+      runtimeReport = null
+    }
     return result
   }
 
@@ -1547,25 +1795,27 @@ export function createServices(options: ServicesOptions = {}) {
         astrlink: null
       }
     }
-    const cached = catalog?.models.find((entry) => entry.id.toLowerCase() === repo.toLowerCase()) ?? null
-    const model =
-      cached ??
-      (await fetchModelById(repo, { fetchImpl: options.fetchImpl }).catch(() => null)) ?? {
-        id: repo,
-        task: 'text-generation' as const,
-        label: repo.split('/')[1] ?? repo,
-        author: repo.split('/')[0] ?? '',
-        formats: ['gguf' as const],
-        paramsBillions: null,
-        quantLabel: input.quant ?? null,
-        fileBytes: null,
-        runtimeRamBytes: 0,
-        downloads: 0,
-        likes: 0,
-        license: null,
-        tags: [],
-        hfUrl: `https://huggingface.co/${repo}`
-      }
+    let model: CatalogModel | null = catalog?.models.find((entry) => entry.id.toLowerCase() === repo.toLowerCase()) ?? null
+    if (!model) {
+      model = await fetchModelById(repo, modelFetchOptions).catch(() => null)
+    }
+    assertAccepting()
+    model ??= {
+      id: repo,
+      task: 'text-generation' as const,
+      label: repo.split('/')[1] ?? repo,
+      author: repo.split('/')[0] ?? '',
+      formats: ['gguf' as const],
+      paramsBillions: null,
+      quantLabel: input.quant ?? null,
+      fileBytes: null,
+      runtimeRamBytes: 0,
+      downloads: 0,
+      likes: 0,
+      license: null,
+      tags: [],
+      hfUrl: `https://huggingface.co/${repo}`
+    }
     return installIntoRuntime(descriptor, model, input.quant ?? null)
   }
 
@@ -1605,13 +1855,32 @@ export function createServices(options: ServicesOptions = {}) {
   async function marketplaceRegistry(forceRefresh = false): Promise<void> {
     const fresh = registry !== null && Date.now() - registry.fetchedAt < REGISTRY_TTL_MS
     if (!forceRefresh && (fresh || (registry !== null && registryError !== null))) return
-    try {
-      const fetched = await fetchRegistry({ fetchImpl: options.fetchImpl })
-      registry = { modules: fetched.modules, updated: fetched.updated, fetchedAt: Date.now() }
-      registryError = null
-    } catch (cause) {
-      registryError = cause instanceof Error ? cause.message : String(cause)
+    const registryFetch: FetchLike = (input, init) => {
+      const signals = [init?.signal, shutdownController.signal].filter(
+        (signal): signal is AbortSignal => signal != null
+      )
+      return (options.fetchImpl ?? (globalThis.fetch as FetchLike))(input, {
+        ...init,
+        signal: AbortSignal.any(signals)
+      })
     }
+    const operation = (async () => {
+      try {
+        const fetched = await fetchRegistry({ fetchImpl: registryFetch })
+        if (closing) throw new Error('toolbox-mcp is shutting down')
+        registry = { modules: fetched.modules, updated: fetched.updated, fetchedAt: Date.now() }
+        registryError = null
+      } catch (cause) {
+        if (closing) throw cause
+        registryError = cause instanceof Error ? cause.message : String(cause)
+      }
+    })()
+    registryOperations.add(operation)
+    void operation.then(
+      () => registryOperations.delete(operation),
+      () => registryOperations.delete(operation)
+    )
+    await operation
   }
 
   function isInstalled(module: MarketplaceModule): boolean {
@@ -1634,12 +1903,47 @@ export function createServices(options: ServicesOptions = {}) {
     }
   }
 
+  function trackRemoteOperation<T>(operation: Promise<T>): Promise<T> {
+    remoteTransportOperations.add(operation)
+    void operation.then(
+      () => remoteTransportOperations.delete(operation),
+      () => remoteTransportOperations.delete(operation)
+    )
+    return operation
+  }
+
   async function closeRemoteConnection(module: MarketplaceModule, connection: RemoteConnection): Promise<void> {
-    try {
-      await withRemoteTimeout(connection.close(), remoteTimeouts.closeMs, `${module.name} close`)
-    } catch {
-      // Closing is best-effort; a deadline prevents cleanup from blocking the server.
-    }
+    // The deadline bounds shutdown, but a timeout remains a cleanup failure: a
+    // live transport must never be silently reported as closed. Keep the
+    // underlying close observed separately so a late rejection is consumed
+    // without extending shutdown beyond that deadline.
+    await withRemoteTimeout(() => {
+      let closing: Promise<void>
+      try {
+        closing = Promise.resolve(connection.close())
+      } catch (cause) {
+        closing = Promise.reject(cause)
+      }
+      remoteCloseOperations.add(closing)
+      void closing.then(
+        () => remoteCloseOperations.delete(closing),
+        () => remoteCloseOperations.delete(closing)
+      )
+      return closing
+    }, remoteTimeouts.closeMs, `${module.name} close`)
+  }
+
+  function trackRemoteCleanup(module: MarketplaceModule, connection: RemoteConnection): Promise<void> {
+    const cleanup = closeRemoteConnection(module, connection)
+    remoteCleanupOperations.add(cleanup)
+    void cleanup.then(
+      () => remoteCleanupOperations.delete(cleanup),
+      () => {
+        // Keep failed cleanup visible to shutdown so it cannot be mistaken for
+        // a released transport. The next close reports and clears the failure.
+      }
+    )
+    return cleanup
   }
 
   async function removeRemoteConnection(moduleId: string): Promise<void> {
@@ -1647,11 +1951,12 @@ export function createServices(options: ServicesOptions = {}) {
     if (!existing) return
     remotes.delete(moduleId)
     options.onRemoteRemoved?.(moduleId)
-    await closeRemoteConnection(existing.module, existing.connection)
+    await trackRemoteCleanup(existing.module, existing.connection)
   }
 
   /** Connect and list with bounded deadlines, sharing concurrent reconnect attempts. */
   async function remoteConnectModule(module: MarketplaceModule): Promise<ProxiedTool[]> {
+    assertAccepting()
     const pending = remoteConnectOperations.get(module.id)
     if (pending) return pending
     const operation = connectRemoteModule(module)
@@ -1664,22 +1969,49 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   async function connectRemoteModule(module: MarketplaceModule): Promise<ProxiedTool[]> {
-    if (!module.endpoint) throw new Error(`"${module.name}" has no endpoint.`)
+    assertAccepting()
+    const endpoint = module.endpoint
+    if (!endpoint) throw new Error(`"${module.name}" has no endpoint.`)
     await removeRemoteConnection(module.id)
+    assertAccepting()
 
-    const connectionPromise = remoteConnect(module.endpoint)
     let connectExpired = false
-    // A connect may resolve after the caller timed out. Close that late client
-    // rather than leaking a transport that is no longer registered.
-    void connectionPromise.then((lateConnection) => {
-      if (connectExpired) void closeRemoteConnection(module, lateConnection)
-    }, () => {})
+    let connectionClaimed = false
+    let connectionCleanupStarted = false
+    let lateConnection: RemoteConnection | undefined
+    const cleanupLateConnection = (): void => {
+      if (!lateConnection || connectionClaimed || connectionCleanupStarted) return
+      if (!connectExpired && !closing) return
+      connectionClaimed = true
+      connectionCleanupStarted = true
+      void trackRemoteCleanup(module, lateConnection)
+      lateConnection = undefined
+    }
+    const connectionPromise = withRemoteTimeout(
+      (signal) => {
+        const pending = trackRemoteOperation(remoteConnect(endpoint, signal))
+        // Observe the underlying factory, not only the deadline race: a client
+        // that resolves after timeout/shutdown still needs to be closed.
+        void pending.then((connection) => {
+          if (connectionClaimed) return
+          lateConnection = connection
+          cleanupLateConnection()
+        }, () => {})
+        return pending
+      },
+      remoteTimeouts.connectMs,
+      `${module.name} connect`,
+      shutdownController.signal
+    )
 
     let connection: RemoteConnection
     try {
-      connection = await withRemoteTimeout(connectionPromise, remoteTimeouts.connectMs, `${module.name} connect`)
+      connection = await connectionPromise
+      connectionClaimed = true
+      if (lateConnection === connection) lateConnection = undefined
     } catch (cause) {
-      if (cause instanceof RemoteTimeoutError) connectExpired = true
+      connectExpired = true
+      cleanupLateConnection()
       const message = cause instanceof Error ? cause.message : String(cause)
       remoteErrors.set(module.id, message)
       throw cause
@@ -1687,9 +2019,19 @@ export function createServices(options: ServicesOptions = {}) {
 
     let tools: RemoteToolDef[]
     try {
-      tools = await withRemoteTimeout(connection.listTools(), remoteTimeouts.listMs, `${module.name} list tools`)
+      assertAccepting()
+      tools = await withRemoteTimeout(
+        (signal) => trackRemoteOperation(connection.listTools(signal)),
+        remoteTimeouts.listMs,
+        `${module.name} list tools`,
+        shutdownController.signal
+      )
+      assertAccepting()
     } catch (cause) {
-      await closeRemoteConnection(module, connection)
+      if (!connectionCleanupStarted) {
+        connectionCleanupStarted = true
+        await trackRemoteCleanup(module, connection)
+      }
       const message = cause instanceof Error ? cause.message : String(cause)
       remoteErrors.set(module.id, message)
       throw cause
@@ -1706,6 +2048,7 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   async function recoverRemote(module: MarketplaceModule): Promise<void> {
+    assertAccepting()
     const pending = remoteRecoveryOperations.get(module.id)
     if (pending) return pending
     const operation = (async () => {
@@ -1721,6 +2064,7 @@ export function createServices(options: ServicesOptions = {}) {
   }
 
   async function remoteCall(module: MarketplaceModule, toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    assertAccepting()
     const existing = remotes.get(module.id)
     if (!existing) {
       try {
@@ -1735,11 +2079,13 @@ export function createServices(options: ServicesOptions = {}) {
 
     try {
       return await withRemoteTimeout(
-        existing.connection.callTool(toolName, args),
+        (signal) => trackRemoteOperation(existing.connection.callTool(toolName, args, signal)),
         remoteTimeouts.callMs,
-        `${module.name} tool ${toolName}`
+        `${module.name} tool ${toolName}`,
+        shutdownController.signal
       )
     } catch (cause) {
+      if (closing) throw cause
       const reason = cause instanceof Error ? cause.message : String(cause)
       remoteErrors.set(module.id, reason)
       let recoveryError: string | null = null
@@ -1763,7 +2109,9 @@ export function createServices(options: ServicesOptions = {}) {
 
   /** Reconnect installed remote servers after a restart. Failures are reported, not fatal. */
   async function remoteRestore(): Promise<{ connected: Array<{ id: string; tools: number }>; failed: Array<{ id: string; error: string }> }> {
+    assertAccepting()
     await marketplaceRegistry()
+    assertAccepting()
     const connected: Array<{ id: string; tools: number }> = []
     const failed: Array<{ id: string; error: string }> = []
     for (const id of settings.current.marketplace.installed) {
@@ -1807,6 +2155,7 @@ export function createServices(options: ServicesOptions = {}) {
 
   /** Serialize install/uninstall transitions per module without blocking unrelated settings work. */
   function withMarketplaceLifecycle<T>(moduleId: string, operation: () => Promise<T>): Promise<T> {
+    assertAccepting()
     const pending = (marketplaceLifecycleQueues.get(moduleId) ?? Promise.resolve()).then(operation)
     const tail = pending.then(() => undefined, () => undefined)
     marketplaceLifecycleQueues.set(moduleId, tail)
@@ -1826,7 +2175,9 @@ export function createServices(options: ServicesOptions = {}) {
     if (typeof id !== 'string' || id.trim() === '') throw new Error('A module id is required.')
     const moduleId = id.trim()
     return withMarketplaceLifecycle(moduleId, async () => {
+      assertAccepting()
       await marketplaceRegistry()
+      assertAccepting()
       const module = registry?.modules.find((m) => m.id === moduleId)
       if (!module) throw new Error(`Unknown module "${id}". Refresh the marketplace and try again.`)
       if (module.builtIn) throw new Error(`"${module.name}" is built in — nothing to install.`)
@@ -1867,7 +2218,9 @@ export function createServices(options: ServicesOptions = {}) {
     if (typeof id !== 'string' || id.trim() === '') throw new Error('A module id is required.')
     const moduleId = id.trim()
     return withMarketplaceLifecycle(moduleId, async () => {
+      assertAccepting()
       await marketplaceRegistry()
+      assertAccepting()
       const module = registry?.modules.find((m) => m.id === moduleId)
       if (module?.builtIn) throw new Error(`"${module.name}" is built in — it cannot be uninstalled.`)
       const installed = await commitSettings((draft) => {
@@ -1890,54 +2243,56 @@ export function createServices(options: ServicesOptions = {}) {
 
   return {
     init,
+    get closing() { return closing },
+    close,
     get crypto() {
       return crypto
     },
     get gmail() {
       return gmail
     },
-    cryptoRefresh,
-    cryptoSetWatchlist,
-    cryptoSeries,
-    gmailConnect,
-    gmailDisconnect,
-    gmailCheck,
-    resourceStats,
-    resourceProcesses,
+    cryptoRefresh: admit(cryptoRefresh),
+    cryptoSetWatchlist: admit(cryptoSetWatchlist),
+    cryptoSeries: admit(cryptoSeries),
+    gmailConnect: admit(gmailConnect),
+    gmailDisconnect: admit(gmailDisconnect),
+    gmailCheck: admit(gmailCheck),
+    resourceStats: admit(resourceStats),
+    resourceProcesses: admit(resourceProcesses),
     settingsSnapshot,
-    resourceSetSettings,
-    modelFarmSetPrefs,
-    modelFarmSetNote,
-    llamafarmStatus,
-    llamafarmStatusReport,
-    llamafarmCatalog,
-    llamafarmScore,
-    llamafarmRefresh,
-    llamafarmGrade,
-    llamafarmInstall,
-    llamafarmSearch,
-    llamafarmQuants,
-    llamafarmRemove,
-    llamafarmRunNow,
+    resourceSetSettings: admit(resourceSetSettings),
+    modelFarmSetPrefs: admit(modelFarmSetPrefs),
+    modelFarmSetNote: admit(modelFarmSetNote),
+    llamafarmStatus: admit(llamafarmStatus),
+    llamafarmStatusReport: admit(llamafarmStatusReport),
+    llamafarmCatalog: admit(llamafarmCatalog),
+    llamafarmScore: admit(llamafarmScore),
+    llamafarmRefresh: admit(llamafarmRefresh),
+    llamafarmGrade: admit(llamafarmGrade),
+    llamafarmInstall: admit(llamafarmInstall),
+    llamafarmSearch: admit(llamafarmSearch),
+    llamafarmQuants: admit(llamafarmQuants),
+    llamafarmRemove: admit(llamafarmRemove),
+    llamafarmRunNow: admit(llamafarmRunNow),
     llamafarmProgress,
-    llamafarmCancel,
-    runtimesDetect,
-    runtimesInstall,
-    runtimesUse,
-    runtimesModels,
-    runtimesDownload,
-    gatewayStatus,
-    gatewayRequests,
-    marketplaceList,
-    marketplaceInstall,
-    marketplaceUninstall,
-    marketplaceRefresh,
-    remoteRestore,
+    llamafarmCancel: admit(llamafarmCancel),
+    runtimesDetect: admit(runtimesDetect),
+    runtimesInstall: admit(runtimesInstall),
+    runtimesUse: admit(runtimesUse),
+    runtimesModels: admit(runtimesModels),
+    runtimesDownload: admit(runtimesDownload),
+    gatewayStatus: admit(gatewayStatus),
+    gatewayRequests: admit(gatewayRequests),
+    marketplaceList: admit(marketplaceList),
+    marketplaceInstall: admit(marketplaceInstall),
+    marketplaceUninstall: admit(marketplaceUninstall),
+    marketplaceRefresh: admit(marketplaceRefresh),
+    remoteRestore: admit(remoteRestore),
     remoteStatus,
     remoteToolMetadata,
     installedWidgets,
-    exportWidgets,
-    importWidgets
+    exportWidgets: admit(exportWidgets),
+    importWidgets: admit(importWidgets)
   }
 }
 

@@ -28,16 +28,20 @@ class FakeChild extends EventEmitter {
   readonly stderr = new PassThrough()
   readonly stdin = new FakeInput()
   kills = 0
+  readonly killSignals: Array<NodeJS.Signals | undefined> = []
   killError: Error | null = null
+  exitOnKillSignal: NodeJS.Signals | undefined
 
   constructor(file: string) {
     super()
     this.file = file
   }
 
-  kill(): boolean {
+  kill(signal?: NodeJS.Signals): boolean {
     this.kills += 1
+    this.killSignals.push(signal)
     if (this.killError) queueMicrotask(() => this.emit('error', this.killError))
+    if (signal && signal === this.exitOnKillSignal) queueMicrotask(() => this.emit('exit', 0, null))
     return true
   }
 }
@@ -149,6 +153,181 @@ describe('terminal completion', () => {
 })
 
 describe('terminal process lifecycle', () => {
+  it('close is shared, waits for the direct child, and prevents a restart', async (t) => {
+    const children = fakeSpawn(t)
+    const terminal = testTerminal(t, { platform: 'linux', stopTimeoutMs: 50 })
+    terminal.start()
+
+    const first = terminal.close()
+    const second = terminal.close()
+    assert.ok(first instanceof Promise)
+    assert.equal(first, second)
+    assert.equal(children[0].kills, 1)
+    assert.equal(terminal.state().running, false)
+
+    let closed = false
+    void first.then(() => { closed = true })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(closed, false, 'close must wait for the owned shell to exit')
+
+    children[0].emit('exit', 0, null)
+    await first
+    assert.equal(closed, true)
+    assert.equal(terminal.start().running, false)
+    assert.equal(children.length, 1)
+    assert.doesNotMatch(terminal.snapshot(), /start again to reopen/)
+  })
+
+  it('close releases subscribers and ignores late output', async (t) => {
+    const children = fakeSpawn(t)
+    const terminal = testTerminal(t, { platform: 'linux', stopTimeoutMs: 50 })
+    let delivered = 0
+    terminal.start()
+    terminal.subscribe(() => { delivered += 1 })
+    const beforeClose = delivered
+
+    const closing = terminal.close()
+    children[0].emit('exit', 0, null)
+    await closing
+    const afterClose = delivered
+    children[0].stdout.write('late output')
+    terminal.subscribe(() => { delivered += 1 })
+
+    assert.ok(afterClose >= beforeClose)
+    assert.equal(delivered, afterClose)
+    assert.doesNotMatch(terminal.snapshot(), /late output/)
+  })
+
+  it('close prevents new shell completion work', async (t) => {
+    let invoked = false
+    const terminal = testTerminal(t, {
+      platform: 'win32',
+      execFileImpl: (() => { invoked = true }) as never
+    })
+    await terminal.close()
+
+    const result = await terminal.complete('Get-Chi', 7)
+
+    assert.deepEqual(result, {
+      supported: true,
+      candidates: [],
+      replacementIndex: 7,
+      replacementLength: 0
+    })
+    assert.equal(invoked, false)
+  })
+
+  it('close force-kills a direct child and waits for its observed exit', async (t) => {
+    const children = fakeSpawn(t)
+    const terminal = testTerminal(t, { platform: 'linux', stopTimeoutMs: 10 })
+    terminal.start()
+    children[0].exitOnKillSignal = 'SIGKILL'
+
+    await terminal.close()
+
+    assert.deepEqual(children[0].killSignals, ['SIGTERM', 'SIGKILL'])
+    assert.match(terminal.snapshot(), /did not exit|forcing|force/i)
+  })
+
+  it('close rejects when a direct child never exits after force-kill', { timeout: 1000 }, async (t) => {
+    const children = fakeSpawn(t)
+    const terminal = testTerminal(t, { platform: 'linux', stopTimeoutMs: 5 })
+    terminal.start()
+
+    await assert.rejects(terminal.close(), /did not exit|force-kill/i)
+    assert.deepEqual(children[0].killSignals, ['SIGTERM', 'SIGKILL'])
+  })
+
+  it('close kills and drains an in-flight PowerShell completion child', async (t) => {
+    const completion = new FakeChild('powershell.exe')
+    let complete: ((error: Error | null, stdout: string, stderr: string) => void) | undefined
+    const terminal = testTerminal(t, {
+      platform: 'win32',
+      execFileImpl: ((_file, _args, _options, callback) => {
+        complete = callback
+        return completion
+      }) as never
+    })
+
+    const pending = terminal.complete('Get-Chi', 7)
+    const closing = terminal.close()
+    try {
+      assert.deepEqual(completion.killSignals, ['SIGTERM'])
+      let closed = false
+      void closing.then(() => { closed = true })
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      assert.equal(closed, false, 'shutdown must await the completion child')
+    } finally {
+      complete?.(new Error('completion cancelled'), '', '')
+      completion.emit('exit', 0, null)
+    }
+
+    assert.deepEqual(await pending, {
+      supported: true,
+      candidates: [],
+      replacementIndex: 7,
+      replacementLength: 0
+    })
+    await closing
+  })
+
+  it('close rejects a completion child that never exits without retrying it forever', { timeout: 500 }, async (t) => {
+    const completion = new FakeChild('powershell.exe')
+    const terminal = testTerminal(t, {
+      platform: 'win32',
+      stopTimeoutMs: 5,
+      execFileImpl: (() => completion) as never
+    })
+    void terminal.complete('Get-Chi', 7)
+    const watchdog = setTimeout(() => completion.emit('exit', 0, null), 100)
+    t.after(() => clearTimeout(watchdog))
+
+    await assert.rejects(terminal.close(), /did not exit|force-kill/i)
+    assert.deepEqual(completion.killSignals, ['SIGTERM', 'SIGKILL'])
+  })
+
+  it('close waits for a shell already stopping and removes its process-exit hook', async (t) => {
+    const children = fakeSpawn(t)
+    const exitListenersBefore = new Set(process.listeners('exit'))
+    const terminal = testTerminal(t, { platform: 'linux', stopTimeoutMs: 50 })
+    terminal.start()
+    terminal.stop()
+
+    const closing = terminal.close()
+    let closed = false
+    void closing.then(() => { closed = true })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(closed, false)
+
+    children[0].emit('exit', 0, null)
+    await closing
+    assert.deepEqual(new Set(process.listeners('exit')), exitListenersBefore)
+  })
+
+  it('close drains a stopped shell that is still alive after a restart', { timeout: 1000 }, async (t) => {
+    const children = fakeSpawn(t)
+    const terminal = testTerminal(t, { platform: 'linux', stopTimeoutMs: 10 })
+    terminal.start()
+    terminal.stop()
+    terminal.start()
+    children[1].exitOnKillSignal = 'SIGKILL'
+
+    await assert.rejects(terminal.close(), /session did not exit after force-kill/)
+    assert.deepEqual(children[0].killSignals, ['SIGTERM', 'SIGKILL'])
+  })
+
+  it('close retains a shell orphaned by a stream error and restart', { timeout: 1000 }, async (t) => {
+    const children = fakeSpawn(t)
+    const terminal = testTerminal(t, { platform: 'linux', stopTimeoutMs: 10 })
+    terminal.start()
+    children[0].stdout.emit('error', new Error('stdout EIO'))
+    terminal.start()
+    children[1].exitOnKillSignal = 'SIGKILL'
+
+    await assert.rejects(terminal.close(), /session did not exit after force-kill/)
+    assert.ok(children[0].killSignals.includes('SIGKILL'), 'the orphaned shell must be force-killed')
+  })
+
   it('uses the injected platform to choose the shell and encoding setup', (t) => {
     const children = fakeSpawn(t)
     const terminal = testTerminal(t, { platform: 'linux' })
