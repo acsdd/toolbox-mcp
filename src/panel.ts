@@ -14,7 +14,7 @@ import { createTerminal, type Terminal } from './terminal.js'
 import { TOOL_GROUPS, catalogEntries, schemaParams } from './catalog.js'
 import { createActivity, type Activity } from './activity.js'
 import { appVersion } from './version.js'
-import { createShutdown, watchShutdownSignals } from './lifecycle.js'
+import { createShutdown, watchShutdownSignals, watchStartup } from './lifecycle.js'
 
 const PANEL_PORT = Number(process.env.TOOLBOX_MCP_PORT ?? 3851)
 /** The repository the panel points at for source and issue reports. */
@@ -3112,15 +3112,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const handle = shutdown.own(await startPanel(services))
     console.log(`Toolbox ops panel: http://127.0.0.1:${handle.port}`)
   })()
-  shutdown.track(startup)
-  void startup.catch(async (cause: unknown) => {
-    if (shutdown.closing) return
-    try {
-      await shutdown.close()
-    } catch (closeError) {
-      console.error(closeError)
-    }
-    console.error(cause)
-    process.exitCode = 1
-  })
+  watchStartup(shutdown, startup)
 }

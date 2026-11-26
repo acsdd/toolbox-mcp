@@ -1287,8 +1287,12 @@ export function createServices(options: ServicesOptions = {}) {
     try {
       result = await runner(['rm', target], shutdownController.signal)
     } catch (cause) {
+      // Shutdown cancellation belongs to the caller; only a real Ollama error
+      // may be reported as a failed removal.
+      if (closing) throw cause
       return { ok: false, removed: null, reason: 'failed', message: cause instanceof Error ? cause.message : String(cause), output: '' }
     }
+    assertAccepting()
     if (!result.ok) {
       return { ok: false, removed: null, reason: 'failed', message: result.error ?? 'Ollama refused the removal.', output: result.output }
     }
@@ -1456,6 +1460,8 @@ export function createServices(options: ServicesOptions = {}) {
         writeFileSync(modelfilePath, buildModelfile(plan.reference, { numGpu: input.offload }), 'utf8')
         result = await runner(['create', plan.modelName, '--file', modelfilePath], shutdownController.signal)
         if (!result.ok && isQuantTagRejection(result.output)) {
+          // The retry is new Ollama work; shutdown must not spawn a second child.
+          assertAccepting()
           const fallback = latestReference(plan.reference)
           writeFileSync(modelfilePath, buildModelfile(fallback, { numGpu: input.offload }), 'utf8')
           result = await runner(['create', plan.modelName, '--file', modelfilePath], shutdownController.signal)
@@ -1469,6 +1475,9 @@ export function createServices(options: ServicesOptions = {}) {
     } catch (cause) {
       settleDownload(pullEntry, 'error')
       pullEntry.error = cause instanceof Error ? cause.message : String(cause)
+      // Once shutdown has started, the cancellation (or the unobservable child)
+      // is the caller's truth; a soft failure payload would hide it.
+      if (closing) throw cause
       return failure('failed', pullEntry.error, {
         reference: plan.reference,
         modelName: plan.modelName,

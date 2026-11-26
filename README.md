@@ -36,7 +36,7 @@ no Node.js and no administrator rights.
 | Build | What it is | Size |
 | --- | --- | --- |
 | [`ModelFarm-Setup-0.9.26.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.26/ModelFarm-Setup-0.9.26.exe) | Assisted installer — no administrator rights, you pick the folder, optional Desktop and Start-menu shortcuts | 124.8 MB |
-| [`ModelFarm-Portable-0.9.26.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.26/ModelFarm-Portable-0.9.26.exe) | No installer and no registry writes; its data lives next to the executable | 113.1 MB |
+| [`ModelFarm-Portable-0.9.26.exe`](https://github.com/acsdd/toolbox-mcp/releases/download/v0.9.26/ModelFarm-Portable-0.9.26.exe) | No installer and no registry writes; its data lives next to the executable | 113.2 MB |
 
 Install, update, roll back and uninstall are described in
 [docs/install.md](docs/install.md). Older builds are on the

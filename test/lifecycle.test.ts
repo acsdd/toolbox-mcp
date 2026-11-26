@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
-import { createShutdown, watchShutdownSignals } from '../dist/lifecycle.js'
+import { createShutdown, watchShutdownSignals, watchStartup } from '../dist/lifecycle.js'
 
 function deferred(): { promise: Promise<void>; resolve: () => void; reject: (cause: unknown) => void } {
   let resolve!: () => void
   let reject!: (cause: unknown) => void
   const promise = new Promise<void>((done, fail) => { resolve = done; reject = fail })
   return { promise, resolve, reject }
+}
+
+function nextTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve))
 }
 
 test('shutdown closes every owned resource once and shares its failure', async () => {
@@ -114,4 +118,104 @@ test('termination signals preserve a failing exit status while cleanup still fin
   assert.ok(errors[0] instanceof AggregateError)
   assert.equal(signals.listenerCount('SIGTERM'), 0)
   assert.equal(signals.listenerCount('SIGINT'), 0)
+})
+
+test('stdin EOF turns a cleanup failure into a nonzero exit status', async () => {
+  const shutdown = createShutdown()
+  const stdin = new EventEmitter()
+  const signals = Object.assign(new EventEmitter(), {
+    exitCode: undefined as number | string | undefined
+  })
+  const errors: unknown[] = []
+  watchShutdownSignals(shutdown, {
+    stdin,
+    processEvents: signals,
+    onError: (error) => errors.push(error)
+  })
+  shutdown.own({ close: async () => { throw new Error('listener cleanup failed') } })
+
+  stdin.emit('end')
+  await shutdown.close().catch(() => {})
+
+  assert.equal(signals.exitCode, 1)
+  assert.equal(errors.length, 1)
+  assert.ok(errors[0] instanceof AggregateError)
+  assert.equal(stdin.listenerCount('end'), 0)
+})
+
+test('startup failures racing with shutdown are reported and fail the process', async () => {
+  const shutdown = createShutdown()
+  const startup = deferred()
+  const signals = Object.assign(new EventEmitter(), {
+    exitCode: 0 as number | string | null | undefined
+  })
+  const errors: unknown[] = []
+  watchStartup(shutdown, startup.promise, {
+    processEvents: signals,
+    onError: (error) => errors.push(error)
+  })
+
+  const closing = shutdown.close()
+  const failure = new Error('settings could not be loaded')
+  startup.reject(failure)
+  await closing
+  await nextTurn()
+
+  assert.deepEqual(errors, [failure])
+  assert.equal(signals.exitCode, 1)
+})
+
+test('startup preserves an existing nonzero failure status', async () => {
+  const shutdown = createShutdown()
+  const startup = deferred()
+  const signals = Object.assign(new EventEmitter(), {
+    exitCode: 143 as number | string | null | undefined
+  })
+  const errors: unknown[] = []
+  watchStartup(shutdown, startup.promise, {
+    processEvents: signals,
+    onError: (error) => errors.push(error)
+  })
+
+  const closing = shutdown.close()
+  const failure = new Error('panel failed while terminating')
+  startup.reject(failure)
+  await closing
+  await nextTurn()
+
+  assert.equal(signals.exitCode, 143)
+  assert.deepEqual(errors, [failure])
+})
+
+test('expected shutdown cancellation remains quiet during startup', async () => {
+  for (const kind of ['guard', 'abort'] as const) {
+    const shutdown = createShutdown()
+    const startup = deferred()
+    const signals = Object.assign(new EventEmitter(), {
+      exitCode: undefined as number | string | null | undefined
+    })
+    const errors: unknown[] = []
+    watchStartup(shutdown, startup.promise, {
+      processEvents: signals,
+      onError: (error) => errors.push(error)
+    })
+
+    const closing = shutdown.close()
+    let cancellation: unknown
+    try {
+      shutdown.assertOpen()
+    } catch (cause) {
+      cancellation = cause
+    }
+    if (kind === 'abort') {
+      cancellation = new Error('The operation was aborted')
+      cancellation.name = 'AbortError'
+    }
+    startup.reject(cancellation)
+    await closing
+    await nextTurn()
+
+    assert.deepEqual(errors, [], `${kind} cancellation should not be reported as a startup failure`)
+    assert.equal(signals.exitCode, undefined, `${kind} cancellation should remain a natural exit`)
+  }
 })

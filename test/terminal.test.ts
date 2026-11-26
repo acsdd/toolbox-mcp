@@ -41,7 +41,10 @@ class FakeChild extends EventEmitter {
     this.kills += 1
     this.killSignals.push(signal)
     if (this.killError) queueMicrotask(() => this.emit('error', this.killError))
-    if (signal && signal === this.exitOnKillSignal) queueMicrotask(() => this.emit('exit', 0, null))
+    if (signal && signal === this.exitOnKillSignal) queueMicrotask(() => {
+      this.emit('exit', 0, null)
+      this.emit('close', 0, null)
+    })
     return true
   }
 }
@@ -171,11 +174,32 @@ describe('terminal process lifecycle', () => {
     assert.equal(closed, false, 'close must wait for the owned shell to exit')
 
     children[0].emit('exit', 0, null)
+    children[0].emit('close', 0, null)
     await first
     assert.equal(closed, true)
     assert.equal(terminal.start().running, false)
     assert.equal(children.length, 1)
     assert.doesNotMatch(terminal.snapshot(), /start again to reopen/)
+  })
+
+  it('close waits for stdio close after the direct child exits', async (t) => {
+    const children = fakeSpawn(t)
+    const terminal = testTerminal(t, { platform: 'linux', stopTimeoutMs: 50 })
+    terminal.start()
+
+    const closing = terminal.close()
+    let closed = false
+    void closing.then(() => { closed = true })
+    children[0].emit('exit', 0, null)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    assert.equal(closed, false, 'exit alone must not finish shutdown while stdio is open')
+    assert.equal(children[0].stdin.destroyed, true)
+    assert.equal(children[0].stdout.destroyed, true)
+    assert.equal(children[0].stderr.destroyed, true)
+
+    children[0].emit('close', 0, null)
+    await closing
   })
 
   it('close releases subscribers and ignores late output', async (t) => {
@@ -188,6 +212,7 @@ describe('terminal process lifecycle', () => {
 
     const closing = terminal.close()
     children[0].emit('exit', 0, null)
+    children[0].emit('close', 0, null)
     await closing
     const afterClose = delivered
     children[0].stdout.write('late output')
@@ -260,6 +285,7 @@ describe('terminal process lifecycle', () => {
     } finally {
       complete?.(new Error('completion cancelled'), '', '')
       completion.emit('exit', 0, null)
+      completion.emit('close', 0, null)
     }
 
     assert.deepEqual(await pending, {
@@ -300,6 +326,7 @@ describe('terminal process lifecycle', () => {
     assert.equal(closed, false)
 
     children[0].emit('exit', 0, null)
+    children[0].emit('close', 0, null)
     await closing
     assert.deepEqual(new Set(process.listeners('exit')), exitListenersBefore)
   })

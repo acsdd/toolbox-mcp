@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { test, type TestContext } from 'node:test'
 import type { StoredSettings } from '../dist/config.js'
 import { createServices } from '../dist/services.js'
@@ -1091,4 +1093,206 @@ test('all public work is rejected before I/O once closing starts', async () => {
     if (result.status === 'rejected') assert.match(String(result.reason), /shutting down/)
   }
   assert.equal(requests, 0)
+})
+
+// --- owned Ollama commands ----------------------------------------------------
+
+const SPLIT_QUANT_REJECTION = {
+  ok: false,
+  code: 1,
+  output:
+    'Error: pull model manifest: 400: {"error":"The specified tag is not available in the repository."}',
+  error: 'tag rejected'
+}
+
+const ollamaVersionExec = (_file: string, _args: string[], _options: unknown, cb: (error: Error | null, stdout: string, stderr?: string) => void): void =>
+  cb(null, 'ollama version is 0.5.4')
+
+/** Lists one installed model so removal can resolve a target offline. */
+function installedModelFetch() {
+  return (async (input: string | URL) => {
+    if (String(input).includes('/api/tags')) {
+      return new Response(JSON.stringify({
+        models: [{ name: 'shutdown-model:latest', size: SHUTDOWN_MODEL_BYTES, modified_at: '2026-11-01T00:00:00Z' }]
+      }), { status: 200 })
+    }
+    return shutdownModelFetch()(input)
+  }) as never
+}
+
+function outcome<T>(operation: Promise<T>): Promise<string> {
+  return operation.then(
+    (value) => `resolved: ${JSON.stringify(value)}`,
+    (error: unknown) => `rejected: ${error instanceof Error ? error.message : String(error)}`
+  )
+}
+
+interface FakeOllamaChild extends EventEmitter {
+  stdout: PassThrough
+  stderr: PassThrough
+  pid: number
+  kill(signal?: NodeJS.Signals): boolean
+}
+
+function fakeOllamaChild(kills: Array<NodeJS.Signals | undefined>, exitsOnKill: boolean): FakeOllamaChild {
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 4242,
+    kill(signal?: NodeJS.Signals) {
+      kills.push(signal)
+      if (exitsOnKill) child.emit('close', null)
+      return true
+    }
+  }) as FakeOllamaChild
+  return child
+}
+
+test('close prevents the split-install quantization retry', { timeout: 3000 }, async (t) => {
+  const home = await useTemporaryHome(t)
+  const created: string[][] = []
+  const firstStarted = deferred()
+  const releaseFirst = deferredValue<typeof SPLIT_QUANT_REJECTION>()
+  const services = createServices({
+    fetchImpl: shutdownModelFetch(),
+    execFileImpl: ollamaVersionExec,
+    freeDiskImpl: async () => 1024 * 1024 * 1024,
+    homeDir: join(home, 'home'),
+    runOllama: async (args) => {
+      created.push(args)
+      if (created.length === 1) {
+        firstStarted.resolve()
+        return releaseFirst.promise
+      }
+      throw new Error('a late quantization retry must not start')
+    }
+  })
+  await services.init()
+
+  const installing = outcome(services.llamafarmInstall({ repo: SHUTDOWN_MODEL.id, runtime: 'ollama', offload: 20 }))
+  await firstStarted.promise
+  const closing = services.close()
+  releaseFirst.resolve(SPLIT_QUANT_REJECTION)
+
+  assert.match(await installing, /rejected: .*shutting down/)
+  assert.equal(created.length, 1, 'shutdown must prevent the follow-on create')
+  await closing
+})
+
+test('close prevents a late Ollama removal from reporting success', { timeout: 3000 }, async (t) => {
+  const home = await useTemporaryHome(t)
+  const removalStarted = deferred()
+  const releaseRemoval = deferredValue<{ ok: boolean; code: number | null; output: string; error: string | null }>()
+  const services = createServices({
+    fetchImpl: installedModelFetch(),
+    execFileImpl: ollamaVersionExec,
+    homeDir: join(home, 'home'),
+    runOllama: async () => {
+      removalStarted.resolve()
+      return releaseRemoval.promise
+    }
+  })
+  await services.init()
+
+  const removing = outcome(services.llamafarmRemove({ model: 'shutdown-model' }))
+  await removalStarted.promise
+  const closing = services.close()
+  releaseRemoval.resolve({ ok: true, code: 0, output: 'removed', error: null })
+
+  assert.match(await removing, /rejected: .*shutting down/)
+  await closing
+})
+
+test('close turns a cancelled removal into shutdown cancellation, not a failure report', { timeout: 3000 }, async (t) => {
+  const home = await useTemporaryHome(t)
+  const removalStarted = deferred()
+  const services = createServices({
+    fetchImpl: installedModelFetch(),
+    execFileImpl: ollamaVersionExec,
+    homeDir: join(home, 'home'),
+    runOllama: async (_args, signal) =>
+      new Promise((_resolve, reject) => {
+        const abort = () => reject(signal?.reason ?? new Error('Ollama command cancelled.'))
+        if (signal?.aborted) abort()
+        else {
+          removalStarted.resolve()
+          signal?.addEventListener('abort', abort, { once: true })
+        }
+      })
+  })
+  await services.init()
+
+  const removing = outcome(services.llamafarmRemove({ model: 'shutdown-model' }))
+  const started = await Promise.race([removalStarted.promise.then(() => 'started'), removing])
+  assert.equal(started, 'started')
+  const closing = services.close()
+
+  assert.match(await removing, /rejected: .*shutting down/)
+  await closing
+})
+
+test('close terminates an owned Ollama pull and waits for its observed exit', { timeout: 3000 }, async (t) => {
+  const home = await useTemporaryHome(t)
+  const kills: Array<NodeJS.Signals | undefined> = []
+  let child!: FakeOllamaChild
+  const spawnStarted = deferred()
+  const services = createServices({
+    fetchImpl: shutdownModelFetch(),
+    execFileImpl: ollamaVersionExec,
+    freeDiskImpl: async () => 1024 * 1024 * 1024,
+    homeDir: join(home, 'home'),
+    spawnOllamaImpl: () => {
+      child = fakeOllamaChild(kills, false)
+      spawnStarted.resolve()
+      return child
+    }
+  })
+  await services.init()
+
+  const installing = outcome(services.llamafarmInstall({ repo: SHUTDOWN_MODEL.id, runtime: 'ollama' }))
+  await spawnStarted.promise
+  const closing = services.close()
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.deepEqual(kills, [undefined], 'shutdown must terminate the owned Ollama child')
+  let closed = false
+  void closing.then(() => { closed = true })
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(closed, false, 'shutdown must wait for the observed child exit')
+
+  child.emit('close', null)
+  assert.match(await installing, /rejected: .*shutting down/)
+  await closing
+})
+
+test('close reports an owned Ollama pull that never exits and rejects its late result', { timeout: 3000 }, async (t) => {
+  const home = await useTemporaryHome(t)
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const kills: Array<NodeJS.Signals | undefined> = []
+  const spawnStarted = deferred()
+  const services = createServices({
+    fetchImpl: shutdownModelFetch(),
+    execFileImpl: ollamaVersionExec,
+    freeDiskImpl: async () => 1024 * 1024 * 1024,
+    homeDir: join(home, 'home'),
+    spawnOllamaImpl: () => {
+      spawnStarted.resolve()
+      return fakeOllamaChild(kills, false)
+    }
+  })
+  await services.init()
+
+  const installing = outcome(services.llamafarmInstall({ repo: SHUTDOWN_MODEL.id, runtime: 'ollama' }))
+  await spawnStarted.promise
+  const closing = services.close()
+  await Promise.resolve()
+  t.mock.timers.tick(2000)
+  t.mock.timers.tick(2000)
+
+  assert.deepEqual(kills, [undefined, 'SIGKILL'], 'shutdown must escalate to SIGKILL')
+  assert.match(await installing, /rejected: .*did not exit after SIGKILL/)
+  await assert.rejects(closing, (error: unknown) => {
+    assert.ok(error instanceof AggregateError)
+    assert.ok(error.errors.some((cause) => String(cause).includes('did not exit after SIGKILL')))
+    return true
+  })
 })

@@ -12,7 +12,7 @@ import { jsonSchemaToZodShape, proxiedToolAnnotations } from './remote.js'
 import { appVersion } from './version.js'
 import { TOOL_CATALOG } from './catalog.js'
 import { createActivity } from './activity.js'
-import { createShutdown, watchShutdownSignals } from './lifecycle.js'
+import { createShutdown, watchShutdownSignals, watchStartup } from './lifecycle.js'
 
 const shutdown = createShutdown()
 watchShutdownSignals(shutdown, { stdin: process.stdin })
@@ -245,15 +245,7 @@ const startup = (async () => {
 })()
 
 // A panel created just as shutdown starts is closed by own(); tracking startup
-// makes the final close wait for that late cleanup instead of leaking it.
-shutdown.track(startup)
-void startup.catch(async (cause: unknown) => {
-  if (shutdown.closing) return // EOF/signal cancellation is an expected exit.
-  try {
-    await shutdown.close()
-  } catch (closeError) {
-    console.error(closeError)
-  }
-  console.error(cause)
-  process.exitCode = 1
-})
+// makes the final close wait for that late cleanup instead of leaking it. Only
+// cancellation caused by an expected EOF/signal exit is silent; a real startup
+// failure is reported and makes the process exit nonzero.
+watchStartup(shutdown, startup)

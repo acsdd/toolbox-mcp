@@ -64,7 +64,7 @@ export function createTerminal(options: TerminalOptions = {}) {
   const listeners = new Set<(chunk: string) => void>()
   const completionChildren = new Set<ChildProcess>()
   // UI state follows only the newest shell; ownership follows every spawned
-  // shell until an observed exit/close, including stopped or failed sessions.
+  // shell until observed close, including stopped or failed sessions.
   const sessions = new Set<ChildProcess>()
   const terminationRequested = new WeakSet<ChildProcess>()
 
@@ -150,7 +150,6 @@ export function createTerminal(options: TerminalOptions = {}) {
       if (child === session) append(chunk)
     })
     session.on('exit', () => {
-      sessions.delete(session)
       if (closed) {
         stopping = null
       } else if (child === session) {
@@ -277,13 +276,12 @@ export function createTerminal(options: TerminalOptions = {}) {
     }
   }
 
-  /** Resolve only after the owned process has actually reported its exit. */
+  /** Resolve only after the owned process has closed its stdio handles. */
   function waitForSessionExit(
     session: ChildProcess,
     label: string,
     initialSignalSent = false
   ): Promise<void> {
-    if (session.exitCode != null || session.signalCode != null) return Promise.resolve()
     return new Promise<void>((resolve, reject) => {
       let settled = false
       let forceTimer: ReturnType<typeof setTimeout> | undefined
@@ -294,22 +292,25 @@ export function createTerminal(options: TerminalOptions = {}) {
         if (forceTimer) clearTimeout(forceTimer)
         if (finishTimer) clearTimeout(finishTimer)
         session.off('exit', onExit)
-        session.off('close', onExit)
+        session.off('close', onClose)
         if (cause) reject(cause)
         else resolve()
       }
-      const onExit = (): void => finish()
-      session.once('exit', onExit)
-      session.once('close', onExit)
-      if (session.exitCode != null || session.signalCode != null) {
-        finish()
-        return
+      const onExit = (): void => {
+        // Grandchildren can inherit the shell's pipes and outlive its direct
+        // process. Release our handles after exit, then wait for close so a
+        // broken transport cannot keep the MCP process alive indefinitely.
+        session.stdin?.destroy()
+        session.stdout?.destroy()
+        session.stderr?.destroy()
       }
+      const onClose = (): void => finish()
+      session.once('exit', onExit)
+      session.once('close', onClose)
       forceTimer = setTimeout(() => {
         append(`\r\n[${label} did not exit after stop timeout — forcing termination]\r\n`)
         signalSession(session, 'SIGKILL', `${label} force-kill failed`)
-        // A broken process handle must not hang shutdown forever, but a timer
-        // is not evidence of exit: only the exit event may complete cleanup.
+        // A timer or a failed kill is not proof of exit or closed stdio.
         finishTimer = setTimeout(
           () => finish(new Error(`${label} did not exit after force-kill.`)),
           Math.max(1, Math.min(stopTimeoutMs, 250))

@@ -13,8 +13,26 @@ export interface ShutdownController {
   close(): Promise<void>
 }
 
+const SHUTDOWN_MESSAGE = 'toolbox-mcp is shutting down'
+
+/** Errors raised purely because shutdown had already started. */
+const cancellationErrors = new WeakSet<object>()
+
 function shutdownError(): Error {
-  return new Error('toolbox-mcp is shutting down')
+  const error = new Error(SHUTDOWN_MESSAGE)
+  cancellationErrors.add(error)
+  return error
+}
+
+/**
+ * True when a rejection only reports that shutdown was already underway — the
+ * shutdown guard, or an abort triggered by it. Anything else is a real failure
+ * even if it happens to arrive while the process is closing.
+ */
+export function isShutdownCancellation(cause: unknown): boolean {
+  if (typeof cause === 'string') return cause === SHUTDOWN_MESSAGE
+  if (!(cause instanceof Error)) return false
+  return cancellationErrors.has(cause) || cause.name === 'AbortError' || cause.message === SHUTDOWN_MESSAGE
 }
 
 /**
@@ -108,8 +126,13 @@ export function createShutdown(): ShutdownController {
 export interface ShutdownSignalOptions {
   /** Omit for panel-only processes; MCP stdio passes process.stdin. */
   stdin?: EventEmitter
-  processEvents?: EventEmitter & { exitCode?: number | string | undefined }
+  processEvents?: EventEmitter & { exitCode?: number | string | null | undefined }
   onError?: (error: unknown) => void
+}
+
+/** Preserve an existing failure status; replace only a missing or successful one. */
+function setFailingExitCode(events: EventEmitter & { exitCode?: number | string | null | undefined }, code: number): void {
+  if (events.exitCode == null || events.exitCode === 0 || events.exitCode === '0') events.exitCode = code
 }
 
 /** Bind stdin EOF (when supplied), SIGINT and SIGTERM to the shared close. */
@@ -119,7 +142,12 @@ export function watchShutdownSignals(shutdown: ShutdownController, options: Shut
   const listeners: Array<{ source: EventEmitter; event: string; listener: () => void }> = []
 
   if (options.stdin) {
-    const onEnd = () => { void shutdown.close().catch(onError) }
+    const onEnd = () => {
+      void shutdown.close().catch((cause: unknown) => {
+        onError(cause)
+        setFailingExitCode(signals, 1)
+      })
+    }
     options.stdin.once('end', onEnd)
     listeners.push({ source: options.stdin, event: 'end', listener: onEnd })
   }
@@ -136,5 +164,36 @@ export function watchShutdownSignals(shutdown: ShutdownController, options: Shut
     close: () => {
       for (const { source, event, listener } of listeners) source.removeListener(event, listener)
     }
+  })
+}
+
+export interface StartupWatchOptions {
+  processEvents?: EventEmitter & { exitCode?: number | string | null | undefined }
+  onError?: (error: unknown) => void
+}
+
+/**
+ * Track the startup promise and turn a genuine startup failure into a failing
+ * exit after cleaning up. A rejection that only reports shutdown was already
+ * underway — stdin EOF or a signal cancelling startup mid-flight — is the
+ * expected way to exit and stays silent.
+ */
+export function watchStartup(
+  shutdown: ShutdownController,
+  startup: Promise<unknown>,
+  options: StartupWatchOptions = {}
+): void {
+  const signals = options.processEvents ?? process
+  const onError = options.onError ?? ((error: unknown) => console.error(error))
+  shutdown.track(startup)
+  void startup.catch(async (cause: unknown) => {
+    if (shutdown.closing && isShutdownCancellation(cause)) return
+    try {
+      await shutdown.close()
+    } catch (closeError) {
+      onError(closeError)
+    }
+    onError(cause)
+    setFailingExitCode(signals, 1)
   })
 }
