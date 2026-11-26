@@ -93,7 +93,7 @@ writes a Modelffile that pins how many layers stay on the GPU.
 | `/api/fit` | Scored models (`?scenario=now\|total`) |
 | `/healthz` | Liveness |
 
-Bind elsewhere with `--host`, and serve over HTTPS with `--tls-cert` / `--tls-key`.
+Every request needs `Authorization: Bearer <token>`. A random token is printed on startup, or set `LLAMAFARM_API_TOKEN` to a persistent secret. LAN access requires a specific `--host`, a token of at least 32 characters, and HTTPS via `--tls-cert` and `--tls-key`. Only GET requests are accepted.
 
 ## Development
 

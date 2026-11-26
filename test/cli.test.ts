@@ -396,17 +396,21 @@ describe('serve command', () => {
       const handle = await startServer(ctx as never, { host: '127.0.0.1', port: 0 })
       const base = `http://127.0.0.1:${handle.port}`
       try {
-        const health = await fetch(`${base}/healthz`)
+        const headers = { Authorization: `Bearer ${handle.token}` }
+        assert.equal((await fetch(`${base}/api/profile`)).status, 401)
+        assert.equal((await fetch(`${base}/api/profile`, { method: 'POST', headers })).status, 405)
+        assert.equal((await fetch(`${base}/api/profile`, { headers: { ...headers, Origin: 'https://evil.example' } })).status, 403)
+        const health = await fetch(`${base}/healthz`, { headers })
         assert.equal(health.status, 200)
 
-        const profile = await (await fetch(`${base}/api/profile`)).json()
+        const profile = await (await fetch(`${base}/api/profile`, { headers })).json()
         assert.equal(profile.cores, 16)
 
-        const fit = await (await fetch(`${base}/api/fit?scenario=total`)).json()
+        const fit = await (await fetch(`${base}/api/fit?scenario=total`, { headers })).json()
         assert.equal(fit.scenario, 'total')
         assert.equal(fit.models.length, 1)
 
-        const missing = await fetch(`${base}/api/nope`)
+        const missing = await fetch(`${base}/api/nope`, { headers })
         assert.equal(missing.status, 404)
       } finally {
         await handle.close()

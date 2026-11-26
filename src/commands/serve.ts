@@ -3,7 +3,8 @@
  * a phone on the LAN, the NAS dashboard) can ask the same questions the CLI
  * answers. Binds to localhost unless another host is asked for.
  */
-import { createServer, type Server } from 'node:http'
+import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer as createTlsServer } from 'node:https'
 import { readFileSync } from 'node:fs'
 import { scoreModels, sortForDisplay, type FitScenario } from '@toolbox/widgets'
@@ -17,11 +18,13 @@ export interface ServeOptions {
   port?: number
   tlsCert?: string
   tlsKey?: string
+  token?: string
 }
 
 export interface ServeHandle {
   port: number
   host: string
+  token: string
   close: () => Promise<void>
 }
 
@@ -33,9 +36,27 @@ function sendJson(response: { writeHead: (code: number, headers: Record<string, 
 export async function startServer(ctx: CommandContext, options: ServeOptions = {}): Promise<ServeHandle> {
   const host = options.host ?? '127.0.0.1'
   const port = options.port ?? 3854
-
-  const handler = async (request: { url?: string; method?: string }, response: Parameters<typeof sendJson>[0]): Promise<void> => {
-    const url = new URL(request.url ?? '/', `http://${host}:${port}`)
+  const token = options.token ?? randomBytes(32).toString('hex')
+  if (options.token && options.token.length < 32) throw new Error('API token must be at least 32 characters.')
+  const loopback = ['127.0.0.1','localhost','::1'].includes(host.toLowerCase())
+  if (!loopback && (['0.0.0.0','::'].includes(host) || !options.token || token.length < 32 || !options.tlsCert || !options.tlsKey)) throw new Error('LAN access requires a specific host, TLS, and a token of at least 32 characters.')
+  const scheme = options.tlsCert && options.tlsKey ? 'https' : 'http'
+  let boundPort = port
+  const allowedHosts = new Set(['localhost','127.0.0.1','[::1]', host.toLowerCase()])
+  const calls = new Map<string,{start:number;count:number}>()
+  const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+    let target: URL
+    try { target = new URL(scheme + '://' + request.headers.host) } catch { sendJson(response,403,{error:'Forbidden host'});return }
+    const site=request.headers['sec-fetch-site'], origin=request.headers.origin
+    if (!allowedHosts.has(target.hostname.toLowerCase()) || Number(target.port || (scheme === 'https' ? 443 : 80)) !== boundPort || (origin && origin !== target.origin) || (site && site !== 'same-origin' && site !== 'none')) { sendJson(response,403,{error:'Forbidden origin or host'});return }
+    if (request.method !== 'GET') { sendJson(response,405,{error:'Method not allowed'});return }
+    const supplied=request.headers.authorization?.replace(/^Bearer /,'') ?? ''
+    const provided=Buffer.from(supplied),expected=Buffer.from(token)
+    if (provided.length!==expected.length || !timingSafeEqual(provided,expected)) { sendJson(response,401,{error:'Access token required'});return }
+    const remote=request.socket.remoteAddress || 'unknown', now=Date.now()
+    const rate=calls.get(remote);if(!rate || now-rate.start>60_000)calls.set(remote,{start:now,count:1});else if(++rate.count>60){sendJson(response,429,{error:'Too many requests'});return}
+    if(calls.size>1024)calls.clear()
+    const url = new URL(request.url ?? '/', target.origin)
     const path = url.pathname
 
     try {
@@ -73,7 +94,7 @@ export async function startServer(ctx: CommandContext, options: ServeOptions = {
     server = createTlsServer(
       { cert: readFileSync(options.tlsCert), key: readFileSync(options.tlsKey) },
       (request, response) => {
-        void handler(request as never, response as never)
+        void handler(request, response)
       }
     )
   } else {
@@ -88,11 +109,12 @@ export async function startServer(ctx: CommandContext, options: ServeOptions = {
   })
 
   const address = server.address()
-  const boundPort = typeof address === 'object' && address !== null ? address.port : port
+  boundPort = typeof address === 'object' && address !== null ? address.port : port
 
   return {
     port: boundPort,
     host,
+    token,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve())
@@ -105,15 +127,18 @@ export async function serveCommand(ctx: CommandContext): Promise<number> {
   const port = flagNumber(ctx.args.flags, 'port') ?? 3854
   const tlsCert = flagString(ctx.args.flags, 'tls-cert')
   const tlsKey = flagString(ctx.args.flags, 'tls-key')
+  const token = process.env.LLAMAFARM_API_TOKEN
 
   const handle = await startServer(ctx, {
     host,
     port,
     ...(tlsCert ? { tlsCert } : {}),
-    ...(tlsKey ? { tlsKey } : {})
+    ...(tlsKey ? { tlsKey } : {}),
+    ...(token ? { token } : {})
   })
   const scheme = tlsCert && tlsKey ? 'https' : 'http'
   ctx.write(`LlamaFarm API on ${scheme}://${handle.host}:${handle.port}\n`)
+  if (!token) ctx.write(`Local access token: ${handle.token}\n`)
   ctx.write(`  /api/profile  /api/catalog  /api/fit?scenario=now  /healthz\n`)
   return 0
 }
