@@ -494,6 +494,36 @@ ${WIDGET_HOST_CSS}
     .mf-bar input[type="search"] { width: 100%; }
     main.host-screen { padding: 22px 18px 40px; }
   }
+
+  /* ArtistWave-inspired, locally saved suite themes. */
+  :root[data-theme="night"] { --bg:#0b1015;--bg-2:#101922;--panel:#101922;--panel2:#17252c;--elevated:#22363b;--border:#415960;--border-soft:#2c4148;--text:#eff5f4;--muted:#b0c6c4;--dim:#9eb5b2;--accent:#b7f56b;--accent-2:#80d8c8 }
+  :root[data-theme="day"] { color-scheme:light;--bg:#f5f8f0;--bg-2:#eff5eb;--panel:#fffefa;--panel2:#e8f1e4;--elevated:#dfeede;--border:#aac3ab;--border-soft:#cbdcc9;--text:#243f31;--muted:#47634d;--dim:#536f57;--accent:#387542;--accent-2:#326956 }
+  :root[data-theme="bright-night"] { --bg:#202b34;--bg-2:#26343e;--panel:#344550;--panel2:#293b46;--elevated:#415662;--border:#718b95;--border-soft:#597581;--text:#f4faff;--muted:#cfdee4;--dim:#bdd0d8;--accent:#b7f56b }
+  :root[data-theme="ocean"] { --bg:#102533;--bg-2:#122c3a;--panel:#173747;--panel2:#193d4b;--elevated:#224957;--border:#5c8c97;--border-soft:#3d6674;--text:#f0fbff;--muted:#b6d7df;--dim:#a6cbd3;--accent:#7fe5ec }
+  :root[data-theme="plum"] { --bg:#281c30;--bg-2:#302239;--panel:#3a2a44;--panel2:#422f4c;--elevated:#503c59;--border:#967aa0;--border-soft:#765d80;--text:#fff7ff;--muted:#e1c9e5;--dim:#d3bad8;--accent:#f0baf5 }
+  :root[data-theme="bugs"] { --bg:#303941;--bg-2:#39464f;--panel:#485762;--panel2:#41515b;--elevated:#586b77;--border:#8398a3;--border-soft:#6a808b;--text:#f8fbff;--muted:#d1dce1;--dim:#c0d0d7;--accent:#ffad55 }
+  :root[data-theme="daffy"] { --bg:#1c2229;--bg-2:#242c34;--panel:#343d47;--panel2:#2e3841;--elevated:#48535e;--border:#877b70;--border-soft:#695f57;--text:#fff9ef;--muted:#e4d7c5;--dim:#d7c8b7;--accent:#ffb258 }
+  :root[data-theme="tweety"] { --bg:#3b3215;--bg-2:#453b19;--panel:#514822;--panel2:#48401e;--elevated:#675d2e;--border:#a49557;--border-soft:#837641;--text:#fffbed;--muted:#efe0aa;--dim:#dfd09d;--accent:#ffdf5c }
+  :root[data-theme="sylvester"] { --bg:#25272d;--bg-2:#303238;--panel:#3b3d44;--panel2:#34363d;--elevated:#50525a;--border:#97868a;--border-soft:#756a70;--text:#fffafa;--muted:#e2d8d9;--dim:#d4c8ca;--accent:#ff8c94 }
+  :root[data-theme="taz"] { --bg:#34251d;--bg-2:#402e23;--panel:#503b2d;--panel2:#463326;--elevated:#684d39;--border:#a48a73;--border-soft:#826954;--text:#fff7ee;--muted:#e5d0bc;--dim:#d6c0ab;--accent:#f5ad6d }
+  :root[data-theme="roadrunner"] { --bg:#132d43;--bg-2:#17374e;--panel:#1e4560;--panel2:#1a3c54;--elevated:#315c76;--border:#7199ac;--border-soft:#4f798e;--text:#f1faff;--muted:#c1dce9;--dim:#b2cfde;--accent:#83dfff }
+  :root[data-theme] body { font-family:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;background:radial-gradient(ellipse at 85% 0%,color-mix(in srgb,var(--accent) 12%,transparent),transparent 50%),var(--bg); }
+  :root[data-theme] :is(.topbar,.sidebar) { background:linear-gradient(150deg,#ffffff16,transparent 60%),var(--panel);border-color:var(--border); }
+  :root[data-theme] :is(.card,.tile,.hero) { background:linear-gradient(150deg,#ffffff1a,transparent 50%),var(--panel);border-color:var(--border);box-shadow:inset 0 1px 0 #ffffff25,0 8px 25px #0003; }
+  :root[data-theme] :is(.navbtn,.card pre) { color:var(--muted) }
+  :root[data-theme] .navbtn:hover { color:var(--text);background:var(--elevated) }
+  :root[data-theme] .navbtn.active { color:var(--text);background:linear-gradient(150deg,#ffffff1c,transparent),var(--elevated);box-shadow:inset 3px 0 0 var(--accent) }
+  :root[data-theme] :is(.fact,.hero-mark,.mf-card,.settings-card) { background:linear-gradient(150deg,#ffffff17,transparent),var(--panel2);border-color:var(--border);color:var(--text) }
+  :root[data-theme] :is(.btn,.grp-chip,input,select,textarea) { border-color:var(--border);color:var(--text) }
+  :root[data-theme] :is(.btn,input,select,textarea) { background-color:var(--elevated) }
+  :root[data-theme] :is(.btn,.suite-theme select) { background-image:linear-gradient(180deg,#ffffff20,transparent 65%);box-shadow:inset 0 1px 0 #ffffff24,0 3px 8px #0002 }
+  :root[data-theme] :is(.grp-chip.on,.btn.primary) { background-color:var(--accent);color:var(--bg) }
+  :root[data-theme="day"] :is(.grp-chip.on,.btn.primary) { color:#fff }
+  :root[data-theme] ::-webkit-scrollbar-thumb { background:var(--accent);border:3px solid transparent;background-clip:padding-box;border-radius:8px }
+  .suite-theme { display:grid;gap:2px;min-width:140px;color:var(--muted);font:700 .6rem/1.2 "Segoe UI",sans-serif;letter-spacing:.05em }
+  .suite-theme select { width:100%;min-height:34px;padding:5px 8px;border:1px solid var(--border);border-radius:8px;background-color:var(--elevated);color:var(--text);font-size:.75rem;letter-spacing:normal }
+  @media (max-width:600px){.topbar{gap:8px;padding:0 12px}.suite-theme{min-width:110px}.badge{display:none}}
+
 </style>
 </head>
 <body>
@@ -501,8 +531,8 @@ ${WIDGET_HOST_CSS}
   <header class="topbar">
     <div class="brand"><b>TOOLBOX</b> MCP<small>LOCAL TOOLS · GATEWAY</small></div>
     <div class="spacer"></div>
+    <label class="suite-theme"><span>Select theme</span><select id="suite-theme" aria-label="Color theme"><option value="night">Night</option><option value="day">Day</option><option value="bright-night">Bright Night</option><option value="ocean">Ocean</option><option value="plum">Plum</option><option value="bugs">Bugs Bunny</option><option value="daffy">Daffy Duck</option><option value="tweety">Tweety</option><option value="sylvester">Sylvester</option><option value="taz">Tasmanian Devil</option><option value="roadrunner">Road Runner</option></select></label>
     <span class="badge" id="ov-version">…</span>
-    <span class="badge">127.0.0.1 ONLY · LOCAL</span>
   </header>
 
   <aside class="sidebar">
@@ -514,20 +544,19 @@ ${WIDGET_HOST_CSS}
       <button class="navbtn hidden" data-nav="gateway"><i aria-hidden="true">⇄</i><span>Gateway</span><small aria-hidden="true">05</small></button>
       <button class="navbtn" data-nav="settings"><i aria-hidden="true">⚙</i><span>Settings</span><small aria-hidden="true">06</small></button>
     </nav>
-    <div class="foot"><b>LOCAL SESSION</b><br />MCP stdio + panel<br />127.0.0.1 only</div>
   </aside>
 
   <main class="host-screen">
     <section id="sec-overview">
       <h1>toolbox-mcp</h1>
-      <p class="sub">The server's front page: the tools it exposes to an agent, what it is doing right now, and the widgets it is wired to. Everything below is served by this machine.</p>
+      <p class="sub">Your tools, activity and connected widgets.</p>
 
       <div class="hero">
         <div class="hero-top">
           <div class="hero-mark">◈</div>
           <div class="hero-id">
             <h2><b>toolbox-mcp</b> · MCP server</h2>
-            <p id="ov-blurb">A local-first MCP server: crypto watch, Gmail announcer, resource monitor, Model Farm scoring, marketplace and gateway observability — over stdio, with this panel on the side.</p>
+            <p id="ov-blurb">Local tools and services for your MCP clients.</p>
           </div>
         </div>
         <div class="hero-facts" id="ov-facts"></div>
@@ -709,6 +738,15 @@ ${WIDGET_HOST_CSS}
 </div>
 
 <script>
+(function(){
+  var key='toolbox.mcp.appearance.theme', select=document.getElementById('suite-theme'), value='night';
+  try { value=localStorage.getItem(key)||'night' } catch(e) {}
+  if(['night','day','bright-night','ocean','plum','bugs','daffy','tweety','sylvester','taz','roadrunner'].indexOf(value)<0)value='night';
+  function apply(theme){if(document.documentElement)document.documentElement.dataset.theme=theme;select.value=theme}
+  apply(value);
+  select.addEventListener('change',function(){apply(select.value);try{localStorage.setItem(key,select.value)}catch(e){}});
+})();
+
 var mf = { scenario: 'now', search: '', taskFilter: '', min: null, max: null, submitted: false, showReds: false, timer: null, expanded: {}, install: {}, quants: {}, progressTimer: null, progressGeneration: 0, dlSamples: {}, listRequest: 0, runNowRequest: 0, runNowShown: false, view: null, prefsLoaded: false, prefsTimer: null, recent: [], notes: {}, noteDrafts: {}, installTarget: null }
 var lastResult = null
 
