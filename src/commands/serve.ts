@@ -44,6 +44,18 @@ export async function startServer(ctx: CommandContext, options: ServeOptions = {
   let boundPort = port
   const allowedHosts = new Set(['localhost','127.0.0.1','[::1]', host.toLowerCase()])
   const calls = new Map<string,{start:number;count:number}>()
+  let pendingDetection: ReturnType<typeof detect> | null = null
+  const catalogs = new Map<string, ReturnType<typeof loadCatalog>>()
+  const detectOnce = (): ReturnType<typeof detect> => {
+    if (!pendingDetection) { const pending = detect(ctx); pendingDetection = pending; void pending.finally(() => { if (pendingDetection === pending) pendingDetection = null }).catch(() => {}) }
+    return pendingDetection
+  }
+  const catalogOnce = (tasks: ReturnType<typeof parseTasks>): ReturnType<typeof loadCatalog> => {
+    const key = tasks ? [...tasks].sort().join(',') : '*'
+    let pending = catalogs.get(key)
+    if (!pending) { pending = loadCatalog(ctx, tasks ? { tasks } : {}); catalogs.set(key, pending); const active = pending; void pending.finally(() => { if (catalogs.get(key) === active) catalogs.delete(key) }).catch(() => {}) }
+    return pending
+  }
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     let target: URL
     try { target = new URL(scheme + '://' + request.headers.host) } catch { sendJson(response,403,{error:'Forbidden host'});return }
@@ -65,20 +77,20 @@ export async function startServer(ctx: CommandContext, options: ServeOptions = {
         return
       }
       if (path === '/api/profile') {
-        const machine = await detect(ctx)
+        const machine = await detectOnce()
         sendJson(response, 200, machine)
         return
       }
       if (path === '/api/catalog') {
         const tasks = parseTasks(url.searchParams.get('task') ?? undefined)
-        const { models, fromCache } = await loadCatalog(ctx, tasks ? { tasks } : {})
+        const { models, fromCache } = await catalogOnce(tasks)
         sendJson(response, 200, { fromCache, count: models.length, models })
         return
       }
       if (path === '/api/fit') {
         const scenario: FitScenario = parseScenario(url.searchParams.get('scenario') ?? undefined)
         const tasks = parseTasks(url.searchParams.get('task') ?? undefined)
-        const [machine, { models }] = await Promise.all([detect(ctx), loadCatalog(ctx, tasks ? { tasks } : {})])
+        const [machine, { models }] = await Promise.all([detectOnce(), catalogOnce(tasks)])
         const scored = sortForDisplay(scoreModels({ models, machine, scenario }))
         sendJson(response, 200, { scenario, count: scored.length, models: scored })
         return

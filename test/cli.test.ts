@@ -435,3 +435,19 @@ describe('cli shell', () => {
     assert.match(result.output, /Unknown command/)
   })
 })
+
+
+it('coalesces concurrent API machine and catalog requests', async () => {
+  const directory=mkdtempSync(join(tmpdir(),'llamafarm-coalesce-'))
+  const {startServer}=await import('../dist/index.js')
+  let detects=0,fetches=0
+  const delay=()=>new Promise(resolve=>setTimeout(resolve,80))
+  const ctx:any={deps:{detect:async()=>{detects++;await delay();return machine()},fetchCatalog:async()=>{fetches++;await delay();return [model()]},cachePath:join(directory,'cache.json')},args:parseArgs(['serve']),palette:createPalette(false),json:false,write:()=>{}}
+  const server=await startServer(ctx,{host:'127.0.0.1',port:0})
+  const base=`http://127.0.0.1:${server.port}`,headers={Authorization:`Bearer ${server.token}`}
+  try {
+    const responses=await Promise.all([fetch(base+'/api/fit',{headers}),fetch(base+'/api/fit',{headers}),fetch(base+'/api/profile',{headers})])
+    assert.ok(responses.every(response=>response.ok))
+    assert.equal(detects,1);assert.equal(fetches,1)
+  } finally {await server.close();rmSync(directory,{recursive:true,force:true})}
+})

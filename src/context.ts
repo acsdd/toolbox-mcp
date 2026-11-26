@@ -4,6 +4,9 @@
  * small helpers every command needs.
  */
 import { homedir } from 'node:os'
+import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs'
+import { dirname } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import {
   catalogCachePath,
@@ -11,7 +14,6 @@ import {
   fetchCatalog,
   isCatalogFresh,
   readCatalogCache,
-  writeCatalogCache,
   type CatalogModel,
   type DetectOptions,
   type ExecFileLike,
@@ -71,10 +73,17 @@ export async function loadCatalog(
   const now = ctx.deps.now?.() ?? Date.now()
 
   const wanted = options.tasks
-  const coversRequested = !wanted || (cached?.models ?? []).some((model) => wanted.includes(model.task))
+  const freshCache = cached && isCatalogFresh(cached, undefined, now) ? cached : null
+  let scope: '*' | string[] | null = null
+  if (freshCache) try {
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as { coverage?: unknown }
+    if (saved.coverage === '*') scope = '*'
+    else if (Array.isArray(saved.coverage) && saved.coverage.every(x => typeof x === 'string')) scope = saved.coverage
+  } catch { /* Older or unreadable cache: refetch rather than claim completeness. */ }
+  const coversRequested = scope === '*' || (Boolean(wanted) && Array.isArray(scope) && wanted!.every(task => scope!.includes(task)))
 
-  if (!options.refresh && cached && coversRequested && isCatalogFresh(cached, undefined, now)) {
-    return { models: filterTasks(cached.models, wanted), fromCache: true }
+  if (!options.refresh && freshCache && coversRequested) {
+    return { models: filterTasks(freshCache.models, wanted), fromCache: true }
   }
 
   const fetchImpl = ctx.deps.fetchCatalog ?? fetchCatalog
@@ -83,9 +92,26 @@ export async function loadCatalog(
     ...(options.perTask ? { perTask: options.perTask } : {})
   })
 
-  const otherTasks = (cached?.models ?? []).filter((model) => !wanted || !wanted.includes(model.task))
+  // Another task may have completed while the network request was in flight.
+  // Merge its latest valid coverage instead of overwriting it with a stale snapshot.
+  const current = readCatalogCache(path)
+  let currentScope: '*' | string[] | null = null
+  if (current && isCatalogFresh(current, undefined, now)) try {
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as { coverage?: unknown }
+    if (saved.coverage === '*') currentScope = '*'
+    else if (Array.isArray(saved.coverage) && saved.coverage.every(x => typeof x === 'string')) currentScope = saved.coverage
+  } catch { /* Treat unreadable coverage as unknown. */ }
+  const preserve = Boolean(wanted && current && currentScope)
+  const otherTasks = preserve ? current!.models.filter(model => !wanted!.includes(model.task)) : []
   const merged = [...otherTasks, ...fresh]
-  writeCatalogCache(path, merged, now)
+  const coverage = !wanted || (preserve && currentScope === '*') ? '*' : [...new Set([...(preserve && Array.isArray(currentScope) ? currentScope : []), ...wanted])]
+  // Preserved tasks retain their original age; a narrow refresh must not make
+  // unrelated cached tasks appear newly fetched.
+  const fetchedAt = preserve ? current!.fetchedAt : now
+  mkdirSync(dirname(path), { recursive: true })
+  const temp = path + '.' + randomUUID() + '.tmp'
+  try { writeFileSync(temp, JSON.stringify({ fetchedAt, models: merged, coverage }), { encoding: 'utf8', mode: 0o600, flag: 'wx' }); renameSync(temp,path) }
+  finally { rmSync(temp,{force:true}) }
   return { models: filterTasks(merged, wanted), fromCache: false }
 }
 
