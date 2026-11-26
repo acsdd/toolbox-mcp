@@ -291,3 +291,13 @@ describe('remote-server marketplace flow', () => {
     assert.ok(!services.installedWidgets().includes('cve-now'))
   })
 })
+
+
+it('blocks a private DNS rebind at socket connection time', async () => {
+  const { createPublicRemoteDispatcher } = await import('../dist/remote.js')
+  const resolver = ((_host: string, _opts: unknown, callback: (error: null, addresses: Array<{address:string;family:number}>) => void) => callback(null, [{address:'127.0.0.1',family:4}])) as never
+  const dispatcher = createPublicRemoteDispatcher(resolver)
+  try {
+    await assert.rejects(fetch('https://example.com/', { dispatcher, signal: AbortSignal.timeout(3000) } as never))
+  } finally { await dispatcher.destroy() }
+})

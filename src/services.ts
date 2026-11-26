@@ -60,7 +60,7 @@ import {
   type WidgetBundleEntry
 } from '@toolbox/widgets'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
@@ -1457,15 +1457,19 @@ export function createServices(options: ServicesOptions = {}) {
         const directory = mkdtempSync(join(tmpdir(), 'toolbox-mcp-'))
         const modelfilePath = join(directory, 'Modelfile')
         const runner = options.runOllama ?? runDefaultOllama
-        writeFileSync(modelfilePath, buildModelfile(plan.reference, { numGpu: input.offload }), 'utf8')
-        result = await runner(['create', plan.modelName, '--file', modelfilePath], shutdownController.signal)
-        if (!result.ok && isQuantTagRejection(result.output)) {
-          // The retry is new Ollama work; shutdown must not spawn a second child.
-          assertAccepting()
-          const fallback = latestReference(plan.reference)
-          writeFileSync(modelfilePath, buildModelfile(fallback, { numGpu: input.offload }), 'utf8')
+        try {
+          writeFileSync(modelfilePath, buildModelfile(plan.reference, { numGpu: input.offload }), 'utf8')
           result = await runner(['create', plan.modelName, '--file', modelfilePath], shutdownController.signal)
-          effectiveReference = fallback
+          if (!result.ok && isQuantTagRejection(result.output)) {
+            assertAccepting()
+            const fallback = latestReference(plan.reference)
+            writeFileSync(modelfilePath, buildModelfile(fallback, { numGpu: input.offload }), 'utf8')
+            result = await runner(['create', plan.modelName, '--file', modelfilePath], shutdownController.signal)
+            effectiveReference = fallback
+          }
+        } finally {
+          try { rmSync(directory, { recursive: true, force: true }) }
+          catch (error) { console.warn('Could not clean temporary Modelfile:', error) }
         }
       } else {
         const pull = options.pullModel ?? pullDefaultOllama

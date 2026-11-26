@@ -19,12 +19,12 @@ jobs:
 
       # Pin the sibling dependency so the same MCP commit always tests the
       # same widget source. Update this revision deliberately after validation;
-      # it must match the widget core the release was packaged with (0.2.2).
+      # it must match the widget core the release was packaged with (0.3.0).
       - name: Fetch widget core
         shell: bash
         run: |
           git clone https://github.com/acsdd/toolbox-widgets.git ../toolbox-widgets
-          git -C ../toolbox-widgets checkout --detach c126f0a4ef796ba4147bc343356156adfe0c646e
+          git -C ../toolbox-widgets checkout --detach a5db4973dc777b437d57faf1e9a86921b827b333
 
       - name: Install widget core deps
         run: npm install --omit=dev

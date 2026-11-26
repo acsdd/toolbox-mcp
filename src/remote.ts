@@ -5,6 +5,8 @@
  * The connection factory is injectable so tests never touch the network.
  */
 import { lookup } from 'node:dns/promises'
+import { lookup as lookupCallback } from 'node:dns'
+import { Agent } from 'undici'
 import { BlockList, isIP } from 'node:net'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -251,12 +253,30 @@ export function remoteClientInfo(): { name: string; version: string } {
   return { name: 'toolbox-mcp', version: appVersion() }
 }
 
+export function createPublicRemoteDispatcher(resolver: typeof lookupCallback = lookupCallback): Agent {
+  return new Agent({ connect: { lookup(host, opts, callback) {
+    resolver(host, { all: true, verbatim: true }, (error, addresses) => {
+      if (error) { callback(error, '', 4); return }
+      if (!addresses.length || addresses.some(item => !isPublicAddress(item.address))) {
+        callback(new Error('Remote host resolved to a private or reserved address.'), '', 4); return
+      }
+      if (opts.all) callback(null, addresses)
+      else callback(null, addresses[0].address, addresses[0].family)
+    })
+  } } })
+}
+
 /** Default factory: a real MCP client over streamable HTTP, public HTTPS only. */
 export const connectRemote: RemoteConnect = async (endpoint, signal) => {
   const url = await assertRemoteEndpointAllowed(endpoint, {}, signal)
   signal?.throwIfAborted()
   const client = new Client(remoteClientInfo())
-  const transport = new StreamableHTTPClientTransport(url)
+  // Resolve again at connection time and pass only validated answers to the
+  // socket, closing the DNS-rebinding gap between the preflight and the fetch.
+  const dispatcher = createPublicRemoteDispatcher()
+  const transport = new StreamableHTTPClientTransport(url, {
+    fetch: (input, init) => fetch(input, { ...init, dispatcher } as unknown as RequestInit)
+  })
   // Client.connect accepts a request signal in SDK 1.32, but closing the owned
   // transport is what aborts the underlying HTTP fetch and SSE stream. Observe
   // the underlying close even when the caller's deadline has already expired.
@@ -264,7 +284,7 @@ export const connectRemote: RemoteConnect = async (endpoint, signal) => {
   const closeTransport = (): Promise<void> => {
     if (!transportClose) {
       try {
-        transportClose = Promise.resolve(transport.close())
+        transportClose = Promise.resolve(transport.close()).finally(() => dispatcher.destroy())
       } catch (cause) {
         transportClose = Promise.reject(cause)
       }
@@ -315,7 +335,7 @@ export const connectRemote: RemoteConnect = async (endpoint, signal) => {
       undefined,
       { signal: requestSignal }
     ),
-    close: () => client.close()
+    close: async () => { try { await client.close() } finally { await dispatcher.destroy() } }
   }
 }
 
