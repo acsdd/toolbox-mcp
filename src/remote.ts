@@ -286,7 +286,7 @@ export const connectRemote: RemoteConnect = async (endpoint, signal) => {
       try {
         transportClose = Promise.resolve(transport.close()).finally(() => dispatcher.destroy())
       } catch (cause) {
-        transportClose = Promise.reject(cause)
+        transportClose = Promise.resolve(dispatcher.destroy()).then(() => { throw cause })
       }
       void transportClose.catch(() => {})
     }
