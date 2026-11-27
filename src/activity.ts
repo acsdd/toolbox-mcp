@@ -19,6 +19,7 @@ export interface ActivitySnapshot {
   calls: ToolCall[]
   total: number
   failed: number
+  recent: number
   perTool: { tool: string; calls: number; failed: number; lastAt: number | null }[]
 }
 
@@ -30,13 +31,23 @@ export interface Activity {
 }
 
 const MAX_CALLS = 60
+const CONTROL_CHARS = new RegExp('[\\u0000-\\u001f\\u007f]', 'g')
+
+function sanitizeError(error: string | null): string | null {
+  if (error == null) return null
+  const text = String(error)
+    .replace(CONTROL_CHARS, ' ')
+    .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [redacted]')
+    .trim()
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text
+}
 
 export function createActivity(attached: boolean): Activity {
   const calls: ToolCall[] = []
   const counters = new Map<string, { calls: number; failed: number; lastAt: number | null }>()
 
   function record(tool: string, ok: boolean, ms: number, error: string | null = null): void {
-    const call: ToolCall = { tool, at: Date.now(), ok, ms, error }
+    const call: ToolCall = { tool, at: Date.now(), ok, ms, error: sanitizeError(error) }
     calls.push(call)
     if (calls.length > MAX_CALLS) calls.shift()
     const counter = counters.get(tool) ?? { calls: 0, failed: 0, lastAt: null }
@@ -47,14 +58,14 @@ export function createActivity(attached: boolean): Activity {
   }
 
   function snapshot(): ActivitySnapshot {
+    const entries = [...counters.entries()].map(([tool, counter]) => ({ tool, ...counter }))
     return {
       attached,
       calls: [...calls].reverse(),
-      total: calls.length,
-      failed: calls.filter((call) => !call.ok).length,
-      perTool: [...counters.entries()]
-        .map(([tool, counter]) => ({ tool, ...counter }))
-        .sort((a, b) => b.calls - a.calls || a.tool.localeCompare(b.tool))
+      total: entries.reduce((sum, entry) => sum + entry.calls, 0),
+      failed: entries.reduce((sum, entry) => sum + entry.failed, 0),
+      recent: calls.length,
+      perTool: entries.sort((a, b) => b.calls - a.calls || a.tool.localeCompare(b.tool))
     }
   }
 

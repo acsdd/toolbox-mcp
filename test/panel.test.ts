@@ -434,7 +434,7 @@ describe('panel tool catalog', () => {
     const data = JSON.parse(reply.body) as {
       server: { name: string; version: string; transport: string; panel: string; repo: string }
       groups: { id: string; label: string; icon: string; hint: string }[]
-      tools: { name: string; group: string; description: string; params: { name: string; required: boolean }[] }[]
+      tools: { name: string; group: string; description: string; params: { name: string; required: boolean }[]; annotations?: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean } }[]
     }
     assert.equal(data.server.name, 'toolbox-mcp')
     assert.match(data.server.version, /^\d+\.\d+\.\d+/)
@@ -454,6 +454,18 @@ describe('panel tool catalog', () => {
       data.tools.map((tool) => tool.name).sort(),
       TOOL_CATALOG.map((tool) => tool.name).sort()
     )
+    const system = data.tools.find((tool) => tool.name === 'system_stats')
+    assert.deepEqual(system?.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
+  })
+
+  it('serves the deterministic tool contract for local diagnostics', async () => {
+    const reply = await ask({ path: '/api/tool-contract' })
+    assert.equal(reply.status, 200)
+    const data = JSON.parse(reply.body) as { schemaVersion: number; service: string; tools: { name: string }[] }
+    assert.equal(data.schemaVersion, 1)
+    assert.equal(data.service, 'toolbox-mcp')
+    const { TOOL_CATALOG } = await import('../dist/catalog.js')
+    assert.deepEqual(data.tools.map((tool) => tool.name).sort(), TOOL_CATALOG.map((tool) => tool.name).sort())
   })
 
   it('adds connected remote tools with their real names and parameters, then removes them', async () => {
@@ -496,6 +508,7 @@ describe('panel tool catalog', () => {
       return JSON.parse(reply.body).tools as Array<{
         name: string; group: string; description: string
         params: Array<{ name: string; type: string; required: boolean; description: string }>
+        annotations: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean }
       }>
     }
     try {
@@ -509,7 +522,8 @@ describe('panel tool catalog', () => {
         params: [
           { name: 'name', type: 'string', required: true, description: 'Feed name' },
           { name: 'limit', type: 'integer', required: false, description: 'Maximum results' }
-        ]
+        ],
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
       })
       await remoteServices.marketplaceUninstall('cve-now')
       assert.equal((await catalog()).some((tool) => tool.name === 'cve_now_list_feed'), false)
@@ -546,6 +560,23 @@ describe('panel tool catalog', () => {
     assert.equal(data.attached, false)
     assert.equal(data.total, 0)
     assert.deepEqual(data.calls, [])
+  })
+})
+
+describe('panel error sanitization', () => {
+  it('does not leak internal error messages from generic panel faults', async () => {
+    const broken = { ...services, resourceStats: async () => { throw new Error('secret internal path D:/private') } }
+    const scoped = await startPanel(broken as typeof services, { port: 0 })
+    try {
+      const reply = await ask({ port: scoped.port, path: '/api/overview' })
+      assert.equal(reply.status, 500)
+      const data = JSON.parse(reply.body) as { error: string }
+      assert.equal(data.error, 'Internal panel error.')
+      assert.equal(reply.body.includes('secret internal path'), false)
+      assert.equal(reply.body.includes('D:/private'), false)
+    } finally {
+      await scoped.close()
+    }
   })
 })
 
@@ -588,6 +619,22 @@ describe('panel activity recorder', () => {
     } finally {
       await attached.close()
     }
+  })
+
+  it('reports lifetime totals beyond the ring buffer and bounds error text', async () => {
+    const { createActivity } = await import('../dist/activity.js')
+    const activity = createActivity(true)
+    for (let i = 0; i < 70; i += 1) activity.record('system_stats', true, 1)
+    activity.record('gmail_check', false, 2, 'Bearer secret-token-value ' + 'x'.repeat(400))
+    const snapshot = activity.snapshot()
+    assert.equal(snapshot.total, 71)
+    assert.equal(snapshot.failed, 1)
+    assert.equal(snapshot.recent, 60)
+    const failed = snapshot.calls.find((call) => !call.ok)
+    assert.ok(failed)
+    assert.ok(failed.error!.length <= 201)
+    assert.equal(failed.error!.includes('secret-token-value'), false)
+    assert.equal(failed.error!.includes('Bearer [redacted]'), true)
   })
 })
 

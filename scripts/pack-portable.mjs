@@ -24,6 +24,7 @@ function run(script, args, cwd = root) {
 
 run(join(root, 'node_modules/typescript/bin/tsc'), ['-p', join(widgets, 'tsconfig.json')], widgets)
 run(join(root, 'node_modules/typescript/bin/tsc'), ['-p', join(root, 'tsconfig.json')])
+run(join(root, 'scripts/export-tool-contract.mjs'))
 
 // Stage outside the workspace to avoid editor locks on Electron/ASAR files.
 const stage = await mkdtemp(join(tmpdir(), 'modelfarm-portable-'))
@@ -83,6 +84,7 @@ await writeFile(join(appDir, 'package.json'), JSON.stringify({
     directories: { output: buildDir },
     files: [
       'dist/**/*.js',
+      'dist/tool-contract.json',
       'scripts/desktop.cjs',
       'scripts/desktop-main.cjs',
       'package.json'

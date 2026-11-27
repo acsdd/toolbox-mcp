@@ -30,10 +30,11 @@
   },
   "files": [
     "dist/**/*.js",
+    "dist/tool-contract.json",
     "scripts"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/export-tool-contract.mjs",
     "start": "npm run build && node dist/index.js",
     "panel": "npm run build && node dist/panel.js",
     "portable": "node scripts/pack-portable.mjs",

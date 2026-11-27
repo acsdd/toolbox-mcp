@@ -14,6 +14,8 @@ import { createTerminal, type Terminal } from './terminal.js'
 import { TOOL_GROUPS, catalogEntries, schemaParams } from './catalog.js'
 import { createActivity, type Activity } from './activity.js'
 import { appVersion } from './version.js'
+import { proxiedToolAnnotations } from './remote.js'
+import { buildToolContract } from './tool-contract.js'
 import { createShutdown, watchShutdownSignals, watchStartup } from './lifecycle.js'
 
 const PANEL_PORT = Number(process.env.TOOLBOX_MCP_PORT ?? 3851)
@@ -979,8 +981,14 @@ function renderTools() {
         return '<span class="param' + (p.required ? ' req' : '') + '"><i>' + esc(p.name) + '</i> · ' +
           esc(p.type) + (p.required ? ' · required' : '') + (p.description ? ' — ' + esc(p.description) : '') + '</span>'
       }).join('')
+      var hints = tool.annotations ? '<div class="params">' +
+        (tool.annotations.readOnlyHint ? '<span class="param">read-only</span>' : '') +
+        (tool.annotations.destructiveHint ? '<span class="param req">destructive</span>' : '') +
+        (tool.annotations.idempotentHint ? '<span class="param">idempotent</span>' : '') +
+        (tool.annotations.openWorldHint ? '<span class="param">open-world</span>' : '') +
+        '</div>' : ''
       return '<div class="tool"><b>' + esc(tool.name) + '</b><p>' + esc(tool.description) + '</p>' +
-        (params ? '<div class="params">' + params + '</div>' : '') + '</div>'
+        (params ? '<div class="params">' + params + '</div>' : '') + hints + '</div>'
     }).join('')
     html += '<div class="tool-group"><h3><i>' + esc(group.icon) + '</i> ' + esc(group.label) +
       '<small>' + tools.length + ' tool' + (tools.length === 1 ? '' : 's') + ' · ' + esc(group.hint) + '</small></h3>' + rows + '</div>'
@@ -1000,7 +1008,8 @@ function renderActivity() {
     return
   }
   var calls = Array.isArray(snapshot.calls) ? snapshot.calls : []
-  document.getElementById('ov-act-count').textContent = (snapshot.total || 0) + ' call' + ((snapshot.total || 0) === 1 ? '' : 's')
+  document.getElementById('ov-act-count').textContent = (snapshot.total || 0) + ' call' + ((snapshot.total || 0) === 1 ? '' : 's') +
+    (typeof snapshot.recent === 'number' && snapshot.recent !== snapshot.total ? ' · recent ' + snapshot.recent : '')
   if (!calls.length) {
     box.innerHTML = '<div class="act-note">No calls yet. An agent is connected but has not called a tool.</div>'
     return
@@ -2605,6 +2614,11 @@ const SECURITY_HEADERS: Record<string, string> = {
   'X-Frame-Options': 'DENY'
 }
 
+function safeErrorType(error: unknown): string {
+  const value = (error as { name?: unknown })?.name
+  return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value) ? value : 'Error'
+}
+
 function send(res: ServerResponse, status: number, body: string, type = 'application/json'): void {
   res.writeHead(status, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-store', ...SECURITY_HEADERS })
   res.end(body)
@@ -2776,10 +2790,15 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
                 name: tool.name,
                 group: 'remote' as const,
                 description: tool.description,
-                params: schemaParams(tool.inputSchema)
+                params: schemaParams(tool.inputSchema),
+                annotations: proxiedToolAnnotations(tool.annotations)
               }))
             ]
           }))
+          return
+        }
+        if (req.method === 'GET' && url.pathname === '/api/tool-contract') {
+          send(res, 200, JSON.stringify(buildToolContract(appVersion())))
           return
         }
         if (req.method === 'GET' && url.pathname === '/api/activity') {
@@ -3044,7 +3063,8 @@ export function startPanel(services: Services, options: PanelOptions = {}): Prom
           send(res, cause.status, JSON.stringify({ error: cause.message }))
           return
         }
-        send(res, 500, JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) }))
+        console.error(JSON.stringify({ event: 'panel_error', error_type: safeErrorType(cause) }))
+        send(res, 500, JSON.stringify({ error: 'Internal panel error.' }))
       }
     })()
   })

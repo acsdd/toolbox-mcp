@@ -392,6 +392,7 @@ export interface CatalogEntry {
   group: ToolGroupId
   description: string
   params: ToolParam[]
+  annotations: ToolAnnotations
 }
 
 interface JsonSchemaProperty {
@@ -444,6 +445,7 @@ export function catalogEntries(): CatalogEntry[] {
     name: spec.name,
     group: spec.group,
     description: spec.description,
-    params: toolParams(spec)
+    params: toolParams(spec),
+    annotations: spec.annotations
   }))
 }
