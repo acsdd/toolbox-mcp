@@ -155,13 +155,13 @@ describe('panel accessibility', () => {
     assert.match(reply.body, /heading\.focus\(\{ preventScroll: true \}\)/)
     // Links get the same visible ring as controls; the browser default is
     // near-black and disappears against the dark panel.
-    assert.match(reply.body, /a:focus-visible \{ outline: 1px solid var\(--accent\); outline-offset: 2px; \}/)
+    assert.match(reply.body, /a:focus-visible \{ outline: 2px solid var\(--accent\); outline-offset: 3px; \}/)
   })
 
   it('keeps a visible keyboard focus ring on the terminal prompt', async () => {
     const reply = await ask({ path: '/' })
     assert.doesNotMatch(reply.body, /\.term-line input:focus \{[^}]*outline:\s*none/)
-    assert.match(reply.body, /\.term-line input:focus-visible \{[^}]*outline:\s*1px solid var\(--accent\);[^}]*outline-offset:\s*2px/)
+    assert.match(reply.body, /\.term-line input:focus-visible \{[^}]*outline:\s*2px solid var\(--accent\);[^}]*outline-offset:\s*3px/)
   })
 
   it('labels search fields and keeps toggle state on the scenario buttons', async () => {
