@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.log
+
+# The archive holds a TLS private key for the public domain — never commit it.
+*.zip
+*.key
+*.cer
+*.pem
+
+# Superseded design reference (Figma export) moved to .archive; never committed.
+.archive/
