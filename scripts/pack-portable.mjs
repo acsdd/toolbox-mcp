@@ -16,7 +16,7 @@ const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 const widgetManifest = JSON.parse(await readFile(join(widgets, 'package.json'), 'utf8'))
 const electron = JSON.parse(await readFile(join(toolchain, 'node_modules/electron/package.json'), 'utf8'))
 
-function run(script, args, cwd = root) {
+function run(script, args = [], cwd = root) {
   const result = spawnSync(process.execPath, [script, ...args], { cwd, stdio: 'inherit' })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`${script} exited with code ${result.status}`)
