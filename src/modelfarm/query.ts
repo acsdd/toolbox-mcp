@@ -95,10 +95,17 @@ export function scoreAndGroupModels(input: {
   runtime?: QuerySnapshot['runtime']
   score?: QuerySnapshot['score']
 }): ModelQueryResult {
-  const query = 'hideUnreachable' in (input.query ?? {})
-    ? input.query as NormalizedModelQuery
+  const query: NormalizedModelQuery = 'hideUnreachable' in (input.query ?? {})
+    ? {
+        ...input.query as NormalizedModelQuery,
+        tasks: [...(input.query as NormalizedModelQuery).tasks],
+        formats: [...(input.query as NormalizedModelQuery).formats],
+        runtime: { ...(input.query as NormalizedModelQuery).runtime }
+      }
     : normalizeModelQuery(input.query)
-  if (input.runtime && !input.query) query.runtime = { ...input.runtime }
+  // The explicit snapshot runtime is authoritative when supplied; otherwise
+  // preserve the runtime already selected by the query.
+  if (input.runtime) query.runtime = { ...input.runtime }
   const scored = (input.score ?? scoreModels)({
     models: [...input.models],
     machine: input.machine,

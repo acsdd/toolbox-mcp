@@ -1,7 +1,9 @@
 /** Node adapters for the Electron-free Model Farm domain. */
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
-import { probeOllamaCli, type ExecFileLike, type PullResult } from '@toolbox/widgets'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { buildModelfile, probeOllamaCli, type ExecFileLike, type PullResult } from '@toolbox/widgets'
 import { writeAtomic } from '../config.js'
 import { pullIntoOwnedOllama, runOwnedOllamaCommand, type OllamaSpawnLike } from '../ollama-process.js'
 import {
@@ -45,6 +47,7 @@ export interface ModelFarmRuntimeAdaptersOptions {
   runOllama?: (args: string[], signal?: AbortSignal) => Promise<PullResult>
   spawnOllamaImpl?: OllamaSpawnLike
   onShutdownError?: (cause: unknown) => void
+  runtimeStatus?: (id: string) => ReturnType<RuntimePort['status']>
 }
 
 /** Adapt the existing runtime/download/process helpers; no parallel implementation. */
@@ -84,7 +87,31 @@ export function createRuntimePort(options: ModelFarmRuntimeAdaptersOptions = {})
       } catch (cause) { return remember(cause) }
     }),
     startServer: (descriptor, path, startOptions) => startServerRuntime(descriptor, path, { ...runtimeOptions, ...startOptions }),
-    providerBaseUrl
+    providerBaseUrl,
+    status: (id) => options.runtimeStatus?.(id) ?? null,
+    async createModelfile(reference, offload) {
+      const directory = await mkdtemp(join(tmpdir(), 'toolbox-mcp-'))
+      const path = join(directory, 'Modelfile')
+      try {
+        await writeFile(path, buildModelfile(reference, { numGpu: offload }), 'utf8')
+      } catch (cause) {
+        await rm(directory, { recursive: true, force: true }).catch(() => {})
+        throw cause
+      }
+      return { path, cleanup: () => rm(directory, { recursive: true, force: true }) }
+    }
+  }
+}
+
+export function createNodeMigrationIo(): import('./ports.js').MigrationPort {
+  return {
+    async readJson(path) {
+      try { return JSON.parse(await readFile(path, 'utf8')) as unknown }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException)?.code === 'ENOENT') return null
+        throw cause
+      }
+    }
   }
 }
 

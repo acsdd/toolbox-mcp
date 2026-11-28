@@ -169,4 +169,31 @@ describe('canonical scoring grouping and limits', () => {
     })
     assert.deepEqual(result.groups.map((group) => group.task), ['text-generation', 'text-to-image'])
   })
+
+  it('does not mutate or alias a caller-owned normalized query', () => {
+    const query = normalizeModelQuery({ defaultFormats: ['gguf'], runtime: 'ollama' })
+    const before = structuredClone(query)
+    const result = scoreAndGroupModels({
+      models: [model('text')],
+      machine: machine(),
+      query,
+      runtime: { id: 'lmstudio', api: 'openai' }
+    })
+    assert.deepEqual(query, before)
+    assert.notEqual(result.query, query)
+    assert.notEqual(result.query.tasks, query.tasks)
+    assert.notEqual(result.query.formats, query.formats)
+    assert.notEqual(result.query.runtime, query.runtime)
+    assert.deepEqual(result.query.runtime, { id: 'lmstudio', api: 'openai' })
+  })
+
+  it('uses an explicit snapshot runtime over a query runtime', () => {
+    const result = scoreAndGroupModels({
+      models: [model('text')],
+      machine: machine(),
+      query: { runtime: 'ollama', defaultFormats: ['gguf'] },
+      runtime: { id: 'kobold', api: 'kobold' }
+    })
+    assert.deepEqual(result.query.runtime, { id: 'kobold', api: 'kobold' })
+  })
 })

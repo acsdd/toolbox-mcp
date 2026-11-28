@@ -7,6 +7,7 @@ import type {
   MachineProfile,
   ModelFormat,
   ModelTask,
+  OllamaInstallPlan,
   ScoredModel,
   ScoreRuntime,
   SetupGrade
@@ -125,11 +126,15 @@ export interface CatalogLoadResult {
   error: string | null
 }
 
-export interface InstallProjection {
-  reference: string
-  modelName: string
+export interface InstallProjection extends OllamaInstallPlan {
   runtimeRamBytes: number
-  steps: string[]
+}
+
+export interface ModelFarmMigrationInput {
+  legacyPreferencesPath: string
+  legacyCatalogPath: string
+  /** Explicit data-root selection; paths are never shared between installations. */
+  location: 'installed' | 'portable'
 }
 
 export interface ModelExplainResult {
@@ -308,4 +313,11 @@ export interface ModelFarmMigrationResult {
   legacyPreferencesPath: string
   legacyCatalogPath: string
   migrated: boolean
+}
+
+export interface ModelFarmPolicy {
+  formats: readonly ModelFormat[]
+  perTask: number
+  visibility: 'reachable' | 'all'
+  defaultScenario: FitScenario
 }

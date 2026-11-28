@@ -11,8 +11,8 @@ import type {
   PullResult,
   ScoreRuntime
 } from '@toolbox/widgets'
-import type { DownloadFn, GgufFile, RuntimeDescriptor, RuntimeInstallOptions, RuntimeInstallResult, ServerStartOptions, ServerStartResult } from '../runtimes.js'
-import type { CatalogLoadRequest, CatalogLoadResult, ModelFarmPreferences } from './contracts.js'
+import type { DownloadFn, GgufFile, RuntimeDescriptor, RuntimeInstallOptions, RuntimeInstallResult, RuntimeStatus, ServerStartOptions, ServerStartResult } from '../runtimes.js'
+import type { CatalogLoadRequest, CatalogLoadResult, CatalogScope, ModelFarmPreferences } from './contracts.js'
 
 export interface MachinePort {
   detect(options?: DetectOptions): Promise<MachineProfile>
@@ -26,7 +26,9 @@ export interface CatalogPort {
 }
 
 export interface CachePort {
+  readonly path: string
   load(request: CatalogLoadRequest): Promise<CatalogLoadResult>
+  migrate(legacyFiles: readonly string[], scope: CatalogScope): Promise<boolean>
 }
 
 export interface InventoryPort {
@@ -51,6 +53,8 @@ export interface RuntimePort {
   run(args: string[], signal?: AbortSignal): Promise<PullResult>
   startServer(descriptor: RuntimeDescriptor, path: string, options?: ServerStartOptions): Promise<ServerStartResult>
   providerBaseUrl(runtime: { api: RuntimeDescriptor['api']; baseUrl: string | null }): string | null
+  status(id: string): RuntimeStatus | null
+  createModelfile(reference: string, offload: number): Promise<{ path: string; cleanup(): Promise<void> }>
 }
 
 export interface SettingsPort {
@@ -75,6 +79,10 @@ export interface LifecyclePort {
   rememberShutdownError(cause: unknown): void
 }
 
+export interface MigrationPort {
+  readJson(path: string): Promise<unknown>
+}
+
 export interface ModelFarmPorts {
   machine: MachinePort
   catalog: CatalogPort
@@ -82,6 +90,7 @@ export interface ModelFarmPorts {
   inventory: InventoryPort
   runtime: RuntimePort
   settings: SettingsPort
+  migration: MigrationPort
   lifecycle: LifecyclePort
   tasks?: readonly ModelTask[]
   scoreRuntime?: ScoreRuntime
