@@ -29,7 +29,8 @@
     "start": "node dist/cli.js"
   },
   "dependencies": {
-    "@toolbox/widgets": "file:../toolbox-widgets"
+    "@toolbox/widgets": "file:../../../toolbox-widgets",
+    "toolbox-mcp": "file:../.."
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
