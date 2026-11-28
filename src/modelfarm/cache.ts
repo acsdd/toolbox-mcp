@@ -28,6 +28,7 @@ export type CatalogFetcher = (options: { tasks?: ModelTask[]; formats?: ModelFor
 
 export interface CatalogCache {
   load(request: CatalogLoadRequest, fetch: CatalogFetcher): Promise<CatalogLoadResult>
+  migrate(legacyFiles: readonly string[], scope: CatalogScope): Promise<boolean>
   /** The canonical document path; the caller-visible path keeps its name. */
   readonly path: string
 }
@@ -77,6 +78,12 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
   let document: CatalogCacheDocument = { version: CANONICAL_VERSION, buckets: {} }
   let legacyModels: CatalogModel[] = []
   let publication: Promise<void> = Promise.resolve()
+
+  function enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = publication.then(operation)
+    publication = result.then(() => undefined, () => undefined)
+    return result
+  }
 
   function matchesScope(bucket: CatalogCacheBucket, request: CatalogLoadRequest): boolean {
     if (bucket.runtime !== request.runtime) return false
@@ -166,7 +173,7 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
       }
     }
 
-    const published = await publish(request, targetTasks, fullCoverage, fetchedModels, started, hydrated)
+    const published = await publish(request, targetTasks, fullCoverage, fetchedModels, started)
     return {
       models: published.bucket.models,
       fetchedAt: published.bucket.fetchedAt,
@@ -219,10 +226,22 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
     targetTasks: ModelTask[],
     fullCoverage: boolean,
     fetchedModels: CatalogModel[],
-    started: Array<{ task: ModelTask | null; tasks?: ModelTask[]; fetchedAt: number }>,
-    hydrated: CatalogCacheDocument
+    started: Array<{ task: ModelTask | null; tasks?: ModelTask[]; fetchedAt: number }>
   ): Promise<{ bucket: CatalogCacheBucket; error: string | null }> {
-    const buckets = new Map(Object.entries(hydrated.buckets))
+    // Publication is serialized and re-reads the latest document to merge
+    // task buckets written while the provider request was in flight.
+    return enqueue(() => publishLocked(request, targetTasks, fullCoverage, fetchedModels, started))
+  }
+
+  async function publishLocked(
+    request: CatalogLoadRequest,
+    targetTasks: ModelTask[],
+    fullCoverage: boolean,
+    fetchedModels: CatalogModel[],
+    started: Array<{ task: ModelTask | null; tasks?: ModelTask[]; fetchedAt: number }>
+  ): Promise<{ bucket: CatalogCacheBucket; error: string | null }> {
+    const latest = await hydrate(request)
+    const buckets = new Map(Object.entries(latest.buckets))
     const scopeMatches = (bucket: CatalogCacheBucket) => matchesScope(bucket, request)
 
     const stampByTask = new Map<ModelTask, number>()
@@ -313,7 +332,7 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
     return uniqueModels([...kept, ...fetched])
   }
 
-  async function hydrate(request: CatalogLoadRequest): Promise<CatalogCacheDocument> {
+  async function hydrate(request: CatalogLoadRequest, legacyFiles: readonly string[] = legacyPaths): Promise<CatalogCacheDocument> {
     const raw = await io.read(canonicalPath)
     if (raw) {
       try {
@@ -327,7 +346,7 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
       }
     }
 
-    const legacy = await readLegacyDocument(request)
+    const legacy = await readLegacyDocument(request, legacyFiles)
     legacyModels = legacy.models
     if (!legacy.bucket) {
       document = { version: CANONICAL_VERSION, buckets: {} }
@@ -343,8 +362,8 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
     return document
   }
 
-  async function readLegacyDocument(request: CatalogLoadRequest): Promise<{ bucket: CatalogCacheBucket | null; models: CatalogModel[] }> {
-    for (const legacyPath of legacyPaths) {
+  async function readLegacyDocument(request: CatalogLoadRequest, legacyFiles: readonly string[] = legacyPaths): Promise<{ bucket: CatalogCacheBucket | null; models: CatalogModel[] }> {
+    for (const legacyPath of new Set(legacyFiles)) {
       const raw = await io.read(legacyPath)
       if (!raw) continue
       let parsed: { version?: unknown; fetchedAt?: number; coverage?: unknown; models?: unknown } | null = null
@@ -388,5 +407,14 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
     await io.write(canonicalPath, JSON.stringify(next))
   }
 
-  return { load, path: canonicalPath }
+  async function migrate(legacyFiles: readonly string[], scope: CatalogScope): Promise<boolean> {
+    const request: CatalogLoadRequest = { ...scope, formats: [...scope.formats] }
+    return enqueue(async () => {
+      const before = await io.read(canonicalPath).catch(() => null)
+      const imported = await hydrate(request, legacyFiles)
+      return !before && Object.keys(imported.buckets).length > 0
+    })
+  }
+
+  return { load, migrate, path: canonicalPath }
 }
